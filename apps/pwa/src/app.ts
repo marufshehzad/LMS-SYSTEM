@@ -48,6 +48,8 @@ import { AcademicView } from './academic-view.ts';
 import { PublishView } from './publish-view.ts';
 import { InvoiceView } from './invoice-view.ts';
 import { AdminSettingsView } from './admin-settings-view.ts';
+// P11. The school's own copy of its own data.
+import { ExportView } from './export-view.ts';
 import { RolloverView } from './rollover-view.ts';
 import { UsersView } from './users-view.ts';
 import { StaffAttendanceView } from './staff-attendance-view.ts';
@@ -681,6 +683,7 @@ async function main() {
               { path: 'students', glyph: 'search', titleBn: 'শিক্ষার্থী খুঁজুন', subtitleBn: 'স্থায়ী আইডি বা নাম — বছরওয়ারি পূর্ণ ইতিহাসসহ' },
               { path: 'calendar', glyph: 'calendar', titleBn: 'শিক্ষাপঞ্জি', subtitleBn: 'ছুটি, পরীক্ষা ও অনুষ্ঠান — সব ভূমিকার জন্য' },
               { path: 'audit', glyph: 'lock', titleBn: 'কার্যবিবরণী', subtitleBn: 'কে কখন কী পরিবর্তন করেছেন — শুধু পড়ার জন্য' },
+              { path: 'export', glyph: 'download', titleBn: 'তথ্য রপ্তানি', subtitleBn: 'শিক্ষার্থীর তালিকা CSV ফাইলে — এক্সেলে খোলে' },
               { path: 'branding', glyph: 'star', titleBn: 'প্রতিষ্ঠানের পরিচয়', subtitleBn: 'নাম, লোগো, রং ও ছাপা কাগজের শীর্ষভাগ' },
               { path: 'system', glyph: 'settings', titleBn: 'সিস্টেম ও ইন্টিগ্রেশন', subtitleBn: 'ওয়ার্কার · কিল-সুইচ · অদৃশ্য গ্যারান্টি' },
             ],
@@ -1118,6 +1121,15 @@ async function main() {
         glyph: 'lock',
         hidden: true,
         mount: (container) => { new AuditView({ root: container, doc: document, auth }); },
+      },
+      {
+        path: 'export',
+        labelBn: 'তথ্য রপ্তানি',
+        glyph: 'download',
+        hidden: true,
+        mount: (container) => {
+          new ExportView({ root: container, doc: document, auth });
+        },
       },
       {
         path: 'adminsettings',

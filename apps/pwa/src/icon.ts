@@ -111,6 +111,12 @@ const PATHS: Record<string, string> = {
   // means "open a menu that is not there", and this sidebar never leaves.
   'panel-left':
     '<rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/>',
+  // P11. The export action. Added rather than borrowed: no existing glyph
+  // here means "this produces a file you keep", and the fallback dot on the
+  // one button of a new screen is the button looking broken.
+  'download':
+    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+    + '<polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
 };
 
 /** A stable fallback so an unknown name renders a neutral dot, never blank. */

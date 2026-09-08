@@ -1,0 +1,291 @@
+/**
+ * GET /api/v1/academics/export?dataset=students — data portability.  (P11)
+ *
+ * The Master Plan's whole statement of P11 is one sentence: *"portability.
+ * Data export, which does not exist in any form today and is the clearest
+ * customer-trust gap."* Until this file, the only file this product ever
+ * handed a school was the error list from a FAILED import — a list of their
+ * own mistakes, and nothing else.
+ *
+ * ── The contract, decided before any of it was written ──────────────────
+ * A streamed CSV per dataset, not one archive. Three reasons, all from this
+ * repository rather than from preference:
+ *
+ *   1. Object storage is stubbed (B-17) and returns 503. An archive has to
+ *      be assembled somewhere, and the only honest somewhere today is
+ *      memory. Adding a storage provider to make export "look complete" is
+ *      exactly what the brief forbids.
+ *   2. Nothing in the Master Plan asks for an archive. It asks for export.
+ *   3. A CSV opens in the software a Bangladeshi school office actually
+ *      runs. A zip of nine CSVs is one more step between a head teacher and
+ *      their data, and the step is where people stop.
+ *
+ * The offboarding case — "the school is leaving" — is served by a manifest
+ * over these same endpoints rather than by a second mechanism. Same rows,
+ * same authorization, one audit entry per dataset either way.
+ *
+ * ── Where the tenant comes from ─────────────────────────────────────────
+ * `claims.tid`, the signed token, and nowhere else. Not the query string,
+ * not the body, not a header, not the filename. This is the first feature
+ * whose output leaves as a file, so the isolation is worth stating: the
+ * query below has no tenant predicate at all — `withTenant` sets
+ * `app.current_tenant()` and RLS answers. A caller who forges a tenant id
+ * changes nothing, because nothing reads it.
+ */
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { sharedDb } from '../../../packages/server-core/src/db.ts';
+import { corsHeaders, query, json, HttpError } from '../../../packages/server-core/src/http.ts';
+import { authenticate, requireRole } from '../../../packages/server-core/src/auth.ts';
+import { writeAudit } from '../../../packages/server-core/src/audit.ts';
+import {
+  beginCsvDownload, writeCsvRow, csvFilename,
+} from '../../../packages/server-core/src/csv-response.ts';
+
+/**
+ * Who may export the institution.
+ *
+ * Narrower than who may READ the same rows on a screen, deliberately. A
+ * class teacher reads their own section's roster all day; that is their job.
+ * Taking the whole school out as a file is a different act with a different
+ * blast radius, and §22's answer is the head and the IT admin. Nobody gains
+ * data because export exists.
+ */
+const EXPORT_ROLES = ['principal', 'school_owner', 'it_admin'];
+
+/** Datasets this service owns. Others live in ops-svc and finance-svc. */
+const DATASETS = new Set(['students']);
+
+export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const cors = corsHeaders();
+  if (req.method === 'OPTIONS') { res.writeHead(204, cors); res.end(); return; }
+  if (req.method !== 'GET') { json(res, 405, { error: 'method_not_allowed' }, cors); return; }
+
+  try {
+    const claims = await authenticate(req);
+    requireRole(claims, EXPORT_ROLES);
+
+    const dataset = (query(req).get('dataset') ?? '').trim();
+    if (!DATASETS.has(dataset)) {
+      throw new HttpError(400,
+        'dataset must be one of: students', 'unknown_dataset');
+    }
+
+    const db = await sharedDb();
+    const actor = { tenantId: claims.tid, userId: claims.sub, role: claims.role };
+
+    await db.withTenant(actor, async (client) => {
+      const rows = await selectStudents(client);
+
+      // The head is written only after the query has succeeded. A failure
+      // before this point is a JSON error the browser can show; a failure
+      // after it is a truncated file — §27's "never a successful empty file
+      // when the query failed" is bought by this ordering, not by a check.
+      beginCsvDownload(res, cors, {
+        filename: csvFilename('students'),
+        headers: STUDENT_HEADERS,
+      });
+      for (const r of rows) writeCsvRow(res, studentRow(r));
+
+      // The count, never the contents. What the audit needs to answer later
+      // is "who took how much, and when" — the rows themselves are the one
+      // thing that must not be duplicated into a second table.
+      await writeAudit(client, actor, {
+        action: 'ops.data.export',
+        entityType: 'export',
+        after: { dataset, rows: rows.length },
+      });
+    });
+
+    res.end();
+  } catch (err) {
+    // If the head is already out, the status is fixed and a JSON body would
+    // be appended to a CSV. Ending the response is the only honest move
+    // left, and the truncation is what the school sees.
+    if (res.headersSent) { res.end(); return; }
+    if (err instanceof HttpError) {
+      json(res, err.status, { error: err.code, message: err.message }, cors);
+      return;
+    }
+    json(res, 500, { error: 'internal_error' }, cors);
+  }
+}
+
+/* ── students ─────────────────────────────────────────────────────────── */
+
+/**
+ * Column headings, in the school's own language.
+ *
+ * A head teacher opens this in Excel and has to recognise their school. No
+ * `user_id`, no `section_id`, no `tenant_id` — a uuid tells a school
+ * nothing and tells anyone who obtains the file something about our
+ * internals. The student's own code is the identifier that means something
+ * on both sides, and it is the one the school already prints on admit cards.
+ */
+const STUDENT_HEADERS = [
+  'শিক্ষার্থী আইডি',   // student_code — the school's own identifier
+  'নাম',
+  'নাম (ইংরেজি)',
+  'পিতার নাম',
+  'মাতার নাম',
+  'জন্ম তারিখ',
+  'লিঙ্গ',
+  'শ্রেণি',
+  'শাখা',
+  'রোল',
+  'শিফট',
+  'শিক্ষাবর্ষ',
+  'ভর্তির তারিখ',
+  'বোর্ড রেজিস্ট্রেশন',
+  'বোর্ড রোল',
+  'রক্তের গ্রুপ',
+  // TWO status columns, because there are two facts and they use different
+  // words. `enrolments.status` is active/transferred/left/promoted/detained;
+  // `student_profiles.lifecycle_status` is enrolled/promoted/transferred_out/
+  // dropped_out/graduated/alumni. The first draft COALESCEd them into one
+  // column, which meant a student with no current enrolment displayed their
+  // LIFECYCLE word under a heading every other row used for enrolment — the
+  // two vocabularies even share "promoted" with different meanings. A school
+  // reading that column could not tell which question it answered.
+  'ভর্তি অবস্থা',
+  'শিক্ষার্থীর অবস্থা',
+];
+
+interface StudentExportRow {
+  student_code: string | null;
+  full_name_bn: string | null;
+  full_name_en: string | null;
+  father_name_bn: string | null;
+  mother_name_bn: string | null;
+  date_of_birth: string | null;
+  gender: string | null;
+  class_name: string | null;
+  section_name: string | null;
+  roll_no: number | null;
+  shift: string | null;
+  year_label: string | null;
+  admission_date: string | null;
+  board_registration_no: string | null;
+  board_roll_no: string | null;
+  blood_group: string | null;
+  enrolment_status: string | null;
+  lifecycle_status: string | null;
+}
+
+/**
+ * Every student the school has, ONCE, with their most relevant enrolment.
+ *
+ * ── Why a LATERAL and not a join ────────────────────────────────────────
+ * The first version was `LEFT JOIN enrolments e ON e.student_id = sp.user_id
+ * AND e.status = 'active'`, which is wrong in a way the development fixture
+ * cannot show. `enrolments` is unique on
+ * `(tenant_id, academic_year_id, student_id)` — one row per student per
+ * YEAR — so nothing stops a student holding an active enrolment in 2025 and
+ * another in 2026. That join emits them twice, and an export whose entire
+ * purpose is a faithful copy would have quietly doubled some children and
+ * not others.
+ *
+ * It was not caught by a test. The fixture has exactly one active enrolment
+ * per student, so the bug was invisible there; it was found by reading the
+ * constraint before trusting the row counts.
+ *
+ * The LATERAL picks exactly one: the current academic year if the student is
+ * in it, otherwise their most recent. One row per student, always, which is
+ * also what makes the row-count check in the test suite mean something.
+ *
+ * ── Why LEFT and not INNER ──────────────────────────────────────────────
+ * A student admitted but not yet placed in a section, and a student who has
+ * left, both still belong to the school and both must appear in the school's
+ * own copy of its data. An inner join would silently shorten the file, and a
+ * portability export that omits people is worse than none.
+ *
+ * ── No tenant predicate ─────────────────────────────────────────────────
+ * `withTenant` has set `app.current_tenant()` and the RLS policies on
+ * `users`, `student_profiles`, `enrolments` and `sections` decide the rows.
+ */
+async function selectStudents(
+  client: { query: <T>(sql: string, params?: unknown[]) => Promise<{ rows: T[] }> },
+): Promise<StudentExportRow[]> {
+  const { rows } = await client.query<StudentExportRow>(
+    `SELECT sp.student_code,
+            u.full_name_bn, u.full_name_en,
+            u.father_name_bn, u.mother_name_bn,
+            u.date_of_birth::text        AS date_of_birth,
+            u.gender::text               AS gender,
+            c.name_bn                    AS class_name,
+            s.name                       AS section_name,
+            e.roll_no,
+            s.shift::text                AS shift,
+            ay.label                     AS year_label,
+            sp.admission_date::text      AS admission_date,
+            sp.board_registration_no,
+            sp.board_roll_no,
+            sp.blood_group,
+            e.status               AS enrolment_status,
+            sp.lifecycle_status
+       FROM student_profiles sp
+       JOIN users u ON u.id = sp.user_id AND u.deleted_at IS NULL
+       LEFT JOIN LATERAL (
+         SELECT en.section_id, en.roll_no, en.status, en.academic_year_id
+           FROM enrolments en
+           JOIN academic_years y ON y.id = en.academic_year_id
+          WHERE en.student_id = sp.user_id
+          ORDER BY y.is_current DESC, y.starts_on DESC, en.enrolled_on DESC
+          LIMIT 1
+       ) e ON TRUE
+       LEFT JOIN sections s   ON s.id = e.section_id
+       LEFT JOIN classes  c   ON c.id = s.class_id
+       LEFT JOIN academic_years ay ON ay.id = e.academic_year_id
+      ORDER BY c.level_no NULLS LAST, s.name NULLS LAST, e.roll_no NULLS LAST,
+               u.full_name_bn`,
+  );
+  return rows;
+}
+
+/** Bangla labels for the two enum-ish columns a school reads, not codes. */
+const GENDER_BN: Record<string, string> = {
+  male: 'ছেলে', female: 'মেয়ে', other: 'অন্যান্য',
+};
+/** `enrolments.status` — the CHECK constraint's five words, in Bangla. */
+const ENROLMENT_BN: Record<string, string> = {
+  active: 'সক্রিয়', transferred: 'স্থানান্তরিত', left: 'চলে গেছে',
+  promoted: 'উত্তীর্ণ', detained: 'অকৃতকার্য',
+};
+
+/** `student_profiles.lifecycle_status` — a different six-word vocabulary. */
+const LIFECYCLE_BN: Record<string, string> = {
+  enrolled: 'ভর্তি', promoted: 'পরবর্তী শ্রেণিতে', transferred_out: 'ছাড়পত্র নিয়েছে',
+  dropped_out: 'ঝরে পড়েছে', graduated: 'উত্তীর্ণ', alumni: 'প্রাক্তন',
+};
+
+const SHIFT_BN: Record<string, string> = {
+  morning: 'সকাল', day: 'দিবা', evening: 'সন্ধ্যা', single: 'একক',
+};
+
+/** `null` becomes an empty cell, never the string "null". */
+const t = (v: string | number | null | undefined): string =>
+  v === null || v === undefined ? '' : String(v);
+
+function studentRow(r: StudentExportRow): string[] {
+  return [
+    t(r.student_code),
+    t(r.full_name_bn),
+    t(r.full_name_en),
+    t(r.father_name_bn),
+    t(r.mother_name_bn),
+    t(r.date_of_birth),
+    r.gender ? (GENDER_BN[r.gender] ?? r.gender) : '',
+    t(r.class_name),
+    t(r.section_name),
+    t(r.roll_no),
+    r.shift ? (SHIFT_BN[r.shift] ?? r.shift) : '',
+    t(r.year_label),
+    t(r.admission_date),
+    t(r.board_registration_no),
+    t(r.board_roll_no),
+    t(r.blood_group),
+    // An empty enrolment cell is the honest answer for a student who is not
+    // currently placed, and it is visibly different from a lifecycle word.
+    r.enrolment_status ? (ENROLMENT_BN[r.enrolment_status] ?? r.enrolment_status) : '',
+    r.lifecycle_status ? (LIFECYCLE_BN[r.lifecycle_status] ?? r.lifecycle_status) : '',
+  ];
+}

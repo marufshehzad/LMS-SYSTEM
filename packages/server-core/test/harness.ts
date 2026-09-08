@@ -105,9 +105,17 @@ export interface CapturedResponse {
 }
 
 /**
- * A ServerResponse stand-in that records what the handler wrote. Handlers
- * only ever reach `writeHead` and `end` (via http.ts's `json`), so nothing
- * larger is needed and anything else would be pretending.
+ * A ServerResponse stand-in that records what the handler wrote.
+ *
+ * This said "handlers only ever reach `writeHead` and `end` (via http.ts's
+ * `json`), so nothing larger is needed and anything else would be
+ * pretending" — true for every endpoint in the product until P11. The CSV
+ * exporters emit a row at a time through `res.write()`, so a stub without it
+ * fails with `res.write is not a function` before any assertion runs.
+ *
+ * `raw` now ACCUMULATES rather than being assigned at `end`. For a handler
+ * that only calls `end(body)` the result is byte-identical to before, which
+ * is what keeps every existing suite unchanged.
  */
 function captureResponse(): { res: ServerResponse; captured: CapturedResponse } {
   const captured: CapturedResponse = { status: 0, headers: {}, body: {}, raw: '' };
@@ -117,13 +125,17 @@ function captureResponse(): { res: ServerResponse; captured: CapturedResponse } 
       captured.headers = headers;
       return this;
     },
+    write(chunk?: string) {
+      if (chunk) captured.raw += chunk;
+      return true;
+    },
     end(chunk?: string) {
-      if (chunk) {
-        captured.raw = chunk;
+      if (chunk) captured.raw += chunk;
+      if (captured.raw) {
         try {
-          captured.body = JSON.parse(chunk) as Record<string, unknown>;
+          captured.body = JSON.parse(captured.raw) as Record<string, unknown>;
         } catch {
-          /* non-JSON body; `raw` still holds it */
+          /* non-JSON body — a CSV export, say. `raw` still holds it. */
         }
       }
     },

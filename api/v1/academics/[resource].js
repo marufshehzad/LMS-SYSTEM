@@ -3571,6 +3571,18 @@ function toCsv(headers, rows) {
   return `\uFEFF${lines.join("\r\n")}\r
 `;
 }
+var CSV_BOM = "\uFEFF";
+var FORMULA_LEAD = /^[=+\-@\t\r]/;
+var PLAIN_NUMBER = /^[+-]?\d+(?:\.\d+)?$/;
+function csvCell(value) {
+  let v = value;
+  if (FORMULA_LEAD.test(v) && !PLAIN_NUMBER.test(v)) v = `'${v}`;
+  return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+function csvLine(values) {
+  return `${values.map(csvCell).join(",")}\r
+`;
+}
 
 // packages/server-core/src/pii-crypto.ts
 import { createCipheriv, createDecipheriv, createHmac as createHmac2, hkdfSync, randomBytes, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
@@ -5711,8 +5723,8 @@ async function handler21(req, res) {
         attendance,
         results,
         fees,
-        documents: printable.filter((t) => !CERTIFICATE_TYPES.has(t)),
-        certificates: printable.filter((t) => CERTIFICATE_TYPES.has(t)),
+        documents: printable.filter((t2) => !CERTIFICATE_TYPES.has(t2)),
+        certificates: printable.filter((t2) => CERTIFICATE_TYPES.has(t2)),
         // Said plainly rather than left for the UI to infer from a null: a
         // tab that is empty because there is nothing and a tab that is empty
         // because this person may not see it are different sentences.
@@ -5990,6 +6002,202 @@ async function handler22(req, res) {
   }
 }
 
+// packages/server-core/src/csv-response.ts
+function beginCsvDownload(res, cors, o) {
+  res.writeHead(200, {
+    ...cors,
+    "Content-Type": "text/csv; charset=utf-8",
+    // `attachment` so the browser saves it instead of rendering a wall of
+    // text, and a plain ASCII filename so no edge has to guess an encoding.
+    "Content-Disposition": `attachment; filename="${o.filename}"`,
+    // Belt and braces with the service worker's network-only rule: a proxy
+    // between the school and us must not hold this either.
+    "Cache-Control": "no-store, private, max-age=0",
+    "Pragma": "no-cache",
+    // The file is a download, never a document to be framed or sniffed.
+    "X-Content-Type-Options": "nosniff"
+  });
+  res.write(CSV_BOM);
+  res.write(csvLine(o.headers));
+}
+function writeCsvRow(res, values) {
+  res.write(csvLine(values));
+}
+function csvFilename(dataset, on = /* @__PURE__ */ new Date()) {
+  const d = on.toISOString().slice(0, 10);
+  return `${dataset}-${d}.csv`;
+}
+
+// services/academics-svc/api/export.ts
+var EXPORT_ROLES = ["principal", "school_owner", "it_admin"];
+var DATASETS = /* @__PURE__ */ new Set(["students"]);
+async function handler23(req, res) {
+  const cors = corsHeaders();
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, cors);
+    res.end();
+    return;
+  }
+  if (req.method !== "GET") {
+    json(res, 405, { error: "method_not_allowed" }, cors);
+    return;
+  }
+  try {
+    const claims = await authenticate(req);
+    requireRole(claims, EXPORT_ROLES);
+    const dataset = (query(req).get("dataset") ?? "").trim();
+    if (!DATASETS.has(dataset)) {
+      throw new HttpError(
+        400,
+        "dataset must be one of: students",
+        "unknown_dataset"
+      );
+    }
+    const db = await sharedDb();
+    const actor = { tenantId: claims.tid, userId: claims.sub, role: claims.role };
+    await db.withTenant(actor, async (client) => {
+      const rows = await selectStudents(client);
+      beginCsvDownload(res, cors, {
+        filename: csvFilename("students"),
+        headers: STUDENT_HEADERS
+      });
+      for (const r of rows) writeCsvRow(res, studentRow(r));
+      await writeAudit(client, actor, {
+        action: "ops.data.export",
+        entityType: "export",
+        after: { dataset, rows: rows.length }
+      });
+    });
+    res.end();
+  } catch (err) {
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
+    if (err instanceof HttpError) {
+      json(res, err.status, { error: err.code, message: err.message }, cors);
+      return;
+    }
+    json(res, 500, { error: "internal_error" }, cors);
+  }
+}
+var STUDENT_HEADERS = [
+  "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0 \u0986\u0987\u09A1\u09BF",
+  // student_code — the school's own identifier
+  "\u09A8\u09BE\u09AE",
+  "\u09A8\u09BE\u09AE (\u0987\u0982\u09B0\u09C7\u099C\u09BF)",
+  "\u09AA\u09BF\u09A4\u09BE\u09B0 \u09A8\u09BE\u09AE",
+  "\u09AE\u09BE\u09A4\u09BE\u09B0 \u09A8\u09BE\u09AE",
+  "\u099C\u09A8\u09CD\u09AE \u09A4\u09BE\u09B0\u09BF\u0996",
+  "\u09B2\u09BF\u0999\u09CD\u0997",
+  "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF",
+  "\u09B6\u09BE\u0996\u09BE",
+  "\u09B0\u09CB\u09B2",
+  "\u09B6\u09BF\u09AB\u099F",
+  "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09AC\u09B0\u09CD\u09B7",
+  "\u09AD\u09B0\u09CD\u09A4\u09BF\u09B0 \u09A4\u09BE\u09B0\u09BF\u0996",
+  "\u09AC\u09CB\u09B0\u09CD\u09A1 \u09B0\u09C7\u099C\u09BF\u09B8\u09CD\u099F\u09CD\u09B0\u09C7\u09B6\u09A8",
+  "\u09AC\u09CB\u09B0\u09CD\u09A1 \u09B0\u09CB\u09B2",
+  "\u09B0\u0995\u09CD\u09A4\u09C7\u09B0 \u0997\u09CD\u09B0\u09C1\u09AA",
+  // TWO status columns, because there are two facts and they use different
+  // words. `enrolments.status` is active/transferred/left/promoted/detained;
+  // `student_profiles.lifecycle_status` is enrolled/promoted/transferred_out/
+  // dropped_out/graduated/alumni. The first draft COALESCEd them into one
+  // column, which meant a student with no current enrolment displayed their
+  // LIFECYCLE word under a heading every other row used for enrolment — the
+  // two vocabularies even share "promoted" with different meanings. A school
+  // reading that column could not tell which question it answered.
+  "\u09AD\u09B0\u09CD\u09A4\u09BF \u0985\u09AC\u09B8\u09CD\u09A5\u09BE",
+  "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0\u09B0 \u0985\u09AC\u09B8\u09CD\u09A5\u09BE"
+];
+async function selectStudents(client) {
+  const { rows } = await client.query(
+    `SELECT sp.student_code,
+            u.full_name_bn, u.full_name_en,
+            u.father_name_bn, u.mother_name_bn,
+            u.date_of_birth::text        AS date_of_birth,
+            u.gender::text               AS gender,
+            c.name_bn                    AS class_name,
+            s.name                       AS section_name,
+            e.roll_no,
+            s.shift::text                AS shift,
+            ay.label                     AS year_label,
+            sp.admission_date::text      AS admission_date,
+            sp.board_registration_no,
+            sp.board_roll_no,
+            sp.blood_group,
+            e.status               AS enrolment_status,
+            sp.lifecycle_status
+       FROM student_profiles sp
+       JOIN users u ON u.id = sp.user_id AND u.deleted_at IS NULL
+       LEFT JOIN LATERAL (
+         SELECT en.section_id, en.roll_no, en.status, en.academic_year_id
+           FROM enrolments en
+           JOIN academic_years y ON y.id = en.academic_year_id
+          WHERE en.student_id = sp.user_id
+          ORDER BY y.is_current DESC, y.starts_on DESC, en.enrolled_on DESC
+          LIMIT 1
+       ) e ON TRUE
+       LEFT JOIN sections s   ON s.id = e.section_id
+       LEFT JOIN classes  c   ON c.id = s.class_id
+       LEFT JOIN academic_years ay ON ay.id = e.academic_year_id
+      ORDER BY c.level_no NULLS LAST, s.name NULLS LAST, e.roll_no NULLS LAST,
+               u.full_name_bn`
+  );
+  return rows;
+}
+var GENDER_BN2 = {
+  male: "\u099B\u09C7\u09B2\u09C7",
+  female: "\u09AE\u09C7\u09AF\u09BC\u09C7",
+  other: "\u0985\u09A8\u09CD\u09AF\u09BE\u09A8\u09CD\u09AF"
+};
+var ENROLMENT_BN = {
+  active: "\u09B8\u0995\u09CD\u09B0\u09BF\u09AF\u09BC",
+  transferred: "\u09B8\u09CD\u09A5\u09BE\u09A8\u09BE\u09A8\u09CD\u09A4\u09B0\u09BF\u09A4",
+  left: "\u099A\u09B2\u09C7 \u0997\u09C7\u099B\u09C7",
+  promoted: "\u0989\u09A4\u09CD\u09A4\u09C0\u09B0\u09CD\u09A3",
+  detained: "\u0985\u0995\u09C3\u09A4\u0995\u09BE\u09B0\u09CD\u09AF"
+};
+var LIFECYCLE_BN = {
+  enrolled: "\u09AD\u09B0\u09CD\u09A4\u09BF",
+  promoted: "\u09AA\u09B0\u09AC\u09B0\u09CD\u09A4\u09C0 \u09B6\u09CD\u09B0\u09C7\u09A3\u09BF\u09A4\u09C7",
+  transferred_out: "\u099B\u09BE\u09A1\u09BC\u09AA\u09A4\u09CD\u09B0 \u09A8\u09BF\u09AF\u09BC\u09C7\u099B\u09C7",
+  dropped_out: "\u099D\u09B0\u09C7 \u09AA\u09A1\u09BC\u09C7\u099B\u09C7",
+  graduated: "\u0989\u09A4\u09CD\u09A4\u09C0\u09B0\u09CD\u09A3",
+  alumni: "\u09AA\u09CD\u09B0\u09BE\u0995\u09CD\u09A4\u09A8"
+};
+var SHIFT_BN = {
+  morning: "\u09B8\u0995\u09BE\u09B2",
+  day: "\u09A6\u09BF\u09AC\u09BE",
+  evening: "\u09B8\u09A8\u09CD\u09A7\u09CD\u09AF\u09BE",
+  single: "\u098F\u0995\u0995"
+};
+var t = (v) => v === null || v === void 0 ? "" : String(v);
+function studentRow(r) {
+  return [
+    t(r.student_code),
+    t(r.full_name_bn),
+    t(r.full_name_en),
+    t(r.father_name_bn),
+    t(r.mother_name_bn),
+    t(r.date_of_birth),
+    r.gender ? GENDER_BN2[r.gender] ?? r.gender : "",
+    t(r.class_name),
+    t(r.section_name),
+    t(r.roll_no),
+    r.shift ? SHIFT_BN[r.shift] ?? r.shift : "",
+    t(r.year_label),
+    t(r.admission_date),
+    t(r.board_registration_no),
+    t(r.board_roll_no),
+    t(r.blood_group),
+    // An empty enrolment cell is the honest answer for a student who is not
+    // currently placed, and it is visibly different from a lifecycle word.
+    r.enrolment_status ? ENROLMENT_BN[r.enrolment_status] ?? r.enrolment_status : "",
+    r.lifecycle_status ? LIFECYCLE_BN[r.lifecycle_status] ?? r.lifecycle_status : ""
+  ];
+}
+
 // services/academics-svc/api/index.ts
 var ROUTES = {
   sections: handler,
@@ -6007,6 +6215,7 @@ var ROUTES = {
   subjects: handler13,
   attendance: handler14,
   import: handler15,
+  export: handler23,
   ward: handler16,
   subjectchoice: handler17,
   classperf: handler18,
@@ -6021,7 +6230,7 @@ var ROUTES = {
   search: handler20,
   history: handler21
 };
-async function handler23(req, res) {
+async function handler24(req, res) {
   const path = new URL(req.url ?? "/", "http://internal").pathname;
   const sub = path.split("/").filter(Boolean).pop() ?? "";
   const route = ROUTES[sub];
@@ -6036,5 +6245,5 @@ async function handler23(req, res) {
   return route(req, res);
 }
 export {
-  handler23 as default
+  handler24 as default
 };

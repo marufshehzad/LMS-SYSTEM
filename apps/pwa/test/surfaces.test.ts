@@ -228,6 +228,46 @@ describe('an installed PWA opens the application', () => {
  * `/api/v1/ops/users` and friends: "management reads precede mutations — a
  * stale one is acted on".
  */
+/**
+ * P11. An export is an artifact, not reference data.
+ *
+ * `/api/v1/academics/export` matches the reference-data rule on its prefix
+ * alone, so without an explicit carve-out it lands in CACHE_DATA — a
+ * school's entire student roster, as a file, persisting in the browser
+ * cache of whatever office machine the clerk used. B-104's tenant-keying
+ * would keep it away from the NEXT school; it would not stop it being
+ * there. The failure is silent, because a cached export returns 200 with
+ * the right bytes and looks exactly like a working one.
+ */
+describe('P11 — exports are never cached', () => {
+  const get = (url: string) => route({ url, method: 'GET' });
+
+  test('THE ONE THAT MATTERS — an export is network-only, not stale-while-revalidate', () => {
+    const d = get('https://x.test/api/v1/academics/export?dataset=students');
+    assert.equal(d.strategy, 'network-only');
+    assert.equal(d.cache, undefined, 'an export was given a cache bucket');
+  });
+
+  test('the sibling reference read it would otherwise match is still cached', () => {
+    // Proves the carve-out is the export and not the whole prefix — without
+    // this, deleting the rule and breaking `/academics/` entirely would
+    // still pass the test above.
+    const d = get('https://x.test/api/v1/academics/hierarchy');
+    assert.equal(d.strategy, 'stale-while-revalidate');
+  });
+
+  test('every service that will own an export gets the same answer', () => {
+    // §30 adds ops-svc and finance-svc exports next. The rule is written on
+    // the path segment rather than per service so they arrive protected.
+    for (const url of [
+      'https://x.test/api/v1/ops/export?dataset=notices',
+      'https://x.test/api/v1/finance/export?dataset=fees',
+    ]) {
+      assert.equal(get(url).strategy, 'network-only', url);
+    }
+  });
+});
+
 describe('authoring registers are network-only', () => {
   const get = (url: string) => route({ url, method: 'GET' });
 
