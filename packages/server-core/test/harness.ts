@@ -61,32 +61,80 @@ const FIXTURE_LOCK = 8_913_224_017;
  */
 let lockClient: pg.Client | null = null;
 
+/**
+ * How long a suite may hold the fixture lock before the watchdog takes it
+ * back. Generous: the slowest DB suite in this repo runs well under a
+ * minute, and the point is to bound a WEDGE, not to race a slow machine.
+ */
+const LOCK_WATCHDOG_MS = 5 * 60_000;
+
+/** Bounded wait for the lock itself — see B-36 in the backlog. */
+const LOCK_WAIT_MS = 90_000;
+
+let watchdog: NodeJS.Timeout | null = null;
+
 export async function lockFixtures(connectionString: string): Promise<void> {
   if (lockClient) return;
   const client = new pg.Client({ connectionString });
   await client.connect();
-  // Blocks until whoever holds it lets go. A wait, not a race.
-  await client.query('SELECT pg_advisory_lock($1)', [FIXTURE_LOCK]);
+
+  // B-36. A BOUNDED wait.
+  //
+  // `pg_advisory_lock` blocks forever, so one wedged suite used to stop every
+  // other DB suite in the repository with no diagnosis: the holder sits idle
+  // on ClientRead and the rest report nothing at all. That cost two ~40-minute
+  // stalls in P7 before the cause was found by running workspaces one at a
+  // time. `lock_timeout` turns an invisible hang into a named failure.
+  await client.query(`SET lock_timeout = ${LOCK_WAIT_MS}`);
+  try {
+    await client.query('SELECT pg_advisory_lock($1)', [FIXTURE_LOCK]);
+  } catch (err) {
+    await client.end().catch(() => {});
+    throw new Error(
+      `fixture lock not acquired within ${LOCK_WAIT_MS / 1000}s — another test `
+      + 'process is holding it. Run the DB suites one workspace at a time to '
+      + `find the holder. (${(err as Error).message})`);
+  }
   lockClient = client;
 
-  // Do not let THIS connection keep the process alive.
+  // B-66 — the socket stays REF'd, and a watchdog replaces the unref.
   //
-  // A session lock is released when the connection closes, which is why it
-  // beats a lock table: a killed test process cannot strand the next one. But
-  // that only holds if the process can actually exit. A suite whose `before`
-  // throws leaves `after` to clean up, `after` throws on the same broken
-  // state, `unlockFixtures` never runs — and this socket then keeps Node
-  // alive indefinitely, holding the lock, with no failing test named. Every
-  // other DB suite in the repo waits on it.
+  // This used to call `stream.unref()` with the comment "unref'ing costs
+  // nothing while a suite is running". That is the assumption B-66 narrowed
+  // to and it is not safe: if at any instant the unref'd lock socket is the
+  // only remaining handle, Node's event loop is empty and the process EXITS
+  // MID-FILE. What the runner then sees is a whole workspace failing fast,
+  // with empty stderr and no assertion named — which is exactly B-58/B-66's
+  // signature, observed in five different workspaces across P0 and the P12
+  // audit and never reproducible in isolation.
   //
-  // P7 hit that twice. Unref'ing costs nothing while a suite is running and
-  // means a suite that dies badly still lets go.
-  const stream = (client as unknown as { connection?: { stream?: { unref?: () => void } } })
-    .connection?.stream;
-  stream?.unref?.();
+  // The unref existed for a real reason and it is kept, just not permanently:
+  // a suite whose `before` throws leaves `after` to clean up, `after` throws
+  // on the same broken state, `unlockFixtures` never runs — and a ref'd
+  // socket would then hold both the process and the lock forever.
+  //
+  // So the socket is ref'd while the suite runs, and an UNREF'D timer takes
+  // it back if the suite wedges. The timer being unref'd is what makes this
+  // work: it cannot by itself keep the process alive, but it does fire while
+  // the ref'd socket is holding the loop open.
+  watchdog = setTimeout(() => {
+    // Not an error path anybody should hit. If it fires, the suite that took
+    // the lock never gave it back, and letting go is better than stalling
+    // every other DB suite behind it.
+    console.error(
+      `[harness] fixture lock held for ${LOCK_WATCHDOG_MS / 1000}s — releasing it. `
+      + 'A suite almost certainly died without running its `after` hook.');
+    const c = lockClient;
+    lockClient = null;
+    void c?.end().catch(() => {});
+  }, LOCK_WATCHDOG_MS);
+  watchdog.unref();
 }
 
 export async function unlockFixtures(): Promise<void> {
+  // Always clear the watchdog, even if there is no lock left to release —
+  // a stray timer would keep firing against a client that is already gone.
+  if (watchdog) { clearTimeout(watchdog); watchdog = null; }
   if (!lockClient) return;
   const client = lockClient;
   lockClient = null;

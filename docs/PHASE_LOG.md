@@ -15053,3 +15053,146 @@ typecheck 0/0/0 · build clean · 80/80 migrations · **security probe 38/38**
 over 13 areas · app.js **164,590 / 184,320** gzipped (89%) · 2,232 tests when
 the suite completes · `index.html` byte-identical at `496199bd` · HEAD ==
 `marufshehzad/LMS-SYSTEM` main, tree clean.
+
+
+# Pre-pilot hardening pass (2026-09-08)
+
+Not a phase and not P12. The objective was to make what exists pilot-ready
+rather than to expand it, and every status below separates CODE from TEST
+from PRODUCTION from EXTERNAL, because several of them have different answers
+in different columns.
+
+## B-50 - the row's premise was stale; the remainder is external
+
+**CODE: complete.** `deploy/` holds six units -
+`shikhon-{sms,maintenance,monitor}.{service,timer}` - plus `shikhon-cron.md`
+with the four install commands. B-50 was written when only the web unit
+existed; the units landed on 2026-09-03 and the row never caught up. The
+timers are written in UTC deliberately (a host moved to Asia/Dhaka would
+otherwise shift both daily jobs six hours with nobody editing a file),
+`Persistent=true` on the dailies and not on the monitor. All three endpoints
+exist and accept `CRON_SECRET`.
+
+**TEST: the monitor was exercised, not just read.** Run against the
+development database it reports exactly the state B-50 describes:
+
+    [critical] The sms_dispatch job has never run
+    [critical] The maintenance job has never run
+    [critical] The monitor job has never run
+    [critical] SMS queue is not draining - 38 queued; oldest waited 239h
+
+Each alert names B-50 and points at `deploy/`. The deadman works:
+`minutesSinceSuccess: null` is the "never ran" state, and the heartbeat is
+recorded only on POST, so an operator LOOKING at the monitor cannot be
+mistaken for the monitor running.
+
+**PRODUCTION: nothing claimed.** A deploy key exists on this machine and
+outbound SSH is blocked in this environment, so the timers were not installed
+and no evidence was recorded. Four commands, in `deploy/shikhon-cron.md`, are
+the operator action.
+
+## B-56 - both halves, and the second one was real
+
+**Contact.** Three routes answered the same question three ways: a local
+8-role list on `students/history`, NOTHING on `roster` (just `requireStaff`,
+whose blocklist is `{student, guardian}`), and a stricter 3-role gate on
+`ops/guardians`. A subject teacher was refused a child's number on one screen
+and handed it on another. `CONTACT_ROLES`/`maySeeContact()` is now the one
+rule. The roster gates the VALUE, not the route - a subject teacher still
+reads it, because they need names and roll numbers to teach, and gets `null`
+where the number was. **Nothing was widened**; `ops/guardians` keeps its
+stricter gate.
+
+**Revocation - reproduced before it was fixed.**
+`app.set_guardian_permissions` upserts with `ON CONFLICT ... WHERE revoked_at
+IS NULL`. That target is a PARTIAL index, so a pair whose only row is revoked
+does not conflict and the statement INSERTS A NEW LIVE ROW. Through the
+endpoint, against PostgreSQL:
+
+    after revoke   links: [false]
+    PATCH -> 200   links: [false, true]      <- different linkId
+
+A person's access to a child came back with no restore decision and no
+distinct audit action. The likely trigger is a stale drawer rather than
+malice: an admin may SEE revoked links - that is how they are audited - so
+saving an SMS toggle on one was enough. PATCH now refuses with `link_revoked`
+(409); re-linking stays a deliberate POST, which also makes it an
+`ops.guardian.link` audit row. Mutation-checked.
+
+Two properties were already right and are now pinned so they stay right:
+`guardianship_hide_revoked` hides revoked links from everyone except the three
+roles that administer them, and SMS dispatch runs as `system_ingest`, so a
+revoked guardian cannot be texted.
+
+**Three fixture bugs on the way, each the schema being right.**
+`guardianship_delete_scope` is `USING (false)` - nothing may DELETE a
+guardianship; `guardianship_revocation_complete` refuses a revocation that
+does not say who and why; `uq_guardianship_active` allows one live row per
+pair. The test fought the database three times and lost each time.
+
+## B-119 - cause found, fixed, and proven
+
+The teardown ran `DELETE FROM tenants` on the PLATFORM pool, where
+`tenant_self` (`USING id = app.current_tenant()`) matched no rows, because a
+bare platform query sets no current tenant. It deleted nothing and raised
+nothing, and had done so since P7.
+
+The same policy is what makes the fix work: under a tenant's own context
+`app.current_tenant()` IS that tenant, so the row is visible and deletable -
+the shape every other suite already used via `asBootstrap`.
+
+Proven rather than asserted: three consecutive runs of `tenant-gate.test.ts`
+left the count unchanged at 273 where it had been +2 per run; the 273
+accumulated fixtures were then cleared, and a FULL suite run went **21 -> 21
+tenants, zero residue**. The development database is **21 real tenants, down
+from 294** - which also means every performance number taken on it from here
+is a measurement of the product rather than of 93% dead weight.
+
+## B-66 - the runner now fails loudly; the cause was acted on, not proven
+
+**The runner.** `test-all.mjs` tracks every workspace it STARTS and every one
+that reports a count, prints `13/13`, and exits non-zero naming any that
+started and never reported. Negative-tested by making a workspace die
+silently: it printed `12/13` and named `services/sync-svc`. Before this, the
+only way to learn WHICH workspace vanished was to subtract two runs' totals by
+hand - which is what B-58, B-66 and three separate P12-audit observations all
+had to do.
+
+**The suspect.** B-66 narrowed to `lockFixtures` leaving its socket unref'd,
+with the comment "unref'ing costs nothing while a suite is running". That is
+the assumption, and it is not safe: if at any instant the unref'd lock socket
+is the only remaining handle, Node's loop is empty and the process exits
+mid-file - a fast, silent, whole-file failure, which is the signature exactly.
+The socket is now REF'd while a suite runs, and an UNREF'D five-minute
+watchdog releases the lock if a suite wedges, preserving what the unref was
+protecting.
+
+**Not claimed as fixed.** This never reproduced on demand. Four consecutive
+clean 13/13 runs against a prior 2-in-5 failure rate is suggestive, not proof.
+B-66 and B-58 stay open.
+
+## B-36 - closed alongside it
+
+`SET lock_timeout = 90s` before `pg_advisory_lock`, and the failure says what
+happened: "fixture lock not acquired within 90s - another test process is
+holding it." The watchdog bounds the other direction, a suite that takes the
+lock and dies.
+
+## B-120 - opened, deliberately not built
+
+There is no session/device list and no way to revoke one. `user_sessions` is
+written on every login and never read back to a person; `logout` ends only the
+current session. A head teacher whose phone is stolen cannot end that phone's
+access.
+
+This is `FINAL-FULL-PROJECT-AUDIT-REPORT` section 31's deliverable, proposed
+as "P10a" and skipped when the roadmap renumbered. **The Master Plan does not
+authorize it, so it is recorded and not built** - inventing a phase for it is
+precisely what this pass was told not to do.
+
+## Verification
+
+2,246 tests across **13/13** workspaces, four consecutive clean runs *
+typecheck 0/0/0 * build clean * 80/80 migrations * security probe **38/38**
+over 13 areas * zero fixture residue * `index.html` byte-identical at
+`496199bd`.

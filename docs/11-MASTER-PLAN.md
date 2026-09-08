@@ -1935,6 +1935,16 @@ status code. That area was rewritten after it passed against a handler mutated t
 The pilot gates remain: the four writers, cron scheduling, an alert that reaches a human, the
 SMS aggregator (external), and the 049 → 064 catch-up.
 
+**Pre-pilot hardening pass, 2026-09-08.** Of those gates, **cron scheduling is now
+repository-complete and externally blocked**: `deploy/` carries all six systemd units and
+`shikhon-cron.md`, and what remains is an operator running four commands on the VPS. Also
+closed in that pass: **B-56** (one contact rule across three routes, and a revoked
+guardianship that PATCH could resurrect — reproduced against PostgreSQL before it was fixed),
+**B-119** (the fixture leak; the development database went from 294 tenants to 21) and
+**B-36**. **B-66** had its narrowed cause acted on and its runner made to fail by name, but is
+NOT claimed fixed — it never reproduced on demand. **B-120** was opened for the session/device
+list this plan does not authorize as a phase.
+
 **There is no P12 in this plan, and that is deliberate rather than an omission.** The only
 place the string appears in `docs/` is `FINAL-FULL-PROJECT-AUDIT-REPORT.md` §29 — *"P12 —
 Post-pilot feature wave from §27, ordered by pilot feedback"* — and **B-5, a pilot

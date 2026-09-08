@@ -6,7 +6,7 @@ the repository; where the honest answer is "not built" or "not observed", it
 says so, because a document that rounds those up to "done" is the specific
 failure D17 exists to prevent.
 
-Last reconciled **2026-09-08**, at the end of **P10**.
+Last reconciled **2026-09-08**, after **P11** and the pre-pilot hardening pass.
 
 > This line read *"2026-09-01, at the end of P6"* until 2026-09-08, through P7, P8, P9 and P10 — four
 > completed phases including the entire Smart Routine and the platform console's scale work. This is the

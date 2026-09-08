@@ -91,6 +91,23 @@ let failed = 0;
 let orphaned = [];
 const results = [];
 
+/**
+ * Every workspace this run STARTED, and every one that came back with a
+ * count.  (B-66)
+ *
+ * The runner already exited non-zero when a workspace failed, and it already
+ * said "1 workspace(s) FAILED" — but the summary line reported
+ * `results.length`, which counts only the ones that REPORTED. So a run that
+ * lost a whole workspace printed "2209 tests across 12 workspaces" beside a
+ * previous run's "2232 across 13", and the only way to learn WHICH workspace
+ * had gone was to subtract the two totals by hand. That is what B-58, B-66
+ * and three separate P12-audit observations all had to do.
+ *
+ * `attempted` minus `reported` is the answer, by name, printed at the end.
+ */
+const attempted = [];
+const reported = new Set();
+
 for (const group of [...GROUPS, ...EXTRA]) {
   const dir = join(ROOT, group);
   if (!existsSync(dir)) continue;
@@ -111,7 +128,9 @@ for (const group of [...GROUPS, ...EXTRA]) {
     if (hasTests && !script) { orphaned.push(`${group}/${name}`); continue; }
     if (!hasTests || !script) continue;
 
-    process.stdout.write(`${(isLeaf ? group : group + '/' + name).padEnd(28)} `);
+    const label = isLeaf ? group : `${group}/${name}`;
+    attempted.push(label);
+    process.stdout.write(`${label.padEnd(28)} `);
     try {
       const out = npmTest(ws);
       const pass = /^. tests (\d+)/m.exec(out)?.[1] ?? '?';
@@ -125,6 +144,7 @@ for (const group of [...GROUPS, ...EXTRA]) {
         console.log(`ok  ${pass} tests${skip !== '0' ? `, ${skip} skipped` : ''}`);
       }
       results.push(Number(pass) || 0);
+      reported.add(label);
     } catch (err) {
       failed++;
       const out = String(err.stdout ?? '');
@@ -261,6 +281,28 @@ if (orphaned.length) {
   console.error('Add: "test": "node --test \'test/*.test.ts\'"');
 }
 
+/**
+ * The invariant B-66 asked for: everything started must report.
+ *
+ * Expected count is not a constant in a file — it is discovered, because the
+ * whole point of this script is that a new workspace cannot go unnoticed.
+ * So the expectation is `attempted`, and anything in it that never produced
+ * a count is named here rather than left to arithmetic.
+ */
+const silent = attempted.filter((w) => !reported.has(w));
+
 const total = results.reduce((a, b) => a + b, 0);
-console.log(`\n${total} tests across ${results.length} workspaces` + (failed ? `, ${failed} workspace(s) FAILED` : ', all passing'));
-process.exit(failed || orphaned.length ? 1 : 0);
+console.log(`\n${total} tests across ${reported.size}/${attempted.length} workspaces`
+  + (failed ? `, ${failed} workspace(s) FAILED` : silent.length ? '' : ', all passing'));
+
+if (silent.length) {
+  console.error(`\nERROR: ${silent.length} workspace(s) started and never reported a count:`);
+  for (const w of silent) console.error(`  ${w}`);
+  console.error(
+    '\nA workspace that does not report is not a workspace that passed. If this\n'
+    + 'is the B-66 signature — a whole file failing with empty stderr, a different\n'
+    + 'workspace each run — the full output of the failing run is in the log file\n'
+    + 'named above, and re-running that ONE workspace alone will usually pass.');
+}
+
+process.exit(failed || orphaned.length || silent.length ? 1 : 0);

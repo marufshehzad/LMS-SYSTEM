@@ -1717,6 +1717,23 @@ E.164 phone dialable through a round-trip.
 only, and the platform-operator fleet export is not built — the school-side
 offboarding path is what shipped.
 
+### Pre-pilot hardening (2026-09-08)
+
+Four columns, because they do not agree:
+
+| item | CODE | TEST | PRODUCTION |
+|---|---|---|---|
+| Scheduled jobs (B-50) | six systemd units + runbook in `deploy/` | monitor exercised; reports all three jobs "never run" | **NOT INSTALLED** — needs host access |
+| Contact privacy (B-56) | one `maySeeContact()` gate | 7 tests, six roles, asserting the BODY | n/a |
+| Guardian revocation (B-56) | PATCH refuses `link_revoked` | 7 tests, mutation-checked | n/a |
+| Fixture leak (B-119) | teardown drops in tenant context | full suite: 21 → 21, zero residue | n/a |
+| Suite invariant (B-66) | runner prints `13/13`, names silent workspaces | negative-tested | n/a |
+| Lock timeout (B-36) | `SET lock_timeout = 90s` + watchdog | — | n/a |
+| Session/device list (B-120) | **absent** | — | — |
+
+The one that blocks a pilot is the first row's PRODUCTION column, and it is
+four commands in `deploy/shikhon-cron.md` rather than any code.
+
 ## 9k. R-8 — go-live unlocks (code closed; contracts open)
 
 R-8 is the phase that turns things on. The surprise was how much of what it was
