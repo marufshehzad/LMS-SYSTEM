@@ -14606,3 +14606,115 @@ phase that would have made them tempting — the fleet list now sorts and
 filters, so "select these eleven" is one control away. The natural first bulk
 action is suspension, and a mis-selected bulk suspend is the most destructive
 thing this product can do. The trigger stays where P7 put it.
+
+
+# CI — four failures behind one (2026-09-08)
+
+`48a9176`. The `frontend` workflow had been red on **every push since
+2026-08-31** — 41 consecutive runs, last green 2026-08-23. It was not one
+bug. It was four, stacked so each hid the next, and three shared a cause.
+
+## The cause, and why it could only fail in CI
+
+Node resolves a bare import from the importing FILE's directory upward. This
+repository keeps its shared runtime dependencies at the ROOT, and every CI
+job installed only leaf workspaces. So any test reaching a file under
+`packages/server-core/` needed `pg` or `jose` resolvable *from there* — and
+only the repository root can satisfy that.
+
+A developer machine always has a root `node_modules`. That is the whole
+story: these suites passed locally for eight days and could not have passed
+in CI, and nothing about the code was wrong on either machine.
+
+| # | job | error | reached? |
+|---|---|---|---|
+| 1 | `frontend` · pwa | `Cannot find package 'pg'` from `server-core/src/db.ts` | failed here |
+| 2 | `frontend` · sms-svc | `Cannot find package 'jose'` from `server-core/test/harness.ts` | never reached |
+| 3 | `frontend` · guard | a real parameter property | never reached |
+| 4 | `sync-svc` | same `jose` | own workflow |
+
+Only the first was visible. Fixing it exposed the second, and so on — which
+is why the temptation to fix "the error in the log" and push was the wrong
+instinct here.
+
+## 1. A browser test that needed a Postgres driver
+
+`buildManifest`'s own comment reads: *"Pure, so the identity rules are
+testable without a database or a request."* True of the function and false of
+the file — `api/manifest.ts` also exports the HTTP handler, which reaches
+`resolvePublicTenant` → `db.ts` → `pg`, and an ES import loads the graph.
+
+Extracted to `services/ops-svc/src/manifest-build.ts`, which may not import a
+service, a database or a request. The API module imports and re-exports it,
+so `ops-svc`'s own test is untouched. The emitted bundle is byte-identical;
+only esbuild's source-path comment moved.
+
+## 2 & 4. Declaring the root install
+
+`sms-svc` and `sync-svc` genuinely need the harness and a database — there is
+no architectural fix, they need the dependency. Both workflows now install
+the root first.
+
+Deliberately **not** by adding a nested install to `packages/server-core`.
+That was the first attempt, and esbuild then resolved `jose` from the nested
+copy and rewrote source paths in **eight committed `api/` bundles** — which
+would have failed the "bundles match the sources" gate on any machine without
+that nested copy. One resolution model, not two.
+
+## 3. A guard that had never run
+
+`staff-attendance-view.ts` carried a real
+`constructor(private readonly o: …)`. Node REFUSES to load such a file, so
+the only symptom was that **no test could import it** — the suite stayed
+green by never touching it, and the shipped bundle was always fine because
+esbuild compiles it properly. A silent hole in coverage, not a broken screen.
+
+The guard then failed on five COMMENT lines that quote the banned syntax in
+order to explain it. Excluded narrowly — only lines whose first non-space
+characters are `//` or `*`, so a real declaration cannot hide behind it — and
+negative-tested by reintroducing a violation, which is still caught.
+
+## And one of P10's own
+
+`db/tests/platform_fleet.sql` failed the `database` workflow:
+*"a five-row page reports a total of \<NULL>, the fleet has 0."* CI's
+database is freshly migrated and holds no tenants, so `platform_fleet`
+returns no rows and `SELECT DISTINCT total_count INTO` leaves a NULL.
+
+The NULL was not the real problem. **A suite pinning a paginated list says
+nothing against zero rows** — every ordering, paging and total assertion was
+vacuously true, and it would have gone on reporting success while proving
+nothing. It now seeds seven schools through `app.create_tenant` inside a
+`BEGIN; … ROLLBACK;`, the way the rest of `db/tests` does, so assertion 2
+compares a five-row page against a fleet of seven and means something.
+
+Verified against a database built the way CI builds one — 80 migrations, zero
+tenants: the old suite fails with CI's exact error, the new one passes and
+reports *"a page of 5 still reports the whole fleet (7)"*. All 28 suites run
+twice with zero residue, which is what `database.yml` checks.
+
+## How each fix was verified
+
+Not by reading the workflow and reasoning about it. Each failure was
+reproduced locally under CI's actual condition and re-run after the fix:
+
+- root `node_modules` **removed entirely** → `apps/pwa` 852/852,
+  `packages/ui-core` 199/199
+- root `pg` and `jose` hidden → `sync-svc` 23/23
+- a fresh 80-migration database with 0 tenants → 28 SQL suites, twice, zero
+  residue
+- the parameter-property guard, with a violation reintroduced → still caught
+
+2,174 tests · typecheck 0/0/0 · build clean · bundles current · D11 brand
+boundary in both directions · 162,511 / 184,320 bytes gzipped.
+`index.html` untouched at `496199bd`.
+
+## One flake, recorded rather than waved away
+
+One full-suite run during this work reported **12 workspaces instead of 13**
+— a workspace that did not report at all rather than a test that failed. Four
+consecutive runs before and after were clean at 2,174. The shape matches
+**B-36**: the fixture advisory lock has no timeout, so one wedged suite stops
+others with no diagnosis. Not reproduced, not fixed, and noted here because a
+green run after an unexplained red one is not evidence that the red one did
+not happen.
