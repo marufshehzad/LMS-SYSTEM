@@ -295,3 +295,90 @@ describe('P11 §22/§27 — authorization and refusals', { skip }, () => {
     assert.ok(csv!.headers.includes('অভিভাবকের নাম'));
   });
 });
+
+describe('P11 §10/§14/§15 — structure, notices and audit', { skip }, () => {
+  test('structure carries the whole hierarchy on one line', async () => {
+    // §10 wants the relationships to survive. A spreadsheet reader cannot
+    // follow a foreign key, so the section row names its class and year.
+    const { r, csv } = await exportCsv(tokens.headA, 'structure');
+    assert.equal(r.status, 200);
+    const row = csv!.rows.find((x) => x.cells['সেকশন'] === 'ক');
+    assert.ok(row, 'the seeded section is missing');
+    assert.equal(row!.cells['শিক্ষাবর্ষ'], '2026');
+    assert.equal(row!.cells['শ্রেণি'], 'নবম');
+    assert.equal(row!.cells['চলতি বর্ষ'], 'হ্যাঁ');
+    assert.equal(row!.cells['শ্রেণি শিক্ষক'], 'শিক্ষক এ');
+    assert.equal(row!.cells['শাখা/স্ট্রিম'], 'বাংলা মাধ্যম');
+  });
+
+  test('structure is this school’s shape only', async () => {
+    const a = await exportCsv(tokens.headA, 'structure');
+    const b = await exportCsv(tokens.headB, 'structure');
+    const rowsA = a.csv!.rows.map((x) => JSON.stringify(x.cells));
+    const rowsB = new Set(b.csv!.rows.map((x) => JSON.stringify(x.cells)));
+    assert.equal(rowsA.filter((x) => rowsB.has(x)).length, 0,
+      'a structure row is shared between two schools');
+  });
+
+  test('THE ONE THAT MATTERS — the audit export masks what the viewer masks', async () => {
+    // before/after are arbitrary JSON and some of it is a phone number. The
+    // export imports the VIEWER's redactor rather than restating the rule.
+    await asBootstrap(db, ctxA, async (c) => {
+      await c.query(
+        `INSERT INTO audit.activity_log
+           (tenant_id, actor_id, actor_role, action, entity_type, after_state)
+         VALUES ($1,$2,'principal','ops.user.create','user',
+                 '{"phone":"+8801711000111","full_name_bn":"নতুন কেউ"}'::jsonb)`,
+        [T_A, HEAD_A]);
+    });
+    const { r, csv } = await exportCsv(tokens.headA, 'audit');
+    assert.equal(r.status, 200);
+    const row = csv!.rows.find((x) => x.cells['কাজ'] === 'ops.user.create');
+    assert.ok(row, 'the audit row is missing from the export');
+    assert.doesNotMatch(r.raw, /\+8801711000111/, 'a phone number left in the audit export');
+    assert.match(row!.cells['পরে'], /phone: •••11/, 'the phone was not masked the viewer’s way');
+    // The non-sensitive field survives — masking everything would be useless.
+    assert.match(row!.cells['পরে'], /নতুন কেউ/);
+  });
+
+  test('the audit export names the actor, and never their uuid', async () => {
+    const { r, csv } = await exportCsv(tokens.headA, 'audit');
+    const row = csv!.rows.find((x) => x.cells['কাজ'] === 'ops.user.create')!;
+    assert.equal(row.cells['কে'], 'প্রধান এ');
+    assert.doesNotMatch(r.raw, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/i);
+  });
+
+  test('notices carry the body, drafts included', async () => {
+    await asBootstrap(db, ctxA, async (c) => {
+      await c.query(
+        `INSERT INTO notices (tenant_id, title, body, category, audience, status, created_by)
+         VALUES ($1,'ছুটির নোটিশ','আগামীকাল
+বিদ্যালয় বন্ধ থাকবে।','general','{"type":"all"}'::jsonb,'draft',$2)`,
+        [T_A, HEAD_A]);
+    });
+    const { csv } = await exportCsv(tokens.headA, 'notices');
+    const row = csv!.rows.find((x) => x.cells['শিরোনাম'] === 'ছুটির নোটিশ');
+    assert.ok(row, 'a draft notice was dropped from the export');
+    assert.equal(row!.cells['অবস্থা'], 'খসড়া');
+    // The body is the notice. A titles-only export would be an index.
+    assert.match(row!.cells['বিবরণ'], /বিদ্যালয় বন্ধ থাকবে/);
+    // …and its embedded newline survived the CSV round-trip.
+    // A real line break, asserted as a character rather than as a regex:
+    // the escape for one inside a regex literal is the thing that broke
+    // this file when it was written.
+    assert.ok(row!.cells['বিবরণ'].includes(String.fromCharCode(10)),
+      'the notice body lost its line break through the CSV round-trip');
+  });
+
+  test('THE ONE THAT ALMOST SHIPPED — the audience column carries no uuid', async () => {
+    // `notices.audience` is jsonb shaped `{"ids": [...], "type": "section"}`
+    // and the ids are uuids. The first version selected the column raw, which
+    // would have put internal identifiers into a file that gets mailed
+    // between offices. It is now rendered as a phrase and a count.
+    const { r, csv } = await exportCsv(tokens.headA, 'notices');
+    assert.doesNotMatch(r.raw, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/i,
+      'a uuid reached the notices export');
+    const row = csv!.rows.find((x) => x.cells['শিরোনাম'] === 'ছুটির নোটিশ')!;
+    assert.equal(row.cells['কারা পাবে'], 'সবাই');
+  });
+});

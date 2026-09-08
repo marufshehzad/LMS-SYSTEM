@@ -2364,7 +2364,7 @@ async function handler6(req, res) {
     const ctx = { tenantId: claims.tid, userId: claims.sub, role: claims.role, service: SERVICE };
     if (req.method === "GET") {
       const limit = Math.min(100, Math.max(1, Number(query(req).get("limit") ?? 50)));
-      const notices = await db.withTenant(ctx, async (c) => {
+      const notices2 = await db.withTenant(ctx, async (c) => {
         const { rows } = await c.query(
           `SELECT id, title, body, category, audience, send_sms, status,
                   published_at, recipient_count, created_at
@@ -2375,7 +2375,7 @@ async function handler6(req, res) {
         );
         return rows;
       });
-      json(res, 200, { notices }, cors);
+      json(res, 200, { notices: notices2 }, cors);
       return;
     }
     if (req.method !== "POST") {
@@ -2694,7 +2694,7 @@ async function handler8(req, res) {
           LIMIT 5`,
         [year2.id]
       );
-      const { rows: notices } = await c.query(
+      const { rows: notices2 } = await c.query(
         `SELECT id, title, category::text AS category,
                 published_at::text AS published_at, recipient_count
            FROM notices
@@ -2789,7 +2789,7 @@ async function handler8(req, res) {
           startsOn: e.starts_on,
           status: e.status
         })),
-        recentNotices: notices.map((n) => ({
+        recentNotices: notices2.map((n) => ({
           id: n.id,
           title: n.title,
           category: n.category,
@@ -7322,6 +7322,25 @@ var RELATION_BN = {
   aunt: "\u099A\u09BE\u099A\u09BF/\u09AE\u09BE\u09AE\u09BF",
   other: "\u0985\u09A8\u09CD\u09AF\u09BE\u09A8\u09CD\u09AF"
 };
+var STREAM_BN2 = {
+  bangla_medium: "\u09AC\u09BE\u0982\u09B2\u09BE \u09AE\u09BE\u09A7\u09CD\u09AF\u09AE",
+  english_version: "\u0987\u0982\u09B0\u09C7\u099C\u09BF \u09AD\u09BE\u09B0\u09CD\u09B8\u09A8",
+  english_medium: "\u0987\u0982\u09B0\u09C7\u099C\u09BF \u09AE\u09BE\u09A7\u09CD\u09AF\u09AE",
+  madrasah: "\u09AE\u09BE\u09A6\u09CD\u09B0\u09BE\u09B8\u09BE",
+  technical: "\u0995\u09BE\u09B0\u09BF\u0997\u09B0\u09BF"
+};
+var SHIFT_BN2 = {
+  morning: "\u09B8\u0995\u09BE\u09B2",
+  day: "\u09A6\u09BF\u09AC\u09BE",
+  evening: "\u09B8\u09A8\u09CD\u09A7\u09CD\u09AF\u09BE",
+  single: "\u098F\u0995\u0995"
+};
+var NOTICE_STATUS_BN = {
+  draft: "\u0996\u09B8\u09A1\u09BC\u09BE",
+  scheduled: "\u09A8\u09BF\u09B0\u09CD\u09A7\u09BE\u09B0\u09BF\u09A4",
+  published: "\u09AA\u09CD\u09B0\u0995\u09BE\u09B6\u09BF\u09A4",
+  archived: "\u09B8\u0982\u09B0\u0995\u09CD\u09B7\u09BF\u09A4"
+};
 var yesNo = (v) => v === null ? "" : v ? "\u09B9\u09CD\u09AF\u09BE\u0981" : "\u09A8\u09BE";
 var teachers = {
   headers: [
@@ -7481,10 +7500,227 @@ var guardians = {
     r.status === "revoked" ? "\u09AA\u09CD\u09B0\u09A4\u09CD\u09AF\u09BE\u09B9\u09C3\u09A4" : "\u09B8\u0995\u09CD\u09B0\u09BF\u09AF\u09BC"
   ]
 };
+var structure = {
+  headers: [
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09AC\u09B0\u09CD\u09B7",
+    "\u09AC\u09B0\u09CD\u09B7 \u09B6\u09C1\u09B0\u09C1",
+    "\u09AC\u09B0\u09CD\u09B7 \u09B6\u09C7\u09B7",
+    "\u099A\u09B2\u09A4\u09BF \u09AC\u09B0\u09CD\u09B7",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF \u09A8\u09AE\u09CD\u09AC\u09B0",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF (\u0987\u0982\u09B0\u09C7\u099C\u09BF)",
+    "\u09B6\u09BE\u0996\u09BE/\u09B8\u09CD\u099F\u09CD\u09B0\u09BF\u09AE",
+    "\u0997\u09CD\u09B0\u09C1\u09AA",
+    "\u09B8\u09C7\u0995\u09B6\u09A8",
+    "\u09B6\u09BF\u09AB\u099F",
+    "\u09A7\u09BE\u09B0\u09A3\u0995\u09CD\u09B7\u09AE\u09A4\u09BE",
+    "\u09AC\u09B0\u09CD\u09A4\u09AE\u09BE\u09A8 \u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF \u09B6\u09BF\u0995\u09CD\u09B7\u0995",
+    "\u0995\u0995\u09CD\u09B7"
+  ],
+  /**
+   * The school's shape, one row per SECTION.
+   *
+   * §10 asks for years, classes, sections, groups and streams and for the
+   * relationships to survive. A section is the leaf of that hierarchy, so a
+   * section-centric sheet carries every level above it on the same line —
+   * which is what makes it reconstructible in a spreadsheet, where a reader
+   * cannot follow a foreign key.
+   *
+   * Denormalised on purpose. Five separate CSVs would be normalised, exactly
+   * reconstructible, and useless to the head teacher who opens one to see
+   * what their school looks like.
+   *
+   * A year with no classes yet still appears: this is the file a school
+   * checks its own setup against, and an empty year is a fact about the
+   * setup rather than a row to hide.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT y.label            AS year_label,
+              y.starts_on::text  AS year_start,
+              y.ends_on::text    AS year_end,
+              y.is_current,
+              c.level_no,
+              c.name_bn          AS class_bn,
+              c.name_en          AS class_en,
+              c.stream::text     AS stream,
+              c."group"          AS group_name,
+              s.name             AS section_name,
+              s.shift::text      AS shift,
+              s.capacity, s.student_count,
+              t.full_name_bn     AS class_teacher,
+              r.name_bn          AS room_name
+         FROM academic_years y
+         LEFT JOIN sections s ON s.academic_year_id = y.id
+         LEFT JOIN classes  c ON c.id = s.class_id
+         LEFT JOIN users    t ON t.id = s.class_teacher_id AND t.deleted_at IS NULL
+         LEFT JOIN rooms    r ON r.id = s.home_room_id
+        ORDER BY y.starts_on DESC, c.level_no NULLS LAST, s.name NULLS LAST`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.year_label),
+    cell(r.year_start),
+    cell(r.year_end),
+    yesNo(r.is_current),
+    cell(r.level_no),
+    cell(r.class_bn),
+    cell(r.class_en),
+    bnOf(STREAM_BN2, r.stream),
+    cell(r.group_name),
+    cell(r.section_name),
+    bnOf(SHIFT_BN2, r.shift),
+    cell(r.capacity),
+    cell(r.student_count),
+    cell(r.class_teacher),
+    cell(r.room_name)
+  ]
+};
+var notices = {
+  headers: [
+    "\u09B6\u09BF\u09B0\u09CB\u09A8\u09BE\u09AE",
+    "\u09AC\u09BF\u09AC\u09B0\u09A3",
+    "\u09A7\u09B0\u09A8",
+    "\u0995\u09BE\u09B0\u09BE \u09AA\u09BE\u09AC\u09C7",
+    "\u0985\u09AC\u09B8\u09CD\u09A5\u09BE",
+    "\u098F\u09B8\u098F\u09AE\u098F\u09B8",
+    "\u0985\u09CD\u09AF\u09BE\u09AA\u09C7",
+    "\u09AA\u09CD\u09B0\u09BE\u09AA\u0995\u09C7\u09B0 \u09B8\u0982\u0996\u09CD\u09AF\u09BE",
+    "\u09AA\u09CD\u09B0\u0995\u09BE\u09B6\u09C7\u09B0 \u09B8\u09AE\u09AF\u09BC",
+    "\u09AA\u09CD\u09B0\u0995\u09BE\u09B6\u09BF\u09A4 \u09B9\u09AF\u09BC\u09C7\u099B\u09C7",
+    "\u09A4\u09C8\u09B0\u09BF",
+    "\u09A4\u09C8\u09B0\u09BF \u0995\u09B0\u09C7\u099B\u09C7\u09A8"
+  ],
+  /**
+   * Every notice the school has written, including the drafts.
+   *
+   * A draft is the school's own text and belongs to them; an export that
+   * kept only what was published would silently drop work in progress.
+   *
+   * The BODY is included in full. It is the notice — a "notices export"
+   * carrying titles only would be an index, not the content, and the point
+   * of portability is that the school keeps what they wrote. `csvCell`
+   * handles the line breaks a notice body is full of.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT n.title, n.body, n.category::text AS category,
+              n.audience->>'type'   AS audience_type,
+              CASE WHEN jsonb_typeof(n.audience->'ids') = 'array'
+                   THEN jsonb_array_length(n.audience->'ids') END AS audience_count,
+              n.status::text        AS status,
+              n.send_sms, n.send_inapp, n.recipient_count,
+              n.publish_at::text    AS publish_at,
+              n.published_at::text  AS published_at,
+              n.created_at::text    AS created_at,
+              u.full_name_bn        AS created_by_name
+         FROM notices n
+         LEFT JOIN users u ON u.id = n.created_by AND u.deleted_at IS NULL
+        ORDER BY n.created_at DESC`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.title),
+    cell(r.body),
+    cell(r.category),
+    // NOT the raw `audience` jsonb. It is `{"ids": [...], "type": "section"}`
+    // — the ids are uuids, and §6 keeps uuids out of a file that gets mailed
+    // between offices. The school is told WHAT kind of audience and HOW MANY,
+    // which is the part they can act on.
+    audienceCell(r.audience_type, r.audience_count),
+    bnOf(NOTICE_STATUS_BN, r.status),
+    yesNo(r.send_sms),
+    yesNo(r.send_inapp),
+    cell(r.recipient_count),
+    cell(r.publish_at),
+    cell(r.published_at),
+    cell(r.created_at),
+    cell(r.created_by_name)
+  ]
+};
+var audit = {
+  headers: [
+    "\u09B8\u09AE\u09AF\u09BC",
+    "\u0995\u09C7",
+    "\u09AD\u09C2\u09AE\u09BF\u0995\u09BE",
+    "\u0995\u09BE\u099C",
+    "\u0995\u09C0\u09B8\u09C7\u09B0 \u0989\u09AA\u09B0",
+    "\u0986\u0997\u09C7",
+    "\u09AA\u09B0\u09C7"
+  ],
+  /**
+   * The school's own activity history.  B-11, export half.
+   *
+   * B-11 paired "audit export" with "actor-name resolution" and the second
+   * half was already false when the row was written — `audit.ts` has
+   * resolved names since 2026-08-29. Only the export was ever missing, and
+   * this is it.
+   *
+   * ── The redaction is the viewer's, not a copy of it ───────────────────
+   * `before_state` and `after_state` are arbitrary JSON, and some of it is
+   * a phone number or a date of birth. The audit VIEWER masks those by key
+   * name; this export imports that same function rather than restating the
+   * rule, because the file is the copy that leaves the building and a
+   * second redactor is how the two drift apart.
+   *
+   * The entity ID is deliberately not a column: it is a uuid, it means
+   * nothing to a school, and §6 keeps uuids out of exports.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT a.created_at::text AS created_at,
+              u.full_name_bn     AS actor_name,
+              a.actor_role, a.action, a.entity_type,
+              a.before_state, a.after_state
+         FROM audit.activity_log a
+         LEFT JOIN users u ON u.id = a.actor_id
+        ORDER BY a.created_at DESC`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.created_at),
+    // "নাম নেই" rather than blank: an empty cell reads as "nobody did this".
+    r.actor_name ? r.actor_name : "\u09A8\u09BE\u09AE \u09A8\u09C7\u0987",
+    bnOf(ROLE_BN, r.actor_role),
+    cell(r.action),
+    cell(r.entity_type),
+    jsonCell(r.before_state),
+    jsonCell(r.after_state)
+  ]
+};
+var AUDIENCE_BN = {
+  all: "\u09B8\u09AC\u09BE\u0987",
+  section: "\u09A8\u09BF\u09B0\u09CD\u09A6\u09BF\u09B7\u09CD\u099F \u09B8\u09C7\u0995\u09B6\u09A8",
+  class: "\u09A8\u09BF\u09B0\u09CD\u09A6\u09BF\u09B7\u09CD\u099F \u09B6\u09CD\u09B0\u09C7\u09A3\u09BF",
+  role: "\u09A8\u09BF\u09B0\u09CD\u09A6\u09BF\u09B7\u09CD\u099F \u09AD\u09C2\u09AE\u09BF\u0995\u09BE",
+  user: "\u09A8\u09BF\u09B0\u09CD\u09A6\u09BF\u09B7\u09CD\u099F \u09AC\u09CD\u09AF\u0995\u09CD\u09A4\u09BF",
+  exam: "\u09AA\u09B0\u09C0\u0995\u09CD\u09B7\u09BE-\u09B8\u0982\u0995\u09CD\u09B0\u09BE\u09A8\u09CD\u09A4"
+};
+function audienceCell(type, count) {
+  if (!type) return "";
+  const label = AUDIENCE_BN[type] ?? type;
+  return count === null || count === void 0 ? label : `${label} (${count})`;
+}
+function jsonCell(v) {
+  if (v === null || v === void 0) return "";
+  const safe = redact(v);
+  if (typeof safe !== "object") return String(safe);
+  return Object.entries(safe).map(([k, val]) => `${k}: ${typeof val === "object" && val !== null ? JSON.stringify(val) : String(val)}`).join("; ");
+}
 async function handler21(req, res) {
   return handleCsvExport(req, res, {
     roles: EXPORT_ROLES,
-    datasets: { teachers, guardians }
+    datasets: {
+      teachers,
+      guardians,
+      structure,
+      notices,
+      audit
+    }
   });
 }
 

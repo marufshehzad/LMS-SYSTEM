@@ -56,7 +56,14 @@ function maskValue(v: unknown): unknown {
   return /^\d+$/.test(tail) ? `•••${tail}` : '•••';
 }
 
-function redact(value: unknown, depth = 0): unknown {
+/**
+ * Exported for the P11 audit EXPORT, which must apply the identical rule.
+ *
+ * A second redactor written beside this one is how a masked phone stops
+ * being masked in one of the two places six months from now — and the file
+ * is the copy that leaves the building.
+ */
+export function redact(value: unknown, depth = 0): unknown {
   if (depth > 6 || value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map((v) => redact(v, depth + 1));
   const out: Record<string, unknown> = {};
