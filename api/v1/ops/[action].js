@@ -4366,13 +4366,25 @@ async function permissions(db, ctx, req) {
   }
   return db.withTenant(ctx, async (c) => {
     const { rows: before } = await c.query(
+      // `revoked_at` is SELECTED, not filtered out, so the two cases can be
+      // told apart: a link that never existed is a 404, a link that was
+      // ENDED is a refusal that says so.
       `SELECT gs.relation, gs.is_primary, gs.receives_sms, gs.can_pay_fees,
-              g.full_name_bn AS name_bn
+              gs.revoked_at, g.full_name_bn AS name_bn
          FROM guardianships gs JOIN users g ON g.id = gs.guardian_id
-        WHERE gs.student_id = $1 AND gs.guardian_id = $2`,
+        WHERE gs.student_id = $1 AND gs.guardian_id = $2
+        ORDER BY gs.revoked_at NULLS FIRST
+        LIMIT 1`,
       [studentId, guardianId]
     );
     if (before.length === 0) throw new HttpError(404, "\u09B8\u0982\u09AF\u09CB\u0997 \u09AA\u09BE\u0993\u09AF\u09BC\u09BE \u09AF\u09BE\u09AF\u09BC\u09A8\u09BF", "not_found");
+    if (before[0].revoked_at !== null) {
+      throw new HttpError(
+        409,
+        "\u098F\u0987 \u09B8\u0982\u09AF\u09CB\u0997\u099F\u09BF \u09AA\u09CD\u09B0\u09A4\u09CD\u09AF\u09BE\u09B9\u09BE\u09B0 \u0995\u09B0\u09BE \u09B9\u09AF\u09BC\u09C7\u099B\u09C7 \u2014 \u09B8\u09AE\u09CD\u09AA\u09BE\u09A6\u09A8\u09BE \u0995\u09B0\u09BE \u09AF\u09BE\u09AC\u09C7 \u09A8\u09BE\u0964 \u09AA\u09CD\u09B0\u09AF\u09BC\u09CB\u099C\u09A8\u09C7 \u09A8\u09A4\u09C1\u09A8 \u0995\u09B0\u09C7 \u0985\u09AD\u09BF\u09AD\u09BE\u09AC\u0995 \u09AF\u09C1\u0995\u09CD\u09A4 \u0995\u09B0\u09C1\u09A8\u0964",
+        "link_revoked"
+      );
+    }
     const prev = before[0];
     const relation = (b.relation ?? prev.relation).trim();
     if (!RELATIONS.has(relation)) {

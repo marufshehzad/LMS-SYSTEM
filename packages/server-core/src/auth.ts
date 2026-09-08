@@ -41,3 +41,48 @@ export function requireRole(claims: AccessTokenClaims, allowed: string[]): void 
     throw new HttpError(403, `this endpoint requires one of: ${allowed.join(', ')}`, 'forbidden');
   }
 }
+
+/**
+ * Who may see a STUDENT's contact details.  (B-56, pre-pilot hardening)
+ *
+ * One list, in one place, because there were three answers to the same
+ * question and they disagreed:
+ *
+ *   `/academics/students/history`  gated on this list
+ *   `/academics/roster`            NOT gated at all — every staff role,
+ *                                  including a subject teacher, received
+ *                                  the child's phone number
+ *   `/ops/guardians?studentId=`    gated harder, on the three roles that
+ *                                  may EDIT a guardianship
+ *
+ * So a subject teacher was refused a child's number on one screen and
+ * handed it on another, and neither screen was wrong about its own rule —
+ * there simply was no single rule. This is it.
+ *
+ * ── Why this membership ─────────────────────────────────────────────────
+ * R-3 settled it for the guardian panel and the reasoning holds: a phone
+ * number is not something every staff member gets because they can open a
+ * drawer. The people here are the ones who administer the child — the head,
+ * the owner, the academic coordinator, the IT admin, the CLASS teacher who
+ * is responsible for them, the accountant who must chase a fee — plus the
+ * family itself.
+ *
+ * A SUBJECT teacher is deliberately absent. They teach the child a subject;
+ * reaching the family is the class teacher's job, and "they are staff" is
+ * not a reason to hand over a parent's number.
+ *
+ * ── This gates the VALUE, not the route ─────────────────────────────────
+ * A subject teacher still reads the roster — they need the names and roll
+ * numbers to teach. What changes is that the phone arrives as `null`
+ * instead of a number. Hiding it in the UI while shipping it in the body is
+ * the pattern D13 forbids: still there, one devtools tab away.
+ */
+export const CONTACT_ROLES = [
+  'principal', 'school_owner', 'academic_coordinator', 'it_admin',
+  'class_teacher', 'accountant', 'guardian', 'student',
+];
+
+/** True when this role may be shown a student's phone or email. */
+export function maySeeContact(role: string): boolean {
+  return CONTACT_ROLES.includes(role);
+}

@@ -419,15 +419,46 @@ async function permissions(db: Db, ctx: Ctx, req: IncomingMessage) {
   return db.withTenant(ctx, async (c) => {
     const { rows: before } = await c.query<{
       relation: string; is_primary: boolean; receives_sms: boolean; can_pay_fees: boolean;
-      name_bn: string;
+      revoked_at: string | null; name_bn: string;
     }>(
+      // `revoked_at` is SELECTED, not filtered out, so the two cases can be
+      // told apart: a link that never existed is a 404, a link that was
+      // ENDED is a refusal that says so.
       `SELECT gs.relation, gs.is_primary, gs.receives_sms, gs.can_pay_fees,
-              g.full_name_bn AS name_bn
+              gs.revoked_at, g.full_name_bn AS name_bn
          FROM guardianships gs JOIN users g ON g.id = gs.guardian_id
-        WHERE gs.student_id = $1 AND gs.guardian_id = $2`,
+        WHERE gs.student_id = $1 AND gs.guardian_id = $2
+        ORDER BY gs.revoked_at NULLS FIRST
+        LIMIT 1`,
       [studentId, guardianId],
     );
     if (before.length === 0) throw new HttpError(404, 'সংযোগ পাওয়া যায়নি', 'not_found');
+
+    // B-56. A revoked guardianship is not editable, and editing one used to
+    // RESURRECT it.
+    //
+    // `app.set_guardian_permissions` upserts with
+    // `ON CONFLICT … WHERE revoked_at IS NULL`. That conflict target is a
+    // PARTIAL index, so a pair whose only row is revoked does not conflict —
+    // and the statement inserts a NEW, live guardianship. Reproduced against
+    // PostgreSQL through this endpoint: one revoked link went in, a 200 came
+    // back, and the student had `[revoked, live]` with a different linkId.
+    //
+    // The person's access to a child came back with no restore decision, no
+    // distinct audit action, and nothing on screen to say it had happened.
+    // The likely trigger is not malice but a stale drawer: an admin may SEE
+    // revoked links (that is how they are audited), so saving an SMS toggle
+    // on one was enough.
+    //
+    // Refused rather than silently upgraded to a restore. Re-linking is a
+    // deliberate act and POST is where it lives — which also makes it a
+    // `ops.guardian.link` audit row rather than a permissions edit.
+    if (before[0].revoked_at !== null) {
+      throw new HttpError(409,
+        'এই সংযোগটি প্রত্যাহার করা হয়েছে — সম্পাদনা করা যাবে না। '
+        + 'প্রয়োজনে নতুন করে অভিভাবক যুক্ত করুন।',
+        'link_revoked');
+    }
     const prev = before[0];
 
     const relation = (b.relation ?? prev.relation).trim();

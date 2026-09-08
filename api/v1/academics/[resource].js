@@ -1417,6 +1417,19 @@ function requireRole(claims, allowed) {
     throw new HttpError(403, `this endpoint requires one of: ${allowed.join(", ")}`, "forbidden");
   }
 }
+var CONTACT_ROLES = [
+  "principal",
+  "school_owner",
+  "academic_coordinator",
+  "it_admin",
+  "class_teacher",
+  "accountant",
+  "guardian",
+  "student"
+];
+function maySeeContact(role) {
+  return CONTACT_ROLES.includes(role);
+}
 
 // services/academics-svc/api/sections.ts
 async function handler(req, res) {
@@ -1490,6 +1503,7 @@ async function handler2(req, res) {
   try {
     const claims = await authenticate(req);
     requireStaff(claims);
+    const showContact = maySeeContact(claims.role);
     const sectionId = query(req).get("sectionId") ?? "";
     if (!UUID_RE.test(sectionId)) throw new HttpError(400, "sectionId must be a valid uuid", "invalid_section_id");
     const db = await sharedDb();
@@ -1526,7 +1540,13 @@ async function handler2(req, res) {
           rollNo: r.roll_no,
           studentId: r.student_id,
           fullName: { bn: r.full_name_bn, en: r.full_name_en },
-          phone: r.phone_e164
+          // B-56. Gated on the SHARED rule, not on "is staff". A subject
+          // teacher still gets the roster — they need the names and roll
+          // numbers to teach — and gets `null` where the number was. Nulled
+          // in the body rather than hidden in the UI: D13 forbids shipping a
+          // value and concealing it, because it is still one devtools tab
+          // away.
+          phone: showContact ? r.phone_e164 : null
         }))
       };
     });
@@ -5640,16 +5660,7 @@ function predicateFor(shape, text, status, yearId) {
 // services/academics-svc/api/studenthistory.ts
 var UUID_RE17 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var MAY_SEE_FEES = ["principal", "school_owner", "accountant", "guardian", "student"];
-var MAY_SEE_CONTACT = [
-  "principal",
-  "school_owner",
-  "academic_coordinator",
-  "it_admin",
-  "class_teacher",
-  "accountant",
-  "guardian",
-  "student"
-];
+var MAY_SEE_CONTACT = CONTACT_ROLES;
 var DOCUMENT_ACCESS = {
   fee_receipt: ["principal", "school_owner", "accountant", "student", "guardian"],
   report_card: [
@@ -5743,7 +5754,7 @@ async function handler21(req, res) {
     json(res, e.status, { error: e.code, message: e.message, ...e.detail ?? {} }, cors);
   }
 }
-async function loadProfile(c, studentId, maySeeContact) {
+async function loadProfile(c, studentId, maySeeContact2) {
   const { rows } = await c.query(
     `SELECT u.id, u.full_name_bn AS name_bn, u.full_name_en AS name_en,
             sp.student_code, sp.lifecycle_status,
@@ -5769,13 +5780,13 @@ async function loadProfile(c, studentId, maySeeContact) {
     // Withheld at the SERVER, not hidden in the UI. A role that may not see
     // contact details never receives them, so nothing leaks to anyone who
     // opens the network tab.
-    bloodGroup: maySeeContact ? r.blood_group : null,
-    fatherNameBn: maySeeContact ? r.father_bn : null,
-    motherNameBn: maySeeContact ? r.mother_bn : null,
-    dateOfBirth: maySeeContact ? r.dob : null,
-    phone: maySeeContact ? r.phone : null,
-    boardRegistrationNo: maySeeContact ? r.board_registration_no : null,
-    boardRollNo: maySeeContact ? r.board_roll_no : null
+    bloodGroup: maySeeContact2 ? r.blood_group : null,
+    fatherNameBn: maySeeContact2 ? r.father_bn : null,
+    motherNameBn: maySeeContact2 ? r.mother_bn : null,
+    dateOfBirth: maySeeContact2 ? r.dob : null,
+    phone: maySeeContact2 ? r.phone : null,
+    boardRegistrationNo: maySeeContact2 ? r.board_registration_no : null,
+    boardRollNo: maySeeContact2 ? r.board_roll_no : null
   };
 }
 async function loadEnrolments(c, studentId) {

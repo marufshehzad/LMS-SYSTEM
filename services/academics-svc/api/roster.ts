@@ -9,7 +9,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { sharedDb } from '../../../packages/server-core/src/db.ts';
 import { corsHeaders, query, json, HttpError } from '../../../packages/server-core/src/http.ts';
-import { authenticate, requireStaff } from '../../../packages/server-core/src/auth.ts';
+import { authenticate, requireStaff, maySeeContact } from '../../../packages/server-core/src/auth.ts';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -28,6 +28,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   try {
     const claims = await authenticate(req);
     requireStaff(claims);
+    // Access to the roster and access to the CHILDREN'S NUMBERS are two
+    // different questions; this endpoint used to answer only the first.
+    const showContact = maySeeContact(claims.role);
 
     const sectionId = query(req).get('sectionId') ?? '';
     if (!UUID_RE.test(sectionId)) throw new HttpError(400, 'sectionId must be a valid uuid', 'invalid_section_id');
@@ -83,7 +86,13 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           rollNo: r.roll_no,
           studentId: r.student_id,
           fullName: { bn: r.full_name_bn, en: r.full_name_en },
-          phone: r.phone_e164,
+          // B-56. Gated on the SHARED rule, not on "is staff". A subject
+          // teacher still gets the roster — they need the names and roll
+          // numbers to teach — and gets `null` where the number was. Nulled
+          // in the body rather than hidden in the UI: D13 forbids shipping a
+          // value and concealing it, because it is still one devtools tab
+          // away.
+          phone: showContact ? r.phone_e164 : null,
         })),
       };
     });
