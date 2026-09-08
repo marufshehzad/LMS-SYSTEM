@@ -1,6 +1,12 @@
 name: database
 
 on:
+  # Runnable on demand from the Actions tab or `gh workflow run`.
+  # Every trigger below is path-filtered, so a change that touches only
+  # docs/ cannot start this workflow — which is correct, and leaves no
+  # way to re-run a job against an unchanged tree when the question is
+  # whether CI itself is healthy rather than whether the code changed.
+  workflow_dispatch:
   push:
     paths: ['db/**', '.github/workflows/database.yml']
   pull_request:
