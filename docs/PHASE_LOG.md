@@ -14949,3 +14949,107 @@ simply absent rather than guessed at.
   data and the operator's job is not to block them. A platform-svc export
   would need new SECURITY DEFINER functions per dataset — new attack surface
   for a case the tenant path already serves. Recorded rather than half-built.
+
+
+# P12 readiness audit — there is no P12 to be ready for (2026-09-08)
+
+No implementation. The audit read the source-of-truth documents and then
+checked every claim against the schema, the routes and the running code.
+
+## The finding that decides the phase
+
+**`docs/11-MASTER-PLAN.md` contains no P12.** The only occurrence of the
+string anywhere in `docs/` is one line in
+`FINAL-FULL-PROJECT-AUDIT-REPORT.md` §29:
+
+> **P12 — Post-pilot feature wave** from §27, ordered by pilot feedback.
+
+Its candidate pool is §27 and its ORDERING INPUT is pilot feedback. **B-5, "a
+pilot institution", is OPEN.** Production holds zero tenants; B-4
+(cross-tenant probe on production) is BLOCKED on B-5, and B-1 (the SMS
+aggregator) is BLOCKED on a contract. So the one input that would tell anyone
+what P12 contains does not exist yet.
+
+## And the roadmap numbering has drifted
+
+§29's proposed roadmap and the phases that actually shipped are not the same
+sequence, which is why "P12" reads as further along than it is:
+
+| §29 proposed | what actually shipped |
+|---|---|
+| P9 — Smart Routine Generator | **P9**, as proposed |
+| **P10 — Identity & Guardian polish** (§31 + §32) | **never shipped, under any name** |
+| P11 — Scale pass (overview query, pagination, operator directory) | shipped as **P10** |
+| — | **P11** — portability, from the Master Plan's own line |
+| P12 — Post-pilot wave | not started |
+
+A whole proposed phase disappeared in the renumbering. Verified in code rather
+than assumed:
+
+- **§31's deliverable, a session/device list with revoke, does not exist.**
+  `identity-svc` routes are `otp/request`, `otp/verify`, `refresh`, `logout`,
+  `activate`. `user_sessions` is written and never listed; there is no
+  "sign out everywhere" surface.
+- **§32's deliverables partly exist and were mis-classified as complete in the
+  P11 audit.** `GET /ops/guardians?studentId=` does return a student's
+  guardians, `GuardianPanel` IS mounted on the academic drill-down drawer
+  (`academic-view.ts:1080`), and it does render `tel:` links. What does NOT
+  exist is the per-tenant class-teacher-phone setting, the guardian
+  name/relation on the roster, or the student's view of their own primary
+  guardian.
+
+## §27, three of fourteen already consumed
+
+`P9 Smart Routine` ✓ (P9), `overview scaling + console pagination` ✓ (P10),
+`CSV/audit export B-11/B-12` ✓ (P11). Of the rest, **stipend report, form
+fill-up, online admission and hifz tracking have zero code** — 0 files match
+each; the "admission" matches in the tree are `admission_date` and
+`admit_card`. Support mode (B-38) appears only as the thing three files say
+they deliberately did NOT build.
+
+## The contact policy disagrees with itself, in code
+
+Not a new bug — B-56 records part of it — but the audit pinned the exact
+shape across three endpoints in two services:
+
+| endpoint | gate | what it hands over |
+|---|---|---|
+| `/academics/students/history` | `MAY_SEE_CONTACT` — excludes `subject_teacher`, `dept_head` | the student's phone |
+| `/academics/roster` | `requireStaff` — blocklist is only `{student, guardian}` | the student's phone |
+| `/ops/guardians?studentId=` | `requireStaff` | every guardian's phone |
+
+So a subject teacher is refused a child's number on one screen and handed it,
+plus the family's, on two others. It is a within-school privacy
+inconsistency rather than a tenant breach — severity unchanged — but the
+rule is stated in one place and contradicted in two.
+
+## B-118's numbers were wrong, and this audit made them wrong twice
+
+Re-measured with plain `\timing` instead of `EXPLAIN ANALYZE`:
+**292 → 16 ms, 500 → 20, 1000 → 38, 2000 → 71** — against the recorded
+260 → 45, 500 → 81, 1000 → 155, 2000 → 307. About **4× overstated**, because
+per-node instrumentation dominates a query with this many LATERAL and
+subquery nodes. P11 hit the same trap and caught it there (its DB-side
+instrument reported 177 ms against a 104 ms round trip) without going back to
+correct P10's figures.
+
+The consequence is a trigger revised twice on measurement rather than on code:
+the P11 audit moved it DOWN to 300–500 real institutions on the inflated
+numbers; with the instrument removed it lands nearer **1,000–1,500**.
+
+## The flake now has three more instances
+
+Full-suite runs that report 12 workspaces instead of 13, losing a whole
+workspace with no assertion named. This session: **ops-svc (144 tests),
+rms-svc (261), sync-svc (23)** — a different workspace every time, which is
+**B-66's** signature exactly and is why it points at the shared fixture lock
+rather than at one broken suite. Two of five full-suite runs today were
+affected. The five CI workflows are green because none of them runs the
+whole suite in one process the way `test-all.mjs` does.
+
+## Verified for this audit
+
+typecheck 0/0/0 · build clean · 80/80 migrations · **security probe 38/38**
+over 13 areas · app.js **164,590 / 184,320** gzipped (89%) · 2,232 tests when
+the suite completes · `index.html` byte-identical at `496199bd` · HEAD ==
+`marufshehzad/LMS-SYSTEM` main, tree clean.

@@ -1935,6 +1935,20 @@ status code. That area was rewritten after it passed against a handler mutated t
 The pilot gates remain: the four writers, cron scheduling, an alert that reaches a human, the
 SMS aggregator (external), and the 049 → 064 catch-up.
 
+**There is no P12 in this plan, and that is deliberate rather than an omission.** The only
+place the string appears in `docs/` is `FINAL-FULL-PROJECT-AUDIT-REPORT.md` §29 — *"P12 —
+Post-pilot feature wave from §27, ordered by pilot feedback"* — and **B-5, a pilot
+institution, is OPEN**. The candidate pool exists (§27); the thing that would order it does
+not. Recorded 2026-09-08 by the P12 readiness audit.
+
+**§29's numbering is NOT this plan's numbering,** which is worth knowing before reading it as
+a roadmap. What shipped as **P10** is §29's proposed *P11* (the scale pass); what shipped as
+**P11** is this plan's own portability line. §29's proposed **P10 — Identity & Guardian
+polish** (§31 session/device list with revoke, §32 guardian visibility settings) was skipped
+in the renumbering and has never shipped under any name. Its §31 half is confirmed absent in
+code: `identity-svc` exposes `otp/request`, `otp/verify`, `refresh`, `logout`, `activate`
+and nothing that lists or revokes a session.
+
 ## P0 — Core write paths (in progress, 2026-09-02)
 
 The P-writers phase above, under way. One vocabulary, used exactly, and the
