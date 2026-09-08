@@ -85,7 +85,22 @@ export class StaffAttendanceView {
   /** Reason text per teacher, kept while the drawer-less row is being edited. */
   private reasons = new Map<string, string>();
 
-  constructor(private readonly o: StaffAttendanceViewOptions) {
+  /**
+   * Declared as a field and assigned in the body, not as a parameter
+   * property.
+   *
+   * `constructor(private readonly o: …)` is valid TypeScript and this repo
+   * cannot run it: node executes `.ts` in strip-only mode, which removes
+   * types without emitting the implicit `this.o = o`, and refuses the
+   * syntax outright rather than producing a silently broken object. The
+   * shipped bundle was fine because esbuild compiles it properly — so the
+   * only symptom was that no test could import this file at all, and the
+   * suite stayed green by never touching it.
+   */
+  private readonly o: StaffAttendanceViewOptions;
+
+  constructor(o: StaffAttendanceViewOptions) {
+    this.o = o;
     this.render();
     void this.load();
   }

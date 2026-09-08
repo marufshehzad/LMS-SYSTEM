@@ -22,7 +22,15 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { route, PRECACHE, CACHE_SHELL, APP_SHELL_URL, isAppPath } from '../src/sw-router.ts';
-import { buildManifest } from '../../../services/ops-svc/api/manifest.ts';
+// From `src/manifest-build.ts`, NOT from `api/manifest.ts`, and the
+// distinction is the whole reason that file exists. The API module also
+// exports the request handler, which reaches `resolvePublicTenant` →
+// `server-core/src/db.ts` → `pg`; an ES import loads the graph, so this
+// browser-surface test used to need a Postgres driver installed to check a
+// pure function. It is installed at the repo root and NOT in the `frontend`
+// CI job, which runs `cd apps/pwa && npm install` — so this suite passed on
+// every developer machine and failed on every push from 2026-08-31.
+import { buildManifest } from '../../../services/ops-svc/src/manifest-build.ts';
 import { parseBranding, DEFAULT_BRANDING } from '../../../packages/ui-core/src/branding.ts';
 
 // fileURLToPath, not URL.pathname: this repo's path contains spaces, which

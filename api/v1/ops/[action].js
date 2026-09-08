@@ -2081,7 +2081,7 @@ async function handler4(req, res) {
   }, cors);
 }
 
-// services/ops-svc/api/manifest.ts
+// services/ops-svc/src/manifest-build.ts
 var DEFAULT_ICONS = [
   { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
   { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" }
@@ -2114,6 +2114,8 @@ function buildManifest(branding, tenantId, locale = "bn") {
     ] : DEFAULT_ICONS
   };
 }
+
+// services/ops-svc/api/manifest.ts
 async function handler5(req, res) {
   const cors = corsHeaders();
   if (req.method === "OPTIONS") {

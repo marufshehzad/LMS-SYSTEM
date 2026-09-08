@@ -53,8 +53,27 @@ jobs:
           psql -v ON_ERROR_STOP=1 -q -c "GRANT CONNECT ON DATABASE shikhon_ci TO shikhon_runtime;"
           psql -v ON_ERROR_STOP=1 -q -c "GRANT USAGE ON SCHEMA public, app, audit TO shikhon_runtime;"
 
+      # The ROOT install is the one that was missing, and it is not optional.
+      #
+      # These tests reach `packages/server-core/test/harness.ts`, which needs
+      # `jose` to mint the tokens it tests with, and `src/db.ts`, which needs
+      # `pg`. Node resolves a bare import from the importing FILE's directory
+      # upward — so for a file under `packages/server-core/`, the only place
+      # that can satisfy it is `packages/server-core/node_modules` or a
+      # parent, and neither workspace below is a parent of it. It resolved on
+      # a developer machine purely because the repository root has a
+      # node_modules; a CI job that installs two leaf workspaces does not.
+      # Green locally, red on every push since 2026-08-31.
+      #
+      # Installing at the root rather than inside `packages/server-core` is
+      # deliberate: this repo has ONE shared runtime dependency set at the
+      # root, and a nested install would give esbuild a second copy to
+      # resolve — which changes the source paths it writes into the committed
+      # api/ bundles and breaks the "bundles match the sources" gate in
+      # frontend.yml. One resolution model, not two.
       - name: Install deps
         run: |
+          npm install --no-audit --no-fund
           (cd packages/offline && npm install --no-audit --no-fund)
           (cd services/sync-svc && npm install --no-audit --no-fund)
 
