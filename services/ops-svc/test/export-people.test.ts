@@ -341,6 +341,29 @@ describe('P11 §10/§14/§15 — structure, notices and audit', { skip }, () => 
     assert.match(row!.cells['পরে'], /নতুন কেউ/);
   });
 
+  test('THE ONE THE FIXTURE COULD NOT SHOW — a uuid VALUE inside a state is masked', async () => {
+    // The viewer's redactor masks by KEY name — phone, nid, email — which
+    // does not cover `teacherId`, whose name looks as innocuous as `reason`
+    // and whose value is a primary key. The seeded rows in this suite had
+    // no such field, so every assertion passed against a file that was
+    // clean only because the fixture was. A real export in a browser had
+    // one. This gives the fixture that shape on purpose.
+    await asBootstrap(db, ctxA, async (c) => {
+      await c.query(
+        `INSERT INTO audit.activity_log
+           (tenant_id, actor_id, actor_role, action, entity_type, after_state)
+         VALUES ($1,$2,'principal','academic.subject_teacher.assign','section',
+                 '{"reason":null,"teacherId":"81061b52-1e2b-498f-9c4f-f58db68ff3c0"}'::jsonb)`,
+        [T_A, HEAD_A]);
+    });
+    const { r, csv } = await exportCsv(tokens.headA, 'audit');
+    assert.doesNotMatch(r.raw, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
+      'a uuid value survived into the audit export');
+    // …and the school can still see THAT a teacher was involved.
+    const row = csv!.rows.find((x) => x.cells['কাজ'] === 'academic.subject_teacher.assign')!;
+    assert.match(row.cells['পরে'], /teacherId: •••/);
+  });
+
   test('the audit export names the actor, and never their uuid', async () => {
     const { r, csv } = await exportCsv(tokens.headA, 'audit');
     const row = csv!.rows.find((x) => x.cells['কাজ'] === 'ops.user.create')!;
@@ -380,5 +403,65 @@ describe('P11 §10/§14/§15 — structure, notices and audit', { skip }, () => 
       'a uuid reached the notices export');
     const row = csv!.rows.find((x) => x.cells['শিরোনাম'] === 'ছুটির নোটিশ')!;
     assert.equal(row.cells['কারা পাবে'], 'সবাই');
+  });
+});
+
+describe('P11 §16 — offboarding: "the school is leaving"', { skip }, () => {
+  test('THE ONE THAT MATTERS — the manifest counts what the school will get', async () => {
+    // A departing school needs a checklist they can tick off against what
+    // actually arrived. The counts are read in one transaction, so the
+    // manifest is internally consistent.
+    const { r, csv } = await exportCsv(tokens.headA, 'offboarding');
+    assert.equal(r.status, 200);
+    const by = new Map(csv!.rows.map((x) => [x.cells['ডেটাসেট'], x.cells]));
+    for (const d of ['students', 'teachers', 'guardians', 'structure',
+                     'attendance', 'results', 'fees', 'notices', 'audit']) {
+      assert.ok(by.has(d), `the manifest omits ${d}`);
+    }
+    // Two children were seeded for tenant A, and two guardianship links.
+    assert.equal(by.get('students')!['বর্তমান সারি'], '2');
+    assert.equal(by.get('guardians')!['বর্তমান সারি'], '2');
+  });
+
+  test('every address in the manifest is a real, authorized endpoint', async () => {
+    // Nothing about offboarding gets its own weaker path: the manifest
+    // points at the same endpoints, which enforce the same roles.
+    const { csv } = await exportCsv(tokens.headA, 'offboarding');
+    for (const row of csv!.rows) {
+      assert.match(row.cells['কোথা থেকে নামাবেন'],
+        /^\/api\/v1\/(academics|ops|finance)\/export\?dataset=[a-z]+$/,
+        `bad address for ${row.cells['ডেটাসেট']}`);
+    }
+    // The ops ones are servable by this very handler.
+    const opsOnes = csv!.rows
+      .filter((x) => x.cells['কোথা থেকে নামাবেন'].includes('/ops/'))
+      .map((x) => x.cells['ডেটাসেট']);
+    for (const d of opsOnes) {
+      assert.equal((await exportCsv(tokens.headA, d)).r.status, 200, d);
+    }
+  });
+
+  test('it EXPORTS and does not deactivate — §16 keeps them separate', async () => {
+    // A head teacher asking for a copy of their own roster must not lose
+    // their login. Nothing in the export path writes a lifecycle column.
+    const before = await asBootstrap(db, ctxA, async (c) => c.query<{ status: string }>(
+      `SELECT status::text AS status FROM tenants WHERE id = $1`, [T_A]));
+    await exportCsv(tokens.headA, 'offboarding');
+    const after = await asBootstrap(db, ctxA, async (c) => c.query<{ status: string }>(
+      `SELECT status::text AS status FROM tenants WHERE id = $1`, [T_A]));
+    assert.equal(after.rows[0].status, before.rows[0].status,
+      'exporting changed the tenant’s status');
+  });
+
+  test('a class teacher cannot ask what leaving would contain', async () => {
+    assert.equal((await exportCsv(tokens.teachA, 'offboarding')).r.status, 403);
+  });
+
+  test('the manifest counts THIS school only', async () => {
+    const { csv } = await exportCsv(tokens.headB, 'offboarding');
+    const by = new Map(csv!.rows.map((x) => [x.cells['ডেটাসেট'], x.cells]));
+    // B has one teacher and no students, guardians or notices.
+    assert.equal(by.get('students')!['বর্তমান সারি'], '0');
+    assert.equal(by.get('guardians')!['বর্তমান সারি'], '0');
   });
 });

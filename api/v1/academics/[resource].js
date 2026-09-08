@@ -2153,7 +2153,7 @@ async function handler5(req, res) {
             WHERE g.mark_id = m.id`,
           [examId, scaleId]
         );
-        const results = await client.query(
+        const results2 = await client.query(
           `INSERT INTO exam_results
              (tenant_id, exam_id, student_id, section_id, academic_year_id,
               total_marks, total_max, percentage, gpa, gpa_without_optional,
@@ -2239,7 +2239,7 @@ async function handler5(req, res) {
         }
         return {
           marksGraded: graded.rowCount ?? 0,
-          resultsPublished: results.rowCount ?? 0,
+          resultsPublished: results2.rowCount ?? 0,
           notified
         };
       }
@@ -4539,12 +4539,12 @@ async function loadHome(client, ward) {
   const attendanceOn = await stateOf("attendance");
   const financeOn = await stateOf("finance");
   const resultsOn = await stateOf("results");
-  const attendance = attendanceOn ? await loadAttendance(client, ward.studentId) : null;
+  const attendance2 = attendanceOn ? await loadAttendance(client, ward.studentId) : null;
   const fees = financeOn ? await loadFees(client, ward.studentId) : null;
   const result = resultsOn ? await loadLatestResult(client, ward.studentId) : null;
   return {
     ...ward,
-    attendance,
+    attendance: attendance2,
     fees,
     result,
     services: { attendance: attendanceOn, finance: financeOn, results: resultsOn }
@@ -5713,15 +5713,15 @@ async function handler21(req, res) {
         await serviceOn("finance")
       ];
       const enrolments = await loadEnrolments(c, studentId);
-      const attendance = attendanceOn ? await loadAttendance2(c, studentId) : null;
-      const results = resultsOn ? await loadResults(c, studentId) : null;
+      const attendance2 = attendanceOn ? await loadAttendance2(c, studentId) : null;
+      const results2 = resultsOn ? await loadResults(c, studentId) : null;
       const fees = MAY_SEE_FEES.includes(role) && financeOn ? await loadFees2(c, studentId) : null;
       const printable = Object.entries(DOCUMENT_ACCESS).filter(([, roles]) => roles.includes(role)).map(([type]) => type);
       return {
         student: profile,
         enrolments,
-        attendance,
-        results,
+        attendance: attendance2,
+        results: results2,
         fees,
         documents: printable.filter((t) => !CERTIFICATE_TYPES.has(t)),
         certificates: printable.filter((t) => CERTIFICATE_TYPES.has(t)),
@@ -6111,6 +6111,21 @@ var SHIFT_BN = {
   single: "\u098F\u0995\u0995"
 };
 var bnOf = (map, v) => v ? map[v] ?? v : "";
+var ATTENDANCE_BN = {
+  present: "\u0989\u09AA\u09B8\u09CD\u09A5\u09BF\u09A4",
+  absent: "\u0985\u09A8\u09C1\u09AA\u09B8\u09CD\u09A5\u09BF\u09A4",
+  late: "\u09A6\u09C7\u09B0\u09BF\u09A4\u09C7",
+  excused: "\u099B\u09C1\u099F\u09BF \u09AE\u099E\u09CD\u099C\u09C1\u09B0",
+  half_day: "\u0985\u09B0\u09CD\u09A7\u09A6\u09BF\u09AC\u09B8"
+};
+var EXAM_STATUS_BN = {
+  planned: "\u09AA\u09B0\u09BF\u0995\u09B2\u09CD\u09AA\u09BF\u09A4",
+  ongoing: "\u099A\u09B2\u09AE\u09BE\u09A8",
+  marking: "\u09A8\u09AE\u09CD\u09AC\u09B0 \u09A6\u09C7\u0993\u09AF\u09BC\u09BE \u09B9\u099A\u09CD\u099B\u09C7",
+  moderation: "\u09AF\u09BE\u099A\u09BE\u0987 \u099A\u09B2\u099B\u09C7",
+  published: "\u09AA\u09CD\u09B0\u0995\u09BE\u09B6\u09BF\u09A4",
+  locked: "\u099A\u09C2\u09A1\u09BC\u09BE\u09A8\u09CD\u09A4"
+};
 var STUDENT_HEADERS = [
   "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0 \u0986\u0987\u09A1\u09BF",
   "\u09A8\u09BE\u09AE",
@@ -6192,10 +6207,175 @@ var students = {
     bnOf(LIFECYCLE_BN, r.lifecycle_status)
   ]
 };
+var attendance = {
+  headers: [
+    "\u09A4\u09BE\u09B0\u09BF\u0996",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF",
+    "\u09B6\u09BE\u0996\u09BE",
+    "\u09AA\u09BF\u09B0\u09BF\u09AF\u09BC\u09A1",
+    "\u09AC\u09BF\u09B7\u09AF\u09BC",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0 \u0986\u0987\u09A1\u09BF",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0\u09B0 \u09A8\u09BE\u09AE",
+    "\u09B0\u09CB\u09B2",
+    "\u0985\u09AC\u09B8\u09CD\u09A5\u09BE",
+    "\u0995\u09A4 \u09AE\u09BF\u09A8\u09BF\u099F \u09A6\u09C7\u09B0\u09BF",
+    "\u09AE\u09A8\u09CD\u09A4\u09AC\u09CD\u09AF",
+    "\u09AF\u09BF\u09A8\u09BF \u09A8\u09BF\u09AF\u09BC\u09C7\u099B\u09C7\u09A8"
+  ],
+  /**
+   * The attendance that was actually TAKEN.  §11.
+   *
+   * Explicitly `attendance_records`, and explicitly NOT the `attendance_
+   * sheet` document. That document is the blank-grid paper fallback — its
+   * own comment in `documents.ts` says so — and it contains no attendance
+   * at all. The FINAL-OWNER audit named exactly this trap: a school handed
+   * an "attendance export" that turned out to be an empty printable grid
+   * would have been given nothing while believing they had everything.
+   *
+   * One row per student per session, which is the grain the data has. The
+   * session carries the date, period and subject; the record carries what
+   * happened to one child.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT ar.taken_on::text AS taken_on,
+              c.name_bn         AS class_name,
+              s.name            AS section_name,
+              ses.period_no,
+              sub.name_bn       AS subject_name,
+              sp.student_code,
+              u.full_name_bn    AS student_name,
+              e.roll_no,
+              ar.status::text   AS status,
+              ar.minutes_late, ar.remark,
+              m.full_name_bn    AS marked_by_name
+         FROM attendance_records ar
+         JOIN users u ON u.id = ar.student_id AND u.deleted_at IS NULL
+         LEFT JOIN student_profiles sp ON sp.user_id = ar.student_id
+         LEFT JOIN attendance_sessions ses ON ses.id = ar.session_id
+         LEFT JOIN subjects sub ON sub.id = ses.subject_id
+         LEFT JOIN sections s ON s.id = ar.section_id
+         LEFT JOIN classes  c ON c.id = s.class_id
+         LEFT JOIN enrolments e ON e.student_id = ar.student_id
+                               AND e.section_id = ar.section_id
+         LEFT JOIN users m ON m.id = ar.marked_by AND m.deleted_at IS NULL
+        ORDER BY ar.taken_on DESC, c.level_no NULLS LAST, s.name NULLS LAST,
+                 e.roll_no NULLS LAST`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.taken_on),
+    cell(r.class_name),
+    cell(r.section_name),
+    cell(r.period_no),
+    cell(r.subject_name),
+    cell(r.student_code),
+    cell(r.student_name),
+    cell(r.roll_no),
+    bnOf(ATTENDANCE_BN, r.status),
+    cell(r.minutes_late),
+    cell(r.remark),
+    cell(r.marked_by_name)
+  ]
+};
+var results = {
+  headers: [
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09AC\u09B0\u09CD\u09B7",
+    "\u09AA\u09B0\u09C0\u0995\u09CD\u09B7\u09BE",
+    "\u09AA\u09B0\u09C0\u0995\u09CD\u09B7\u09BE\u09B0 \u0985\u09AC\u09B8\u09CD\u09A5\u09BE",
+    "\u09AA\u09CD\u09B0\u0995\u09BE\u09B6\u09C7\u09B0 \u09A4\u09BE\u09B0\u09BF\u0996",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF",
+    "\u09B6\u09BE\u0996\u09BE",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0 \u0986\u0987\u09A1\u09BF",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0\u09B0 \u09A8\u09BE\u09AE",
+    "\u09B0\u09CB\u09B2",
+    "\u09AC\u09BF\u09B7\u09AF\u09BC",
+    "\u09B8\u09C3\u099C\u09A8\u09B6\u09C0\u09B2",
+    "\u09A8\u09C8\u09B0\u09CD\u09AC\u09CD\u09AF\u0995\u09CD\u09A4\u09BF\u0995",
+    "\u09AC\u09CD\u09AF\u09AC\u09B9\u09BE\u09B0\u09BF\u0995",
+    "\u09A7\u09BE\u09B0\u09BE\u09AC\u09BE\u09B9\u09BF\u0995",
+    "\u09AE\u09CB\u099F \u09A8\u09AE\u09CD\u09AC\u09B0",
+    "\u0997\u09CD\u09B0\u09C7\u09A1",
+    "\u0997\u09CD\u09B0\u09C7\u09A1 \u09AA\u09AF\u09BC\u09C7\u09A8\u09CD\u099F",
+    "\u0985\u09A8\u09C1\u09AA\u09B8\u09CD\u09A5\u09BF\u09A4"
+  ],
+  /**
+   * Per-subject marks, which is the grain that can be recomputed from.
+   *
+   * `exam_results` holds the derived per-student totals — GPA, rank,
+   * pass/fail — and `exam_marks` holds what was actually entered. §12 asks
+   * for "enough structure to reconstruct the result history", and the
+   * component marks are that: a GPA can be recomputed from subjects, and
+   * subjects cannot be recovered from a GPA.
+   *
+   * UNPUBLISHED exams are included, with their status named. The marks are
+   * the school's own work whether or not a head has pressed publish, and an
+   * export that showed only published results would hand back a term with
+   * the marking still in progress silently missing.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT ay.label            AS year_label,
+              ex.name_bn          AS exam_name,
+              ex.status::text     AS exam_status,
+              ex.published_at::text AS exam_published_at,
+              c.name_bn           AS class_name,
+              s.name              AS section_name,
+              sp.student_code,
+              u.full_name_bn      AS student_name,
+              e.roll_no,
+              sub.name_bn         AS subject_name,
+              em.cq_marks::text, em.mcq_marks::text,
+              em.practical_marks::text, em.ca_marks::text,
+              em.total_marks::text,
+              em.grade_letter, em.grade_point::text,
+              em.is_absent
+         FROM exam_marks em
+         JOIN exam_subjects es ON es.id = em.exam_subject_id
+         JOIN exams ex         ON ex.id = es.exam_id
+         JOIN users u          ON u.id = em.student_id AND u.deleted_at IS NULL
+         LEFT JOIN subjects sub ON sub.id = es.subject_id
+         LEFT JOIN student_profiles sp ON sp.user_id = em.student_id
+         LEFT JOIN academic_years ay ON ay.id = em.academic_year_id
+         LEFT JOIN enrolments e ON e.student_id = em.student_id
+                               AND e.academic_year_id = em.academic_year_id
+         LEFT JOIN sections s ON s.id = e.section_id
+         LEFT JOIN classes  c ON c.id = s.class_id
+        ORDER BY ay.label DESC, ex.name_bn, c.level_no NULLS LAST,
+                 s.name NULLS LAST, e.roll_no NULLS LAST, sub.name_bn`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.year_label),
+    cell(r.exam_name),
+    bnOf(EXAM_STATUS_BN, r.exam_status),
+    cell(r.exam_published_at),
+    cell(r.class_name),
+    cell(r.section_name),
+    cell(r.student_code),
+    cell(r.student_name),
+    cell(r.roll_no),
+    cell(r.subject_name),
+    cell(r.cq_marks),
+    cell(r.mcq_marks),
+    cell(r.practical_marks),
+    cell(r.ca_marks),
+    cell(r.total_marks),
+    cell(r.grade_letter),
+    cell(r.grade_point),
+    r.is_absent === null ? "" : r.is_absent ? "\u09B9\u09CD\u09AF\u09BE\u0981" : "\u09A8\u09BE"
+  ]
+};
 async function handler23(req, res) {
   return handleCsvExport(req, res, {
     roles: EXPORT_ROLES,
-    datasets: { students }
+    datasets: {
+      students,
+      attendance,
+      results
+    }
   });
 }
 

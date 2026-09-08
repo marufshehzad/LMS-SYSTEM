@@ -7705,12 +7705,62 @@ function audienceCell(type, count) {
   const label = AUDIENCE_BN[type] ?? type;
   return count === null || count === void 0 ? label : `${label} (${count})`;
 }
+var UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function jsonCell(v) {
   if (v === null || v === void 0) return "";
   const safe = redact(v);
   if (typeof safe !== "object") return String(safe);
-  return Object.entries(safe).map(([k, val]) => `${k}: ${typeof val === "object" && val !== null ? JSON.stringify(val) : String(val)}`).join("; ");
+  return Object.entries(safe).map(([k, val]) => {
+    const text2 = typeof val === "object" && val !== null ? JSON.stringify(val) : String(val);
+    return `${k}: ${text2.replace(new RegExp(UUID_VALUE.source, "gi"), "\u2022\u2022\u2022")}`;
+  }).join("; ");
 }
+var offboarding = {
+  headers: ["\u09A1\u09C7\u099F\u09BE\u09B8\u09C7\u099F", "\u0995\u09C0 \u0986\u099B\u09C7", "\u09AC\u09B0\u09CD\u09A4\u09AE\u09BE\u09A8 \u09B8\u09BE\u09B0\u09BF", "\u0995\u09CB\u09A5\u09BE \u09A5\u09C7\u0995\u09C7 \u09A8\u09BE\u09AE\u09BE\u09AC\u09C7\u09A8"],
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT * FROM (VALUES
+         ('students',   '\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0\u09B0 \u09A4\u09BE\u09B2\u09BF\u0995\u09BE \u0993 \u09AD\u09B0\u09CD\u09A4\u09BF\u09B0 \u09A4\u09A5\u09CD\u09AF',
+          (SELECT count(*) FROM student_profiles)::text,
+          '/api/v1/academics/export?dataset=students'),
+         ('teachers',   '\u09B6\u09BF\u0995\u09CD\u09B7\u0995 \u0993 \u0995\u09B0\u09CD\u09AE\u09C0\u09B0 \u09A4\u09BE\u09B2\u09BF\u0995\u09BE',
+          (SELECT count(*) FROM users u WHERE u.deleted_at IS NULL
+             AND EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = u.id
+                          AND ur.role_code NOT IN ('student','guardian')))::text,
+          '/api/v1/ops/export?dataset=teachers'),
+         ('guardians',  '\u0985\u09AD\u09BF\u09AD\u09BE\u09AC\u0995 \u0993 \u09B8\u09AE\u09CD\u09AA\u09B0\u09CD\u0995',
+          (SELECT count(*) FROM guardianships)::text,
+          '/api/v1/ops/export?dataset=guardians'),
+         ('structure',  '\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09AC\u09B0\u09CD\u09B7, \u09B6\u09CD\u09B0\u09C7\u09A3\u09BF \u0993 \u09B8\u09C7\u0995\u09B6\u09A8',
+          (SELECT count(*) FROM sections)::text,
+          '/api/v1/ops/export?dataset=structure'),
+         ('attendance', '\u09B9\u09BE\u099C\u09BF\u09B0\u09BE\u09B0 \u09B8\u09AC \u09B0\u09C7\u0995\u09B0\u09CD\u09A1',
+          (SELECT count(*) FROM attendance_records)::text,
+          '/api/v1/academics/export?dataset=attendance'),
+         ('results',    '\u09AA\u09B0\u09C0\u0995\u09CD\u09B7\u09BE\u09B0 \u09A8\u09AE\u09CD\u09AC\u09B0 \u0993 \u09AB\u09B2\u09BE\u09AB\u09B2',
+          (SELECT count(*) FROM exam_marks)::text,
+          '/api/v1/academics/export?dataset=results'),
+         ('fees',       '\u0987\u09A8\u09AD\u09AF\u09BC\u09C7\u09B8, \u09AA\u09B0\u09BF\u09B6\u09CB\u09A7 \u0993 \u09AC\u0995\u09C7\u09AF\u09BC\u09BE',
+          (SELECT count(*) FROM invoices)::text,
+          '/api/v1/finance/export?dataset=fees'),
+         ('notices',    '\u09AA\u09CD\u09B0\u09A4\u09BF\u09B7\u09CD\u09A0\u09BE\u09A8\u09C7\u09B0 \u09B8\u09AC \u09A8\u09CB\u099F\u09BF\u09B6',
+          (SELECT count(*) FROM notices)::text,
+          '/api/v1/ops/export?dataset=notices'),
+         ('audit',      '\u0995\u09C7 \u0995\u0996\u09A8 \u0995\u09C0 \u09AA\u09B0\u09BF\u09AC\u09B0\u09CD\u09A4\u09A8 \u0995\u09B0\u09C7\u099B\u09C7\u09A8',
+          (SELECT count(*) FROM audit.activity_log)::text,
+          '/api/v1/ops/export?dataset=audit')
+       ) AS t(dataset, title, rows, where_url)
+       ORDER BY 1`
+    );
+    return rows.map((r) => ({
+      dataset: r.dataset,
+      title: r.title,
+      rows: r.rows,
+      where: r.where_url
+    }));
+  },
+  row: (r) => [cell(r.dataset), cell(r.title), cell(r.rows), cell(r.where)]
+};
 async function handler21(req, res) {
   return handleCsvExport(req, res, {
     roles: EXPORT_ROLES,
@@ -7719,7 +7769,8 @@ async function handler21(req, res) {
       guardians,
       structure,
       notices,
-      audit
+      audit,
+      offboarding
     }
   });
 }

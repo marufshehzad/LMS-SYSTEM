@@ -31,6 +31,8 @@ import { enforceRateLimit } from '../../../packages/server-core/src/rate-limit.t
 // school, every month.
 import feestructures from './feestructures.ts';
 import payments from './payments.ts';
+// P11. Data portability — the money the school billed and collected.
+import exportData from './export.ts';
 
 /**
  * The purchasable service this endpoint IS (migration 051 catalogue).
@@ -465,6 +467,7 @@ async function ledger(req: IncomingMessage, res: ServerResponse, cors: Record<st
 }
 
 const ROUTES: Record<string, (req: IncomingMessage, res: ServerResponse, cors: Record<string, string>) => Promise<void>> = {
+  export: exportData,
   invoices,
   pay,
   receipts,

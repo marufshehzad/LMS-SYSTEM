@@ -162,7 +162,10 @@ after(async () => {
 });
 
 /** Fetch an export and parse the FILE, not the response. */
-async function exportCsv(token: string, url = '/api/v1/academics/export?dataset=students') {
+async function exportCsv(token: string, dataset = 'students') {
+  const url = dataset.startsWith('/')
+    ? dataset
+    : `/api/v1/academics/export?dataset=${dataset}`;
   const r = await call(exportData, { url, token });
   return { r, csv: r.status === 200 ? parseCsv(r.raw) : null };
 }
@@ -358,5 +361,72 @@ describe('P11 §24/§27/§28 — headers, errors and the audit', { skip }, () =>
     // The narration must not become a second copy of the data.
     assert.doesNotMatch(JSON.stringify(rows[0].after_state), /রাফি|আহমেদ/,
       'the audit entry contains exported row content');
+  });
+});
+
+describe('P11 §11 — the attendance export carries actual attendance', { skip }, () => {
+  const SESSION = '7b110000-0000-4000-8000-0000000000f1';
+
+  test('THE ONE THAT MATTERS — real records, not the blank-grid document', async () => {
+    // The FINAL-OWNER audit named this trap directly: `attendance_sheet` is
+    // the blank-grid PAPER fallback and contains no attendance at all. A
+    // school handed that as their "attendance export" would have been given
+    // nothing while believing they had everything.
+    await asBootstrap(db, ctxA, async (c) => {
+      await c.query(
+        `INSERT INTO attendance_sessions
+           (id, tenant_id, section_id, academic_year_id, taken_on, period_no,
+            mode, taken_by, taken_at)
+         VALUES ($1,$2,$3,$4,'2026-03-02',1,'section_daily',$5, now())
+         ON CONFLICT DO NOTHING`, [SESSION, T_A, SEC_A, YEAR_A, HEAD_A]);
+      await c.query(
+        `INSERT INTO attendance_records
+           (tenant_id, session_id, student_id, section_id, taken_on, status,
+            minutes_late, marked_by, marked_at)
+         VALUES ($1,$2,$3,$4,'2026-03-02','late',12,$5, now())
+         ON CONFLICT DO NOTHING`, [T_A, SESSION, STU_A1, SEC_A, HEAD_A]);
+    });
+
+    const { r, csv } = await exportCsv(tokens.headA, 'attendance');
+    assert.equal(r.status, 200);
+    const row = csv!.rows.find((x) => x.cells['শিক্ষার্থীর নাম'] === 'রাফি আহমেদ');
+    assert.ok(row, 'the attendance record is missing from the export');
+    assert.equal(row!.cells['তারিখ'], '2026-03-02');
+    assert.equal(row!.cells['অবস্থা'], 'দেরিতে');
+    assert.equal(row!.cells['কত মিনিট দেরি'], '12');
+    assert.equal(row!.cells['যিনি নিয়েছেন'], 'প্রধান');
+  });
+
+  test('one school’s attendance never reaches another’s file', async () => {
+    const b = await exportCsv(tokens.headB, 'attendance');
+    assert.equal(b.r.status, 200);
+    assert.doesNotMatch(b.r.raw, /রাফি|অভি/, 'A’s attendance is in B’s file');
+  });
+});
+
+describe('P11 §12 — the results export', { skip }, () => {
+  test('per-subject marks, so a GPA can be recomputed from them', async () => {
+    // §12 asks for enough structure to reconstruct the history. Component
+    // marks are that: a GPA follows from subjects, subjects do not follow
+    // from a GPA.
+    const { r, csv } = await exportCsv(tokens.headA, 'results');
+    assert.equal(r.status, 200);
+    for (const h of ['সৃজনশীল', 'নৈর্ব্যক্তিক', 'মোট নম্বর', 'গ্রেড', 'বিষয়']) {
+      assert.ok(csv!.headers.includes(h), `missing column ${h}`);
+    }
+  });
+
+  test('the results file carries no uuid and no secret', async () => {
+    const { r } = await exportCsv(tokens.headA, 'results');
+    assert.doesNotMatch(r.raw, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/i);
+    assert.doesNotMatch(r.raw, /password|hash|secret|token|ciphertext/i);
+  });
+
+  test('every academics dataset refuses a class teacher', async () => {
+    for (const d of ['students', 'attendance', 'results']) {
+      const r = await call(exportData, {
+        url: `/api/v1/academics/export?dataset=${d}`, token: tokens.teachA });
+      assert.equal(r.status, 403, d);
+    }
   });
 });

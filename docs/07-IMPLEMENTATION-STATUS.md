@@ -1683,6 +1683,40 @@ and bulk cross-institution operations stay deferred (**B-40**) — P10 is the
 phase that makes them tempting, and the natural first bulk action is
 suspension.
 
+### P11 — data portability (2026-09-08)
+
+The gap the FINAL-OWNER audit called "the clearest customer-trust gap": there
+was no export anywhere, and `toCsv()` had exactly one caller — the error list
+for a FAILED import.
+
+**What a school can now take.** Ten `GET …/export?dataset=…` endpoints across
+academics, ops and finance: students, teachers, guardians, structure,
+attendance, results, fees, notices, audit, and an offboarding manifest that
+lists every dataset with its live row count and the address to fetch it from.
+
+**Streamed CSV per dataset, no archive and no object storage.** B-17 stays
+stubbed and untouched; nothing was added to make export look complete.
+Streaming is genuine on Vercel and buffered on Netlify, whose adapter joins
+written chunks at `end()` — stated in `csv-response.ts` rather than implied.
+
+**Authorization narrowed rather than widened.** Principal, school owner and IT
+admin; the accountant for fees alone. A class teacher reads their own roster on
+a screen and cannot export the school.
+
+**The tenant is `claims.tid` and nothing else.** The queries carry no tenant
+predicate at all — `withTenant` sets `app.current_tenant()` and RLS decides —
+so a handler that forgot a `WHERE` clause would still return only the caller's
+school. A forged tenant in query, body-shaped params or headers returns the
+byte-identical file, and the security probe asserts that by comparing bytes.
+
+**Spreadsheet safety.** A leading `=`, `+`, `-`, `@`, tab or CR is neutralised
+unless the value is purely numeric — which keeps `-500` addable and keeps an
+E.164 phone dialable through a round-trip.
+
+**Known limits:** no stored artifact (by design), streaming real on Vercel
+only, and the platform-operator fleet export is not built — the school-side
+offboarding path is what shipped.
+
 ## 9k. R-8 — go-live unlocks (code closed; contracts open)
 
 R-8 is the phase that turns things on. The surprise was how much of what it was

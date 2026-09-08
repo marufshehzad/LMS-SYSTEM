@@ -440,14 +440,125 @@ function audienceCell(type: string | null, count: number | null): string {
  * flattening a masked value is fine, masking a flattened string is not,
  * because by then the key that identified it as a phone number is gone.
  */
+/**
+ * Internal identifiers, masked by SHAPE rather than by key name.
+ *
+ * The viewer's `redact` masks by key (`phone`, `nid`, `email`…), which is
+ * the right rule for the values it was written for and does not cover this:
+ * an audit state carries `teacherId`, `sectionId`, `roomId` and their
+ * values are uuids. Nothing in the key name says "identifier" — `teacherId`
+ * looks as innocuous as `reason` — so a name-based rule cannot catch them.
+ *
+ * Found by fetching a real audit export in a browser and grepping the bytes,
+ * not by a test: the suite's own seeded row had no uuid in it, so every
+ * assertion passed against a file that was clean only because the fixture
+ * was. §6 keeps uuids out of exports, and this is the last place one hid.
+ *
+ * `•••` rather than dropping the pair, so the school can still see THAT a
+ * teacher was involved in the change without being handed our primary key.
+ */
+const UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function jsonCell(v: unknown): string {
   if (v === null || v === undefined) return '';
   const safe = redact(v);
   if (typeof safe !== 'object') return String(safe);
   return Object.entries(safe as Record<string, unknown>)
-    .map(([k, val]) => `${k}: ${typeof val === 'object' && val !== null ? JSON.stringify(val) : String(val)}`)
+    .map(([k, val]) => {
+      const text = typeof val === 'object' && val !== null
+        ? JSON.stringify(val) : String(val);
+      // Applied to the rendered text, so a uuid nested inside a stringified
+      // object is caught as well as a bare one.
+      return `${k}: ${text.replace(new RegExp(UUID_VALUE.source, 'gi'), '•••')}`;
+    })
     .join('; ');
 }
+
+
+/* ── offboarding (§16) ────────────────────────────────────────────────── */
+
+interface OffboardRow {
+  dataset: string; title: string; rows: string; where: string;
+}
+
+/**
+ * "The school is leaving." — what there is, how much, and where to get it.
+ *
+ * ── Why a manifest and not an archive ───────────────────────────────────
+ * §0's contract is a streamed CSV per dataset, and §16 asks for the
+ * offboarding case to be "explicit and safe" with "deterministic contents"
+ * — not for a second mechanism. So this is the INDEX to the exports rather
+ * than a bundle of them: one row per dataset, its row count as it stands
+ * right now, and the exact address to fetch it from.
+ *
+ * That buys three things an archive would not. The counts are a checklist a
+ * departing school can tick off against what they actually received. The
+ * addresses are the same authorized endpoints, so nothing about offboarding
+ * gets its own weaker path. And no part of it needs object storage, which
+ * is stubbed (B-17) — assembling a zip in memory to look complete is
+ * precisely what the brief forbids.
+ *
+ * ── It exports. It does not deactivate. ─────────────────────────────────
+ * §16 is explicit that export and suspension are separate operations, and
+ * nothing here writes to `tenants`, `tenant_operations` or any lifecycle
+ * column. A school can take their data and stay; a school can be suspended
+ * and still take their data. Coupling the two would mean a head teacher
+ * asking for a copy of their own roster and losing their login.
+ *
+ * ── The counts are the counts, at the moment they were asked for ────────
+ * They are read in the same transaction as one another, so the manifest is
+ * internally consistent. It is not a promise about a file fetched an hour
+ * later — a school that enrols a student between the manifest and the
+ * download will find one more row than the manifest said, and that is the
+ * truth rather than a defect.
+ */
+const offboarding: ExportDataset<OffboardRow> = {
+  headers: ['ডেটাসেট', 'কী আছে', 'বর্তমান সারি', 'কোথা থেকে নামাবেন'],
+
+  async select(client: ExportClient): Promise<OffboardRow[]> {
+    const { rows } = await client.query<OffboardRow>(
+      `SELECT * FROM (VALUES
+         ('students',   'শিক্ষার্থীর তালিকা ও ভর্তির তথ্য',
+          (SELECT count(*) FROM student_profiles)::text,
+          '/api/v1/academics/export?dataset=students'),
+         ('teachers',   'শিক্ষক ও কর্মীর তালিকা',
+          (SELECT count(*) FROM users u WHERE u.deleted_at IS NULL
+             AND EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = u.id
+                          AND ur.role_code NOT IN ('student','guardian')))::text,
+          '/api/v1/ops/export?dataset=teachers'),
+         ('guardians',  'অভিভাবক ও সম্পর্ক',
+          (SELECT count(*) FROM guardianships)::text,
+          '/api/v1/ops/export?dataset=guardians'),
+         ('structure',  'শিক্ষাবর্ষ, শ্রেণি ও সেকশন',
+          (SELECT count(*) FROM sections)::text,
+          '/api/v1/ops/export?dataset=structure'),
+         ('attendance', 'হাজিরার সব রেকর্ড',
+          (SELECT count(*) FROM attendance_records)::text,
+          '/api/v1/academics/export?dataset=attendance'),
+         ('results',    'পরীক্ষার নম্বর ও ফলাফল',
+          (SELECT count(*) FROM exam_marks)::text,
+          '/api/v1/academics/export?dataset=results'),
+         ('fees',       'ইনভয়েস, পরিশোধ ও বকেয়া',
+          (SELECT count(*) FROM invoices)::text,
+          '/api/v1/finance/export?dataset=fees'),
+         ('notices',    'প্রতিষ্ঠানের সব নোটিশ',
+          (SELECT count(*) FROM notices)::text,
+          '/api/v1/ops/export?dataset=notices'),
+         ('audit',      'কে কখন কী পরিবর্তন করেছেন',
+          (SELECT count(*) FROM audit.activity_log)::text,
+          '/api/v1/ops/export?dataset=audit')
+       ) AS t(dataset, title, rows, where_url)
+       ORDER BY 1`);
+    return rows.map((r) => ({
+      dataset: (r as unknown as Record<string, string>).dataset,
+      title: (r as unknown as Record<string, string>).title,
+      rows: (r as unknown as Record<string, string>).rows,
+      where: (r as unknown as Record<string, string>).where_url,
+    }));
+  },
+
+  row: (r) => [cell(r.dataset), cell(r.title), cell(r.rows), cell(r.where)],
+};
 
 export default async function handler(
   req: IncomingMessage, res: ServerResponse,
@@ -455,7 +566,7 @@ export default async function handler(
   return handleCsvExport(req, res, {
     roles: EXPORT_ROLES,
     datasets: {
-      teachers, guardians, structure, notices, audit,
+      teachers, guardians, structure, notices, audit, offboarding,
     } as unknown as Record<string, ExportDataset<never>>,
   });
 }

@@ -1908,6 +1908,30 @@ type-checked — measured at 113 errors to fix, which is not P10-sized) and **B-
 **P11 — portability.** Data export, which does not exist in any form today and is the
 clearest customer-trust gap.
 
+### P11 — DONE, 2026-09-08
+
+Ten datasets plus an offboarding manifest, as **streamed CSV per dataset**. The contract
+was decided from this repository rather than from preference: object storage is stubbed
+(B-17), nothing here asked for an archive, and a CSV opens in the software a school office
+runs. No storage dependency was introduced.
+
+| dataset | service | dataset | service |
+|---|---|---|---|
+| students | academics | notices | ops |
+| teachers | ops | audit | ops |
+| guardians | ops | attendance | academics |
+| structure | ops | results | academics |
+| fees | finance | offboarding (manifest) | ops |
+
+**B-11's export half and B-12 are closed by this.** Roles were narrowed, not widened:
+principal / school owner / IT admin, plus the accountant for fees alone. Streaming is real
+on Vercel and buffered on Netlify — the adapter joins written chunks at `end()` — and that
+is written into the code rather than implied.
+
+Security probe 32 → **38 checks**, six of them reading the export FILE rather than its
+status code. That area was rewritten after it passed against a handler mutated to trust
+`?tenantId=`, which turned a 1-row file into 2,000 rows of another school's students.
+
 The pilot gates remain: the four writers, cron scheduling, an alert that reaches a human, the
 SMS aggregator (external), and the 049 → 064 catch-up.
 

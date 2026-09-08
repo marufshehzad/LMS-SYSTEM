@@ -14795,3 +14795,157 @@ Two per suite run, and the teardown cannot delete them because it runs on the
 platform connection, where `tenant_self` hides the rows. P10's own new
 fixtures — seeded inside a rolled-back transaction — leak **zero**, which is
 the shape B-119's fix needs.
+
+
+# P11 — portability: the first files this product ever gave a school back (2026-09-08)
+
+`7299b48` … and the commits after it. The Master Plan's whole statement of
+P11 is one sentence — *"portability. Data export, which does not exist in any
+form today and is the clearest customer-trust gap."* Until this phase the only
+file the product ever handed a school was the error list from a FAILED import:
+a list of their own mistakes. Everything they typed in stayed in.
+
+Ten datasets, plus an offboarding manifest.
+
+## The contract, decided before any code (§0)
+
+**A streamed CSV per dataset, not one archive.** Three reasons, all from the
+repository rather than from preference:
+
+1. **Object storage is stubbed** (B-17) and returns 503. An archive has to be
+   assembled somewhere, and the only honest somewhere today is memory. Adding
+   a storage provider to make export *look* complete is what the brief forbids.
+2. **Nothing in the Master Plan asks for an archive.** It asks for export.
+3. **A CSV opens in the software a Bangladeshi school office runs.** A zip of
+   nine CSVs is one more step between a head teacher and their data.
+
+**Streaming is honest on Vercel and NOT on Netlify.** `netlify/adapter.mjs`
+shims Node's `ServerResponse` onto a Web `Response`, and its `write()` pushes
+into an array joined at `end()` — so the whole file is resident before the
+first byte leaves. Same bytes, same headers, different memory profile. Written
+into `csv-response.ts` so nobody reads "streaming" in the code and believes it
+on both edges.
+
+## What shipped
+
+| dataset | grain | service |
+|---|---|---|
+| students | one row per student | academics |
+| teachers | one row per staff member | ops |
+| guardians | one row per LINK | ops |
+| structure | one row per section | ops |
+| attendance | one row per student per session | academics |
+| results | one row per subject mark | academics |
+| fees | one row per invoice | finance |
+| notices | one row per notice | ops |
+| audit | one row per activity entry | ops |
+| offboarding | one row per dataset — a manifest | ops |
+
+## Five bugs, and how each was found
+
+**1. A duplicated student — found by reading a constraint.** The students
+query began as `LEFT JOIN enrolments ON status = 'active'`. `enrolments` is
+unique on `(tenant, academic_year, student)` — one row per YEAR — so a student
+active in 2025 and 2026 is TWO rows in an export whose entire purpose is a
+faithful copy. The fixture had exactly one active enrolment each, so nothing
+failed. Replaced with a LATERAL that takes the current year, else the most
+recent. The test was written after the fix and then verified by restoring the
+bug.
+
+**2. A probe that could not fail — found by mutating the handler.** The first
+version of security-probe area 9b reused `mentions()`, which looks for the
+other tenant's uuid and name. §6 keeps BOTH out of an export *by design*, so it
+was searching a CSV for identifiers that are absent on purpose. It passed
+against a handler deliberately mutated to trust `?tenantId=` — a mutation that
+turned a 1-row file into **2,000 rows of another school's students**. Rewritten
+to compare CONTENT: no row of B's file may appear in A's, and a forged tenant
+must return the **byte-identical** file. Re-run against the same mutation it
+fails and names the damage.
+
+**3. A uuid in the notices export — found by reading a column type.**
+`notices.audience` is jsonb shaped `{"ids": [...], "type": "section"}`. The
+column name gives no hint that it contains primary keys. Now rendered as a
+phrase and a count.
+
+**4. A uuid in the audit export — found by fetching a real file in a browser.**
+The audit viewer's redactor masks by KEY NAME (`phone`, `nid`, `email`), which
+cannot catch `teacherId`, whose name looks as innocuous as `reason` and whose
+value is a primary key. The suite's seeded rows had no such field, so every
+assertion passed **against a file that was clean only because the fixture
+was**. Fixed by masking uuid-shaped VALUES; the school still sees THAT a
+teacher was involved.
+
+**5. An export the service worker cached.** `/api/v1/academics/export` matched
+the reference-data rule on its prefix and landed in `CACHE_DATA` — a school's
+whole roster persisting in an office machine's browser cache. B-104's
+tenant-keying would have kept it from the NEXT school; it would not have
+stopped it being there. Now network-only, with a test proving the carve-out is
+the export and not the whole prefix.
+
+## Decisions worth keeping
+
+**Money is a number, not a formatted string.** Every screen shows
+`১,৫০০ টাকা` through `formatBdt`. The first thing a school does with a fees
+export is sum a column, and Bangla digits with a unit sum to zero. The amounts
+are plain decimals and the currency is its own column — the one place the
+display contract is deliberately not followed, because the file is not a
+display.
+
+**The formula guard exempts numbers and phones.** `csvCell` prefixes a
+leading `=`, `+`, `-`, `@`, tab or CR — except when the value is purely
+numeric. `-500` is a legitimate amount and `'-500` stops being a number in the
+sheet the school is about to sum; every phone here is E.164, and this is a
+PORTABILITY feature, so `'+8801711000111` would hand back a number that no
+longer dials. Round-trip through the product's own `parseCsv` is asserted.
+
+**One flow, not ten.** `handleCsvExport` owns authorization, tenant
+resolution, the response head, and the audit row. A dataset is a declaration
+and is never handed the chance to read a tenant from the request or to forget
+the audit entry. §27 holds by ORDERING rather than by a check: the head is
+written only after the query succeeds, so no path produces a successful empty
+file from a failed query.
+
+**Roles narrowed, not widened.** Principal, school owner and IT admin
+everywhere; the accountant is added for fees alone, because the ledger is
+their surface and they already read those rows. A class teacher reads their
+own section's roster all day and cannot export the school. **Nobody gained
+data because export exists.**
+
+**Offboarding is a manifest, not a second mechanism.** One row per dataset
+with its live row count and the exact authorized address to fetch it from — a
+checklist a departing school can tick off. It exports and does **not**
+deactivate: §16 keeps those separate, and a head teacher asking for a copy of
+their own roster must not lose their login. Asserted directly.
+
+## Verified
+
+- **2,232 tests** across 13 workspaces (+58 for P11)
+- **Security probe 38/38** over 13 areas, including six export-file checks
+- Browser acceptance: all ten datasets fetched in a real session and the
+  delivered BYTES inspected — BOM present (`ef bb bf`), `no-store`,
+  `attachment`, no uuid, no secret, in every one
+- Widths 360 · 375 · 390 · 1024 · 1280 · 1440 · 1600, no horizontal scroll
+- a11y: h1:1, 0 unnamed buttons, labelled control, keyboard reachable, no uuid
+  on screen, glyphs `aria-hidden`
+- Scale on the CLEAN fixture (2,000 students / 8,000 enrolments): 2,000 rows,
+  549 KB, **104 ms median of 7** end-to-end on localhost
+- Zero fixture leak — the `p11-*` tenants are 0 of 282 (B-119 discipline)
+- `index.html` byte-identical at `496199bd`
+
+## One measurement NOT reported
+
+A clean DB-versus-handler split. Every database-side instrument returned MORE
+than the total request time — `EXPLAIN ANALYZE` reported 177 ms against a
+104 ms round trip — which means the instrument dominated, not the query. The
+end-to-end number is the one that was measured reliably, and the split is
+simply absent rather than guessed at.
+
+## Limitations, stated
+
+- **Streaming is real on Vercel only** (see the contract above).
+- **No stored artifact.** By design, and B-17 stays open and untouched.
+- **The platform-operator fleet export is not built.** §22 lists it; the
+  school-side offboarding path is what shipped, because the school owns its
+  data and the operator's job is not to block them. A platform-svc export
+  would need new SECURITY DEFINER functions per dataset — new attack surface
+  for a case the tenant path already serves. Recorded rather than half-built.
