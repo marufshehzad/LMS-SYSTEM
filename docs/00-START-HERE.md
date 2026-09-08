@@ -6,7 +6,13 @@ the repository; where the honest answer is "not built" or "not observed", it
 says so, because a document that rounds those up to "done" is the specific
 failure D17 exists to prevent.
 
-Last reconciled **2026-09-01**, at the end of P6.
+Last reconciled **2026-09-08**, at the end of **P10**.
+
+> This line read *"2026-09-01, at the end of P6"* until 2026-09-08, through P7, P8, P9 and P10 — four
+> completed phases including the entire Smart Routine and the platform console's scale work. This is the
+> file written for a reader with no chat history, so a stale date here is the one that costs most. The
+> phase-by-phase state is in [`11-MASTER-PLAN.md`](11-MASTER-PLAN.md) §5a; the narrative is in
+> [`PHASE_LOG.md`](PHASE_LOG.md).
 
 ## Read in this order
 

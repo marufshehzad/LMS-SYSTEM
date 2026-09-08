@@ -14718,3 +14718,80 @@ consecutive runs before and after were clean at 2,174. The shape matches
 others with no diagnosis. Not reproduced, not fixed, and noted here because a
 green run after an unexplained red one is not evidence that the red one did
 not happen.
+
+
+# P11 readiness audit — four documents disagreeing with the code (2026-09-08)
+
+No implementation. The audit read the seven source-of-truth documents, then
+checked every claim against the repository, and found the documents wrong in
+four places. Corrected here rather than silently reconciled; nothing erased.
+
+## The approved P11 scope is one sentence
+
+`11-MASTER-PLAN.md:1906` — **"P11 — portability. Data export, which does not
+exist in any form today and is the clearest customer-trust gap."** That is the
+whole of it. The substantive derivation is
+`FINAL-OWNER-SAAS-OPERATIONS-AUDIT.md` §10.
+
+Re-verified against the code, and the audit's claims still hold exactly:
+
+- **Zero export routes.** All 26 platform routes and all 9 tenant dispatchers
+  enumerated; nothing matching export/csv/download/dump/backup/archive.
+- **`toCsv()` still has exactly one production caller** —
+  `academics-svc/src/import-run.ts:80`, the error list for a *failed* import.
+  The only file the product ever hands a school is a list of its own mistakes.
+- **`attendance_sheet` still contains no attendance.** `documents.ts:50` says
+  so in its own words: "the blank-grid paper fallback".
+
+## Four contradictions
+
+**1. The phase status board had two P6 rows with opposite answers.** Line 1360
+said COMPLETE with evidence; line 1362 said NOT STARTED. In the file D17 names
+as *"the single place that answers what state is every phase in, today"*, and
+it had said both since 2026-09-02. The COMPLETE row is correct; the other is
+marked SUPERSEDED rather than deleted.
+
+**2. The board stopped at P8.** No P9 or P10 rows, though both are complete
+and accepted. Added.
+
+**3. `00-START-HERE.md` said "last reconciled at the end of P6"** — through
+P7, P8, P9 and P10. That file exists specifically for a reader with no chat
+history, which is where a stale date costs most.
+
+**4. `B-11` was half false when it was written.** It reads "Export and
+human-readable actor names do not [exist]". Actor names have resolved since
+`9ada3e0` (2026-08-29): `ops-svc/api/audit.ts` LEFT JOINs `users` and returns
+`actor_name`, and `audit-view.ts` renders it with a facet filter. This backlog
+was created 2026-09-01 — three days later — and carried the claim forward
+unchecked. Only the EXPORT half was ever open, and that half is P11.
+
+## And one of my own
+
+**`B-117` duplicates `B-32`.** I opened it during P10 for "no `apps/pwa` test
+file is type-checked" without finding B-32, which has covered exactly that —
+wider — since P5-0. That is the duplication *"One row, one ID"* exists to
+prevent. B-117 is marked SUPERSEDED; the ID stays, because IDs are permanent.
+
+Re-measuring to merge them corrected B-32 in the harder direction: it claimed
+**46** unchecked test files and **73** errors; today it is **66** files (53
+`apps/pwa/test`, 8 `ui-core`, 3 `sync-svc`, 2 `offline`) and P10 measured
+**113** errors in the `apps/pwa` share alone. The cost of closing it has grown
+as P6, P9 and P10 added suites.
+
+## The flake, now characterised
+
+Two full-suite runs during this session reported **12 workspaces instead of
+13** — a workspace that did not report at all rather than a test that failed.
+The arithmetic names it each time: the first lost 144 tests (`ops-svc`), the
+second 261 (`rms-svc`). **Different workspaces**, which points away from one
+broken suite and at the shared fixture lock — **B-36**, whose advisory lock
+has no timeout, so one wedged suite stops others with no diagnosis. Still not
+reproduced on demand. Recorded rather than re-run until green.
+
+## B-119 is still growing
+
+`p7-gate` fixtures in the development database: **241 → 255** since P10 closed.
+Two per suite run, and the teardown cannot delete them because it runs on the
+platform connection, where `tenant_self` hides the rows. P10's own new
+fixtures — seeded inside a rolled-back transaction — leak **zero**, which is
+the shape B-119's fix needs.
