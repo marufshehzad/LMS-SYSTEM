@@ -33,13 +33,9 @@
  * changes nothing, because nothing reads it.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { sharedDb } from '../../../packages/server-core/src/db.ts';
-import { corsHeaders, query, json, HttpError } from '../../../packages/server-core/src/http.ts';
-import { authenticate, requireRole } from '../../../packages/server-core/src/auth.ts';
-import { writeAudit } from '../../../packages/server-core/src/audit.ts';
 import {
-  beginCsvDownload, writeCsvRow, csvFilename,
-} from '../../../packages/server-core/src/csv-response.ts';
+  handleCsvExport, cell, type ExportClient, type ExportDataset,
+} from '../../../packages/server-core/src/export-dataset.ts';
 
 /**
  * Who may export the institution.
@@ -52,103 +48,33 @@ import {
  */
 const EXPORT_ROLES = ['principal', 'school_owner', 'it_admin'];
 
-/** Datasets this service owns. Others live in ops-svc and finance-svc. */
-const DATASETS = new Set(['students']);
+/* ── Bangla vocabularies ──────────────────────────────────────────────── */
 
-export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const cors = corsHeaders();
-  if (req.method === 'OPTIONS') { res.writeHead(204, cors); res.end(); return; }
-  if (req.method !== 'GET') { json(res, 405, { error: 'method_not_allowed' }, cors); return; }
+/** `enrolments.status` — the CHECK constraint's five words, in Bangla. */
+const ENROLMENT_BN: Record<string, string> = {
+  active: 'সক্রিয়', transferred: 'স্থানান্তরিত', left: 'চলে গেছে',
+  promoted: 'উত্তীর্ণ', detained: 'অকৃতকার্য',
+};
 
-  try {
-    const claims = await authenticate(req);
-    requireRole(claims, EXPORT_ROLES);
+/** `student_profiles.lifecycle_status` — a different six-word vocabulary. */
+const LIFECYCLE_BN: Record<string, string> = {
+  enrolled: 'ভর্তি', promoted: 'পরবর্তী শ্রেণিতে', transferred_out: 'ছাড়পত্র নিয়েছে',
+  dropped_out: 'ঝরে পড়েছে', graduated: 'উত্তীর্ণ', alumni: 'প্রাক্তন',
+};
 
-    const dataset = (query(req).get('dataset') ?? '').trim();
-    if (!DATASETS.has(dataset)) {
-      throw new HttpError(400,
-        'dataset must be one of: students', 'unknown_dataset');
-    }
+const GENDER_BN: Record<string, string> = {
+  male: 'ছেলে', female: 'মেয়ে', other: 'অন্যান্য',
+};
 
-    const db = await sharedDb();
-    const actor = { tenantId: claims.tid, userId: claims.sub, role: claims.role };
+const SHIFT_BN: Record<string, string> = {
+  morning: 'সকাল', day: 'দিবা', evening: 'সন্ধ্যা', single: 'একক',
+};
 
-    await db.withTenant(actor, async (client) => {
-      const rows = await selectStudents(client);
-
-      // The head is written only after the query has succeeded. A failure
-      // before this point is a JSON error the browser can show; a failure
-      // after it is a truncated file — §27's "never a successful empty file
-      // when the query failed" is bought by this ordering, not by a check.
-      beginCsvDownload(res, cors, {
-        filename: csvFilename('students'),
-        headers: STUDENT_HEADERS,
-      });
-      for (const r of rows) writeCsvRow(res, studentRow(r));
-
-      // The count, never the contents. What the audit needs to answer later
-      // is "who took how much, and when" — the rows themselves are the one
-      // thing that must not be duplicated into a second table.
-      await writeAudit(client, actor, {
-        action: 'ops.data.export',
-        entityType: 'export',
-        after: { dataset, rows: rows.length },
-      });
-    });
-
-    res.end();
-  } catch (err) {
-    // If the head is already out, the status is fixed and a JSON body would
-    // be appended to a CSV. Ending the response is the only honest move
-    // left, and the truncation is what the school sees.
-    if (res.headersSent) { res.end(); return; }
-    if (err instanceof HttpError) {
-      json(res, err.status, { error: err.code, message: err.message }, cors);
-      return;
-    }
-    json(res, 500, { error: 'internal_error' }, cors);
-  }
-}
+/** A code the school has never seen is shown as itself, not as blank. */
+const bnOf = (map: Record<string, string>, v: string | null): string =>
+  v ? (map[v] ?? v) : '';
 
 /* ── students ─────────────────────────────────────────────────────────── */
-
-/**
- * Column headings, in the school's own language.
- *
- * A head teacher opens this in Excel and has to recognise their school. No
- * `user_id`, no `section_id`, no `tenant_id` — a uuid tells a school
- * nothing and tells anyone who obtains the file something about our
- * internals. The student's own code is the identifier that means something
- * on both sides, and it is the one the school already prints on admit cards.
- */
-const STUDENT_HEADERS = [
-  'শিক্ষার্থী আইডি',   // student_code — the school's own identifier
-  'নাম',
-  'নাম (ইংরেজি)',
-  'পিতার নাম',
-  'মাতার নাম',
-  'জন্ম তারিখ',
-  'লিঙ্গ',
-  'শ্রেণি',
-  'শাখা',
-  'রোল',
-  'শিফট',
-  'শিক্ষাবর্ষ',
-  'ভর্তির তারিখ',
-  'বোর্ড রেজিস্ট্রেশন',
-  'বোর্ড রোল',
-  'রক্তের গ্রুপ',
-  // TWO status columns, because there are two facts and they use different
-  // words. `enrolments.status` is active/transferred/left/promoted/detained;
-  // `student_profiles.lifecycle_status` is enrolled/promoted/transferred_out/
-  // dropped_out/graduated/alumni. The first draft COALESCEd them into one
-  // column, which meant a student with no current enrolment displayed their
-  // LIFECYCLE word under a heading every other row used for enrolment — the
-  // two vocabularies even share "promoted" with different meanings. A school
-  // reading that column could not tell which question it answered.
-  'ভর্তি অবস্থা',
-  'শিক্ষার্থীর অবস্থা',
-];
 
 interface StudentExportRow {
   student_code: string | null;
@@ -170,6 +96,28 @@ interface StudentExportRow {
   enrolment_status: string | null;
   lifecycle_status: string | null;
 }
+
+/**
+ * Column headings, in the school's own language.
+ *
+ * A head teacher opens this in Excel and has to recognise their school. No
+ * `user_id`, no `section_id`, no `tenant_id` — a uuid tells a school nothing
+ * and tells anyone who obtains the file something about our internals. The
+ * student's own code is the identifier that means something on both sides,
+ * and it is the one the school already prints on admit cards.
+ *
+ * TWO status columns, because there are two facts and they use different
+ * words. The first draft COALESCEd them, which meant a student with no
+ * current enrolment displayed their LIFECYCLE word under a heading every
+ * other row used for enrolment — and the two vocabularies even share
+ * "promoted" with different meanings.
+ */
+const STUDENT_HEADERS = [
+  'শিক্ষার্থী আইডি', 'নাম', 'নাম (ইংরেজি)', 'পিতার নাম', 'মাতার নাম',
+  'জন্ম তারিখ', 'লিঙ্গ', 'শ্রেণি', 'শাখা', 'রোল', 'শিফট', 'শিক্ষাবর্ষ',
+  'ভর্তির তারিখ', 'বোর্ড রেজিস্ট্রেশন', 'বোর্ড রোল', 'রক্তের গ্রুপ',
+  'ভর্তি অবস্থা', 'শিক্ষার্থীর অবস্থা',
+];
 
 /**
  * Every student the school has, ONCE, with their most relevant enrolment.
@@ -202,11 +150,12 @@ interface StudentExportRow {
  * `withTenant` has set `app.current_tenant()` and the RLS policies on
  * `users`, `student_profiles`, `enrolments` and `sections` decide the rows.
  */
-async function selectStudents(
-  client: { query: <T>(sql: string, params?: unknown[]) => Promise<{ rows: T[] }> },
-): Promise<StudentExportRow[]> {
-  const { rows } = await client.query<StudentExportRow>(
-    `SELECT sp.student_code,
+const students: ExportDataset<StudentExportRow> = {
+  headers: STUDENT_HEADERS,
+
+  async select(client: ExportClient): Promise<StudentExportRow[]> {
+    const { rows } = await client.query<StudentExportRow>(
+      `SELECT sp.student_code,
             u.full_name_bn, u.full_name_en,
             u.father_name_bn, u.mother_name_bn,
             u.date_of_birth::text        AS date_of_birth,
@@ -236,56 +185,29 @@ async function selectStudents(
        LEFT JOIN classes  c   ON c.id = s.class_id
        LEFT JOIN academic_years ay ON ay.id = e.academic_year_id
       ORDER BY c.level_no NULLS LAST, s.name NULLS LAST, e.roll_no NULLS LAST,
-               u.full_name_bn`,
-  );
-  return rows;
-}
+               u.full_name_bn`);
+    return rows;
+  },
 
-/** Bangla labels for the two enum-ish columns a school reads, not codes. */
-const GENDER_BN: Record<string, string> = {
-  male: 'ছেলে', female: 'মেয়ে', other: 'অন্যান্য',
-};
-/** `enrolments.status` — the CHECK constraint's five words, in Bangla. */
-const ENROLMENT_BN: Record<string, string> = {
-  active: 'সক্রিয়', transferred: 'স্থানান্তরিত', left: 'চলে গেছে',
-  promoted: 'উত্তীর্ণ', detained: 'অকৃতকার্য',
-};
-
-/** `student_profiles.lifecycle_status` — a different six-word vocabulary. */
-const LIFECYCLE_BN: Record<string, string> = {
-  enrolled: 'ভর্তি', promoted: 'পরবর্তী শ্রেণিতে', transferred_out: 'ছাড়পত্র নিয়েছে',
-  dropped_out: 'ঝরে পড়েছে', graduated: 'উত্তীর্ণ', alumni: 'প্রাক্তন',
-};
-
-const SHIFT_BN: Record<string, string> = {
-  morning: 'সকাল', day: 'দিবা', evening: 'সন্ধ্যা', single: 'একক',
-};
-
-/** `null` becomes an empty cell, never the string "null". */
-const t = (v: string | number | null | undefined): string =>
-  v === null || v === undefined ? '' : String(v);
-
-function studentRow(r: StudentExportRow): string[] {
-  return [
-    t(r.student_code),
-    t(r.full_name_bn),
-    t(r.full_name_en),
-    t(r.father_name_bn),
-    t(r.mother_name_bn),
-    t(r.date_of_birth),
-    r.gender ? (GENDER_BN[r.gender] ?? r.gender) : '',
-    t(r.class_name),
-    t(r.section_name),
-    t(r.roll_no),
-    r.shift ? (SHIFT_BN[r.shift] ?? r.shift) : '',
-    t(r.year_label),
-    t(r.admission_date),
-    t(r.board_registration_no),
-    t(r.board_roll_no),
-    t(r.blood_group),
+  row: (r) => [
+    cell(r.student_code), cell(r.full_name_bn), cell(r.full_name_en),
+    cell(r.father_name_bn), cell(r.mother_name_bn), cell(r.date_of_birth),
+    bnOf(GENDER_BN, r.gender), cell(r.class_name), cell(r.section_name),
+    cell(r.roll_no), bnOf(SHIFT_BN, r.shift), cell(r.year_label),
+    cell(r.admission_date), cell(r.board_registration_no),
+    cell(r.board_roll_no), cell(r.blood_group),
     // An empty enrolment cell is the honest answer for a student who is not
     // currently placed, and it is visibly different from a lifecycle word.
-    r.enrolment_status ? (ENROLMENT_BN[r.enrolment_status] ?? r.enrolment_status) : '',
-    r.lifecycle_status ? (LIFECYCLE_BN[r.lifecycle_status] ?? r.lifecycle_status) : '',
-  ];
+    bnOf(ENROLMENT_BN, r.enrolment_status),
+    bnOf(LIFECYCLE_BN, r.lifecycle_status),
+  ],
+};
+
+export default async function handler(
+  req: IncomingMessage, res: ServerResponse,
+): Promise<void> {
+  return handleCsvExport(req, res, {
+    roles: EXPORT_ROLES,
+    datasets: { students } as unknown as Record<string, ExportDataset<never>>,
+  });
 }

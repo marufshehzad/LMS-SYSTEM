@@ -4000,14 +4000,14 @@ function validateTeachers(table, snap) {
   const seenCodes = /* @__PURE__ */ new Set();
   const seenPhones = /* @__PURE__ */ new Set();
   for (const row of table.rows) {
-    const cell = (f) => {
+    const cell2 = (f) => {
       const h = map[f];
       return h ? (row.cells[h] ?? "").trim() : "";
     };
     const fail = (field, messageBn) => {
-      errors.push({ lineNo: row.lineNo, rollNo: cell("employeeCode"), field, messageBn });
+      errors.push({ lineNo: row.lineNo, rollNo: cell2("employeeCode"), field, messageBn });
     };
-    const nameBn = cell("nameBn");
+    const nameBn = cell2("nameBn");
     if (!nameBn) {
       fail("name_bn", "\u09A8\u09BE\u09AE \u09A8\u09C7\u0987");
       continue;
@@ -4016,7 +4016,7 @@ function validateTeachers(table, snap) {
       fail("name_bn", "\u09A8\u09BE\u09AE \u0985\u09A8\u09C7\u0995 \u09AC\u09A1\u09BC");
       continue;
     }
-    const employeeCode = cell("employeeCode");
+    const employeeCode = cell2("employeeCode");
     if (!employeeCode) {
       fail("employee_code", "\u0995\u09B0\u09CD\u09AE\u099A\u09BE\u09B0\u09C0 \u0986\u0987\u09A1\u09BF \u09A8\u09C7\u0987");
       continue;
@@ -4030,7 +4030,7 @@ function validateTeachers(table, snap) {
       fail("employee_code", "\u098F\u0987 \u0986\u0987\u09A1\u09BF \u0986\u0997\u09C7 \u09A5\u09C7\u0995\u09C7\u0987 \u09AC\u09CD\u09AF\u09AC\u09B9\u09C3\u09A4");
       continue;
     }
-    const rawPhone = cell("phone");
+    const rawPhone = cell2("phone");
     let phone = null;
     if (rawPhone) {
       phone = normalizePhone(rawPhone);
@@ -4047,12 +4047,12 @@ function validateTeachers(table, snap) {
         continue;
       }
     }
-    const email = cell("email") || null;
+    const email = cell2("email") || null;
     if (!phone && !email) {
       fail("phone", "\u09AE\u09CB\u09AC\u09BE\u0987\u09B2 \u09AC\u09BE \u0987\u09AE\u09C7\u0987\u09B2 \u2014 \u0985\u09A8\u09CD\u09A4\u09A4 \u098F\u0995\u099F\u09BF \u09A6\u09B0\u0995\u09BE\u09B0");
       continue;
     }
-    const rawRole = cell("roleCode").trim().toLowerCase();
+    const rawRole = cell2("roleCode").trim().toLowerCase();
     const roleCode = rawRole ? ROLE_ALIASES[rawRole] ?? rawRole : "subject_teacher";
     if (!IMPORTABLE_ROLES.has(roleCode)) {
       fail("role", "\u09AD\u09C2\u09AE\u09BF\u0995\u09BE \u09B6\u09C1\u09A7\u09C1 \u09B6\u09BF\u0995\u09CD\u09B7\u0995 \u09B9\u09A4\u09C7 \u09AA\u09BE\u09B0\u09C7 \u2014 \u09AA\u09CD\u09B0\u09A7\u09BE\u09A8 \u09B6\u09BF\u0995\u09CD\u09B7\u0995/\u0986\u0987\u099F\u09BF \u0985\u09CD\u09AF\u09BE\u09A1\u09AE\u09BF\u09A8 \u0986\u09B2\u09BE\u09A6\u09BE\u09AD\u09BE\u09AC\u09C7 \u09A4\u09C8\u09B0\u09BF \u09B9\u09AF\u09BC");
@@ -4066,13 +4066,13 @@ function validateTeachers(table, snap) {
       // `users.full_name_en` is NOT NULL, so a file without an English name
       // still has to produce one. The Bangla name is a truthful fallback;
       // an empty string would fail the insert after validation passed.
-      nameEn: cell("nameEn") || nameBn,
+      nameEn: cell2("nameEn") || nameBn,
       employeeCode,
       phone,
       email,
-      designationBn: cell("designationBn") || null,
+      designationBn: cell2("designationBn") || null,
       roleCode,
-      joiningDate: cell("joiningDate") || null
+      joiningDate: cell2("joiningDate") || null
     });
   }
   errors.sort((a, b) => a.lineNo - b.lineNo);
@@ -5723,8 +5723,8 @@ async function handler21(req, res) {
         attendance,
         results,
         fees,
-        documents: printable.filter((t2) => !CERTIFICATE_TYPES.has(t2)),
-        certificates: printable.filter((t2) => CERTIFICATE_TYPES.has(t2)),
+        documents: printable.filter((t) => !CERTIFICATE_TYPES.has(t)),
+        certificates: printable.filter((t) => CERTIFICATE_TYPES.has(t)),
         // Said plainly rather than left for the UI to infer from a null: a
         // tab that is empty because there is nothing and a tab that is empty
         // because this person may not see it are different sentences.
@@ -6028,10 +6028,9 @@ function csvFilename(dataset, on = /* @__PURE__ */ new Date()) {
   return `${dataset}-${d}.csv`;
 }
 
-// services/academics-svc/api/export.ts
-var EXPORT_ROLES = ["principal", "school_owner", "it_admin"];
-var DATASETS = /* @__PURE__ */ new Set(["students"]);
-async function handler23(req, res) {
+// packages/server-core/src/export-dataset.ts
+var cell = (v) => v === null || v === void 0 ? "" : String(v);
+async function handleCsvExport(req, res, o) {
   const cors = corsHeaders();
   if (req.method === "OPTIONS") {
     res.writeHead(204, cors);
@@ -6044,28 +6043,29 @@ async function handler23(req, res) {
   }
   try {
     const claims = await authenticate(req);
-    requireRole(claims, EXPORT_ROLES);
-    const dataset = (query(req).get("dataset") ?? "").trim();
-    if (!DATASETS.has(dataset)) {
+    requireRole(claims, o.roles);
+    const key = (query(req).get("dataset") ?? "").trim();
+    const def = Object.prototype.hasOwnProperty.call(o.datasets, key) ? o.datasets[key] : void 0;
+    if (!def) {
       throw new HttpError(
         400,
-        "dataset must be one of: students",
+        `dataset must be one of: ${Object.keys(o.datasets).join(", ")}`,
         "unknown_dataset"
       );
     }
     const db = await sharedDb();
     const actor = { tenantId: claims.tid, userId: claims.sub, role: claims.role };
     await db.withTenant(actor, async (client) => {
-      const rows = await selectStudents(client);
+      const rows = await def.select(client);
       beginCsvDownload(res, cors, {
-        filename: csvFilename("students"),
-        headers: STUDENT_HEADERS
+        filename: csvFilename(key),
+        headers: def.headers
       });
-      for (const r of rows) writeCsvRow(res, studentRow(r));
+      for (const r of rows) writeCsvRow(res, def.row(r));
       await writeAudit(client, actor, {
         action: "ops.data.export",
         entityType: "export",
-        after: { dataset, rows: rows.length }
+        after: { dataset: key, rows: rows.length }
       });
     });
     res.end();
@@ -6081,9 +6081,38 @@ async function handler23(req, res) {
     json(res, 500, { error: "internal_error" }, cors);
   }
 }
+
+// services/academics-svc/api/export.ts
+var EXPORT_ROLES = ["principal", "school_owner", "it_admin"];
+var ENROLMENT_BN = {
+  active: "\u09B8\u0995\u09CD\u09B0\u09BF\u09AF\u09BC",
+  transferred: "\u09B8\u09CD\u09A5\u09BE\u09A8\u09BE\u09A8\u09CD\u09A4\u09B0\u09BF\u09A4",
+  left: "\u099A\u09B2\u09C7 \u0997\u09C7\u099B\u09C7",
+  promoted: "\u0989\u09A4\u09CD\u09A4\u09C0\u09B0\u09CD\u09A3",
+  detained: "\u0985\u0995\u09C3\u09A4\u0995\u09BE\u09B0\u09CD\u09AF"
+};
+var LIFECYCLE_BN = {
+  enrolled: "\u09AD\u09B0\u09CD\u09A4\u09BF",
+  promoted: "\u09AA\u09B0\u09AC\u09B0\u09CD\u09A4\u09C0 \u09B6\u09CD\u09B0\u09C7\u09A3\u09BF\u09A4\u09C7",
+  transferred_out: "\u099B\u09BE\u09A1\u09BC\u09AA\u09A4\u09CD\u09B0 \u09A8\u09BF\u09AF\u09BC\u09C7\u099B\u09C7",
+  dropped_out: "\u099D\u09B0\u09C7 \u09AA\u09A1\u09BC\u09C7\u099B\u09C7",
+  graduated: "\u0989\u09A4\u09CD\u09A4\u09C0\u09B0\u09CD\u09A3",
+  alumni: "\u09AA\u09CD\u09B0\u09BE\u0995\u09CD\u09A4\u09A8"
+};
+var GENDER_BN2 = {
+  male: "\u099B\u09C7\u09B2\u09C7",
+  female: "\u09AE\u09C7\u09AF\u09BC\u09C7",
+  other: "\u0985\u09A8\u09CD\u09AF\u09BE\u09A8\u09CD\u09AF"
+};
+var SHIFT_BN = {
+  morning: "\u09B8\u0995\u09BE\u09B2",
+  day: "\u09A6\u09BF\u09AC\u09BE",
+  evening: "\u09B8\u09A8\u09CD\u09A7\u09CD\u09AF\u09BE",
+  single: "\u098F\u0995\u0995"
+};
+var bnOf = (map, v) => v ? map[v] ?? v : "";
 var STUDENT_HEADERS = [
   "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0 \u0986\u0987\u09A1\u09BF",
-  // student_code — the school's own identifier
   "\u09A8\u09BE\u09AE",
   "\u09A8\u09BE\u09AE (\u0987\u0982\u09B0\u09C7\u099C\u09BF)",
   "\u09AA\u09BF\u09A4\u09BE\u09B0 \u09A8\u09BE\u09AE",
@@ -6099,20 +6128,14 @@ var STUDENT_HEADERS = [
   "\u09AC\u09CB\u09B0\u09CD\u09A1 \u09B0\u09C7\u099C\u09BF\u09B8\u09CD\u099F\u09CD\u09B0\u09C7\u09B6\u09A8",
   "\u09AC\u09CB\u09B0\u09CD\u09A1 \u09B0\u09CB\u09B2",
   "\u09B0\u0995\u09CD\u09A4\u09C7\u09B0 \u0997\u09CD\u09B0\u09C1\u09AA",
-  // TWO status columns, because there are two facts and they use different
-  // words. `enrolments.status` is active/transferred/left/promoted/detained;
-  // `student_profiles.lifecycle_status` is enrolled/promoted/transferred_out/
-  // dropped_out/graduated/alumni. The first draft COALESCEd them into one
-  // column, which meant a student with no current enrolment displayed their
-  // LIFECYCLE word under a heading every other row used for enrolment — the
-  // two vocabularies even share "promoted" with different meanings. A school
-  // reading that column could not tell which question it answered.
   "\u09AD\u09B0\u09CD\u09A4\u09BF \u0985\u09AC\u09B8\u09CD\u09A5\u09BE",
   "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0\u09B0 \u0985\u09AC\u09B8\u09CD\u09A5\u09BE"
 ];
-async function selectStudents(client) {
-  const { rows } = await client.query(
-    `SELECT sp.student_code,
+var students = {
+  headers: STUDENT_HEADERS,
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT sp.student_code,
             u.full_name_bn, u.full_name_en,
             u.father_name_bn, u.mother_name_bn,
             u.date_of_birth::text        AS date_of_birth,
@@ -6143,59 +6166,37 @@ async function selectStudents(client) {
        LEFT JOIN academic_years ay ON ay.id = e.academic_year_id
       ORDER BY c.level_no NULLS LAST, s.name NULLS LAST, e.roll_no NULLS LAST,
                u.full_name_bn`
-  );
-  return rows;
-}
-var GENDER_BN2 = {
-  male: "\u099B\u09C7\u09B2\u09C7",
-  female: "\u09AE\u09C7\u09AF\u09BC\u09C7",
-  other: "\u0985\u09A8\u09CD\u09AF\u09BE\u09A8\u09CD\u09AF"
-};
-var ENROLMENT_BN = {
-  active: "\u09B8\u0995\u09CD\u09B0\u09BF\u09AF\u09BC",
-  transferred: "\u09B8\u09CD\u09A5\u09BE\u09A8\u09BE\u09A8\u09CD\u09A4\u09B0\u09BF\u09A4",
-  left: "\u099A\u09B2\u09C7 \u0997\u09C7\u099B\u09C7",
-  promoted: "\u0989\u09A4\u09CD\u09A4\u09C0\u09B0\u09CD\u09A3",
-  detained: "\u0985\u0995\u09C3\u09A4\u0995\u09BE\u09B0\u09CD\u09AF"
-};
-var LIFECYCLE_BN = {
-  enrolled: "\u09AD\u09B0\u09CD\u09A4\u09BF",
-  promoted: "\u09AA\u09B0\u09AC\u09B0\u09CD\u09A4\u09C0 \u09B6\u09CD\u09B0\u09C7\u09A3\u09BF\u09A4\u09C7",
-  transferred_out: "\u099B\u09BE\u09A1\u09BC\u09AA\u09A4\u09CD\u09B0 \u09A8\u09BF\u09AF\u09BC\u09C7\u099B\u09C7",
-  dropped_out: "\u099D\u09B0\u09C7 \u09AA\u09A1\u09BC\u09C7\u099B\u09C7",
-  graduated: "\u0989\u09A4\u09CD\u09A4\u09C0\u09B0\u09CD\u09A3",
-  alumni: "\u09AA\u09CD\u09B0\u09BE\u0995\u09CD\u09A4\u09A8"
-};
-var SHIFT_BN = {
-  morning: "\u09B8\u0995\u09BE\u09B2",
-  day: "\u09A6\u09BF\u09AC\u09BE",
-  evening: "\u09B8\u09A8\u09CD\u09A7\u09CD\u09AF\u09BE",
-  single: "\u098F\u0995\u0995"
-};
-var t = (v) => v === null || v === void 0 ? "" : String(v);
-function studentRow(r) {
-  return [
-    t(r.student_code),
-    t(r.full_name_bn),
-    t(r.full_name_en),
-    t(r.father_name_bn),
-    t(r.mother_name_bn),
-    t(r.date_of_birth),
-    r.gender ? GENDER_BN2[r.gender] ?? r.gender : "",
-    t(r.class_name),
-    t(r.section_name),
-    t(r.roll_no),
-    r.shift ? SHIFT_BN[r.shift] ?? r.shift : "",
-    t(r.year_label),
-    t(r.admission_date),
-    t(r.board_registration_no),
-    t(r.board_roll_no),
-    t(r.blood_group),
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.student_code),
+    cell(r.full_name_bn),
+    cell(r.full_name_en),
+    cell(r.father_name_bn),
+    cell(r.mother_name_bn),
+    cell(r.date_of_birth),
+    bnOf(GENDER_BN2, r.gender),
+    cell(r.class_name),
+    cell(r.section_name),
+    cell(r.roll_no),
+    bnOf(SHIFT_BN, r.shift),
+    cell(r.year_label),
+    cell(r.admission_date),
+    cell(r.board_registration_no),
+    cell(r.board_roll_no),
+    cell(r.blood_group),
     // An empty enrolment cell is the honest answer for a student who is not
     // currently placed, and it is visibly different from a lifecycle word.
-    r.enrolment_status ? ENROLMENT_BN[r.enrolment_status] ?? r.enrolment_status : "",
-    r.lifecycle_status ? LIFECYCLE_BN[r.lifecycle_status] ?? r.lifecycle_status : ""
-  ];
+    bnOf(ENROLMENT_BN, r.enrolment_status),
+    bnOf(LIFECYCLE_BN, r.lifecycle_status)
+  ]
+};
+async function handler23(req, res) {
+  return handleCsvExport(req, res, {
+    roles: EXPORT_ROLES,
+    datasets: { students }
+  });
 }
 
 // services/academics-svc/api/index.ts

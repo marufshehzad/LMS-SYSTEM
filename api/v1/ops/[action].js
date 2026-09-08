@@ -3003,7 +3003,7 @@ async function candidates(db, ctx, sectionId) {
         ORDER BY sub.name_bn`,
       [sectionId, sec[0].class_id, sec[0].year_id]
     );
-    const { rows: teachers } = await c.query(
+    const { rows: teachers2 } = await c.query(
       `SELECT u.id, u.full_name_bn AS name_bn, sp.employee_code,
               COALESCE(array_agg(DISTINCT tse.subject_id::text)
                        FILTER (WHERE tse.subject_id IS NOT NULL), '{}') AS subject_ids,
@@ -3024,7 +3024,7 @@ async function candidates(db, ctx, sectionId) {
         nameBn: s.name_bn,
         assigned: s.assigned_teacher ? { id: s.assigned_teacher, nameBn: s.assigned_name ?? "" } : null
       })),
-      teachers: teachers.map((t) => ({
+      teachers: teachers2.map((t) => ({
         id: t.id,
         nameBn: t.name_bn,
         employeeCode: t.employee_code,
@@ -7196,8 +7196,301 @@ async function mark(db, ctx, req) {
   }, { write: true });
 }
 
+// packages/server-core/src/csv.ts
+var CSV_BOM = "\uFEFF";
+var FORMULA_LEAD = /^[=+\-@\t\r]/;
+var PLAIN_NUMBER = /^[+-]?\d+(?:\.\d+)?$/;
+function csvCell(value) {
+  let v = value;
+  if (FORMULA_LEAD.test(v) && !PLAIN_NUMBER.test(v)) v = `'${v}`;
+  return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+function csvLine(values) {
+  return `${values.map(csvCell).join(",")}\r
+`;
+}
+
+// packages/server-core/src/csv-response.ts
+function beginCsvDownload(res, cors, o) {
+  res.writeHead(200, {
+    ...cors,
+    "Content-Type": "text/csv; charset=utf-8",
+    // `attachment` so the browser saves it instead of rendering a wall of
+    // text, and a plain ASCII filename so no edge has to guess an encoding.
+    "Content-Disposition": `attachment; filename="${o.filename}"`,
+    // Belt and braces with the service worker's network-only rule: a proxy
+    // between the school and us must not hold this either.
+    "Cache-Control": "no-store, private, max-age=0",
+    "Pragma": "no-cache",
+    // The file is a download, never a document to be framed or sniffed.
+    "X-Content-Type-Options": "nosniff"
+  });
+  res.write(CSV_BOM);
+  res.write(csvLine(o.headers));
+}
+function writeCsvRow(res, values) {
+  res.write(csvLine(values));
+}
+function csvFilename(dataset, on = /* @__PURE__ */ new Date()) {
+  const d = on.toISOString().slice(0, 10);
+  return `${dataset}-${d}.csv`;
+}
+
+// packages/server-core/src/export-dataset.ts
+var cell = (v) => v === null || v === void 0 ? "" : String(v);
+async function handleCsvExport(req, res, o) {
+  const cors = corsHeaders();
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, cors);
+    res.end();
+    return;
+  }
+  if (req.method !== "GET") {
+    json(res, 405, { error: "method_not_allowed" }, cors);
+    return;
+  }
+  try {
+    const claims = await authenticate(req);
+    requireRole(claims, o.roles);
+    const key = (query(req).get("dataset") ?? "").trim();
+    const def = Object.prototype.hasOwnProperty.call(o.datasets, key) ? o.datasets[key] : void 0;
+    if (!def) {
+      throw new HttpError(
+        400,
+        `dataset must be one of: ${Object.keys(o.datasets).join(", ")}`,
+        "unknown_dataset"
+      );
+    }
+    const db = await sharedDb();
+    const actor = { tenantId: claims.tid, userId: claims.sub, role: claims.role };
+    await db.withTenant(actor, async (client) => {
+      const rows = await def.select(client);
+      beginCsvDownload(res, cors, {
+        filename: csvFilename(key),
+        headers: def.headers
+      });
+      for (const r of rows) writeCsvRow(res, def.row(r));
+      await writeAudit(client, actor, {
+        action: "ops.data.export",
+        entityType: "export",
+        after: { dataset: key, rows: rows.length }
+      });
+    });
+    res.end();
+  } catch (err) {
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
+    if (err instanceof HttpError) {
+      json(res, err.status, { error: err.code, message: err.message }, cors);
+      return;
+    }
+    json(res, 500, { error: "internal_error" }, cors);
+  }
+}
+
+// services/ops-svc/api/export.ts
+var EXPORT_ROLES = ["principal", "school_owner", "it_admin"];
+var bnOf = (map, v) => v ? map[v] ?? v : "";
+var ROLE_BN = {
+  principal: "\u09AA\u09CD\u09B0\u09A7\u09BE\u09A8 \u09B6\u09BF\u0995\u09CD\u09B7\u0995",
+  school_owner: "\u09AA\u09CD\u09B0\u09A4\u09BF\u09B7\u09CD\u09A0\u09BE\u09A8 \u0995\u09B0\u09CD\u09A4\u09C3\u09AA\u0995\u09CD\u09B7",
+  academic_coordinator: "\u098F\u0995\u09BE\u09A1\u09C7\u09AE\u09BF\u0995 \u09B8\u09AE\u09A8\u09CD\u09AC\u09AF\u09BC\u0995",
+  it_admin: "\u0986\u0987\u099F\u09BF \u0985\u09CD\u09AF\u09BE\u09A1\u09AE\u09BF\u09A8",
+  accountant: "\u09B9\u09BF\u09B8\u09BE\u09AC\u09B0\u0995\u09CD\u09B7\u0995",
+  class_teacher: "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF \u09B6\u09BF\u0995\u09CD\u09B7\u0995",
+  subject_teacher: "\u09AC\u09BF\u09B7\u09AF\u09BC \u09B6\u09BF\u0995\u09CD\u09B7\u0995",
+  dept_head: "\u09AC\u09BF\u09AD\u09BE\u0997\u09C0\u09AF\u09BC \u09AA\u09CD\u09B0\u09A7\u09BE\u09A8",
+  guardian: "\u0985\u09AD\u09BF\u09AD\u09BE\u09AC\u0995",
+  student: "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0"
+};
+var USER_STATUS_BN = {
+  invited: "\u0986\u09AE\u09A8\u09CD\u09A4\u09CD\u09B0\u09BF\u09A4",
+  active: "\u0995\u09B0\u09CD\u09AE\u09B0\u09A4",
+  suspended: "\u09B8\u09CD\u09A5\u0997\u09BF\u09A4",
+  left: "\u099A\u09B2\u09C7 \u0997\u09C7\u099B\u09C7\u09A8",
+  deleted: "\u09AE\u09C1\u099B\u09C7 \u09AB\u09C7\u09B2\u09BE"
+};
+var RELATION_BN = {
+  father: "\u09AA\u09BF\u09A4\u09BE",
+  mother: "\u09AE\u09BE\u09A4\u09BE",
+  guardian: "\u0985\u09AD\u09BF\u09AD\u09BE\u09AC\u0995",
+  brother: "\u09AD\u09BE\u0987",
+  sister: "\u09AC\u09CB\u09A8",
+  uncle: "\u099A\u09BE\u099A\u09BE/\u09AE\u09BE\u09AE\u09BE",
+  aunt: "\u099A\u09BE\u099A\u09BF/\u09AE\u09BE\u09AE\u09BF",
+  other: "\u0985\u09A8\u09CD\u09AF\u09BE\u09A8\u09CD\u09AF"
+};
+var yesNo = (v) => v === null ? "" : v ? "\u09B9\u09CD\u09AF\u09BE\u0981" : "\u09A8\u09BE";
+var teachers = {
+  headers: [
+    "\u0995\u09B0\u09CD\u09AE\u099A\u09BE\u09B0\u09C0 \u0986\u0987\u09A1\u09BF",
+    "\u09A8\u09BE\u09AE",
+    "\u09A8\u09BE\u09AE (\u0987\u0982\u09B0\u09C7\u099C\u09BF)",
+    "\u09AE\u09CB\u09AC\u09BE\u0987\u09B2",
+    "\u0987\u09AE\u09C7\u0987\u09B2",
+    "\u09AA\u09A6\u09AC\u09BF",
+    "\u09AD\u09C2\u09AE\u09BF\u0995\u09BE",
+    "\u09AF\u09CB\u0997\u09A6\u09BE\u09A8\u09C7\u09B0 \u09A4\u09BE\u09B0\u09BF\u0996",
+    "\u09A8\u09BF\u09AF\u09BC\u09CB\u0997\u09C7\u09B0 \u09A7\u09B0\u09A8",
+    "\u09B8\u09B0\u09CD\u09AC\u09CB\u099A\u09CD\u099A \u09A1\u09BF\u0997\u09CD\u09B0\u09BF",
+    "\u0985\u09AC\u09B8\u09CD\u09A5\u09BE",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF \u09B6\u09BF\u0995\u09CD\u09B7\u0995",
+    "\u09AF\u09C7 \u09AC\u09BF\u09B7\u09AF\u09BC \u09AA\u09A1\u09BC\u09BE\u09A8"
+  ],
+  /**
+   * Everyone who works at the school, with what they do.
+   *
+   * ── Who counts as staff ───────────────────────────────────────────────
+   * Anyone holding a role that is not `student` or `guardian`. Not "everyone
+   * with a `staff_profiles` row": that table is optional — a principal
+   * created through the onboarding wizard has a `user_roles` row and no
+   * profile — so keying off it would silently omit the head teacher from
+   * the school's list of its own staff.
+   *
+   * ── Roles are aggregated, not joined ──────────────────────────────────
+   * A teacher who is also a department head has two `user_roles` rows. A
+   * plain join emits them twice; `string_agg` puts both in one cell, which
+   * is what a school means by "their role".
+   *
+   * ── What is deliberately absent ───────────────────────────────────────
+   * `bank_account_ciphertext` is on `staff_profiles` and is never selected.
+   * Nor is anything from `users` that is encrypted or hashed. §8 asks for
+   * "contact where permitted", and the three roles allowed to run this
+   * export are exactly the three `MAY_SEE_CONTACT` already admits, so the
+   * phone is theirs to see.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT sp.employee_code,
+              u.full_name_bn, u.full_name_en,
+              u.phone_e164 AS phone, u.email,
+              sp.designation_bn,
+              (SELECT string_agg(DISTINCT ur2.role_code, ' / ' ORDER BY ur2.role_code)
+                 FROM user_roles ur2
+                WHERE ur2.user_id = u.id) AS roles,
+              sp.joining_date::text AS joining_date,
+              sp.employment_type, sp.highest_degree,
+              u.status::text AS status,
+              (SELECT string_agg(c.name_bn || ' ' || s.name, ', ' ORDER BY c.name_bn, s.name)
+                 FROM sections s JOIN classes c ON c.id = s.class_id
+                WHERE s.class_teacher_id = u.id) AS sections_led,
+              (SELECT string_agg(DISTINCT sub.name_bn, ', ' ORDER BY sub.name_bn)
+                 FROM section_subject_teachers sst
+                 JOIN subjects sub ON sub.id = sst.subject_id
+                WHERE sst.teacher_id = u.id) AS subjects_taught
+         FROM users u
+         LEFT JOIN staff_profiles sp ON sp.user_id = u.id
+        WHERE u.deleted_at IS NULL
+          AND EXISTS (SELECT 1 FROM user_roles ur
+                       WHERE ur.user_id = u.id
+                         AND ur.role_code NOT IN ('student', 'guardian'))
+        ORDER BY u.full_name_bn`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.employee_code),
+    cell(r.full_name_bn),
+    cell(r.full_name_en),
+    cell(r.phone),
+    cell(r.email),
+    cell(r.designation_bn),
+    // Each code translated on its own, so a two-role person reads as two
+    // Bangla words rather than one untranslated string.
+    (r.roles ?? "").split(" / ").filter(Boolean).map((c) => bnOf(ROLE_BN, c)).join(" / "),
+    cell(r.joining_date),
+    cell(r.employment_type),
+    cell(r.highest_degree),
+    bnOf(USER_STATUS_BN, r.status),
+    cell(r.sections_led),
+    cell(r.subjects_taught)
+  ]
+};
+var guardians = {
+  headers: [
+    "\u0985\u09AD\u09BF\u09AD\u09BE\u09AC\u0995\u09C7\u09B0 \u09A8\u09BE\u09AE",
+    "\u09A8\u09BE\u09AE (\u0987\u0982\u09B0\u09C7\u099C\u09BF)",
+    "\u09AE\u09CB\u09AC\u09BE\u0987\u09B2",
+    "\u0987\u09AE\u09C7\u0987\u09B2",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0 \u0986\u0987\u09A1\u09BF",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0\u09B0 \u09A8\u09BE\u09AE",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF",
+    "\u09B6\u09BE\u0996\u09BE",
+    "\u09B8\u09AE\u09CD\u09AA\u09B0\u09CD\u0995",
+    "\u09AA\u09CD\u09B0\u09A7\u09BE\u09A8 \u0985\u09AD\u09BF\u09AD\u09BE\u09AC\u0995",
+    "\u098F\u09B8\u098F\u09AE\u098F\u09B8 \u09AA\u09BE\u09A8",
+    "\u09AB\u09BF \u09A6\u09BF\u09A4\u09C7 \u09AA\u09BE\u09B0\u09C7\u09A8",
+    "\u0985\u09AC\u09B8\u09CD\u09A5\u09BE"
+  ],
+  /**
+   * One row per LINK, not per guardian.
+   *
+   * A guardian with three children is three rows, and that is the shape the
+   * data actually has — `guardianships` is the relationship table, and
+   * collapsing it to one row per adult would lose which permissions apply to
+   * which child. `receives_sms` and `can_pay_fees` are per link.
+   *
+   * ── Revoked links are INCLUDED, and say so ────────────────────────────
+   * B-7 made a guardianship endable rather than deletable, precisely because
+   * the record of who could act for a child during a period must survive.
+   * An export that silently dropped revoked rows would hand the school a
+   * history with the endings removed. The status column carries the answer.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT g.full_name_bn, g.full_name_en,
+              g.phone_e164 AS phone, g.email,
+              sp.student_code,
+              st.full_name_bn AS student_name,
+              c.name_bn       AS class_name,
+              s.name          AS section_name,
+              gs.relation, gs.is_primary, gs.receives_sms, gs.can_pay_fees,
+              CASE WHEN gs.revoked_at IS NULL THEN 'active' ELSE 'revoked' END AS status
+         FROM guardianships gs
+         JOIN users g  ON g.id  = gs.guardian_id AND g.deleted_at IS NULL
+         JOIN users st ON st.id = gs.student_id  AND st.deleted_at IS NULL
+         LEFT JOIN student_profiles sp ON sp.user_id = gs.student_id
+         LEFT JOIN LATERAL (
+           SELECT en.section_id FROM enrolments en
+             JOIN academic_years y ON y.id = en.academic_year_id
+            WHERE en.student_id = gs.student_id
+            ORDER BY y.is_current DESC, y.starts_on DESC
+            LIMIT 1
+         ) e ON TRUE
+         LEFT JOIN sections s ON s.id = e.section_id
+         LEFT JOIN classes  c ON c.id = s.class_id
+        ORDER BY g.full_name_bn, st.full_name_bn`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.full_name_bn),
+    cell(r.full_name_en),
+    cell(r.phone),
+    cell(r.email),
+    cell(r.student_code),
+    cell(r.student_name),
+    cell(r.class_name),
+    cell(r.section_name),
+    bnOf(RELATION_BN, r.relation),
+    yesNo(r.is_primary),
+    yesNo(r.receives_sms),
+    yesNo(r.can_pay_fees),
+    r.status === "revoked" ? "\u09AA\u09CD\u09B0\u09A4\u09CD\u09AF\u09BE\u09B9\u09C3\u09A4" : "\u09B8\u0995\u09CD\u09B0\u09BF\u09AF\u09BC"
+  ]
+};
+async function handler21(req, res) {
+  return handleCsvExport(req, res, {
+    roles: EXPORT_ROLES,
+    datasets: { teachers, guardians }
+  });
+}
+
 // services/ops-svc/api/index.ts
 var ROUTES = {
+  export: handler21,
   maintenance: handler,
   events: handler2,
   branding: handler3,
@@ -7220,7 +7513,7 @@ var ROUTES = {
   monitor: route,
   "staff-attendance": handler20
 };
-async function handler21(req, res) {
+async function handler22(req, res) {
   const path = new URL(req.url ?? "/", "http://internal").pathname;
   const sub = path.split("/").filter(Boolean).pop() ?? "";
   const route2 = ROUTES[sub];
@@ -7252,5 +7545,5 @@ async function handler21(req, res) {
   return route2(req, res);
 }
 export {
-  handler21 as default
+  handler22 as default
 };
