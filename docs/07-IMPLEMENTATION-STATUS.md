@@ -1729,7 +1729,7 @@ Four columns, because they do not agree:
 | Fixture leak (B-119) | teardown drops in tenant context | full suite: 21 → 21, zero residue | n/a |
 | Suite invariant (B-66) | runner prints `13/13`, names silent workspaces | negative-tested | n/a |
 | Lock timeout (B-36) | `SET lock_timeout = 90s` + watchdog | — | n/a |
-| Session/device list (B-120) | **absent** | — | — |
+| Session/device list (B-120) | `GET /auth/sessions`, `…/revoke`, `…/revoke-others` + নিরাপত্তা screen | 13 API + 2 SW tests; probe 44/44 | browser: revoked refresh 200 → 401 |
 
 The one that blocks a pilot is the first row's PRODUCTION column, and it is
 four commands in `deploy/shikhon-cron.md` rather than any code.

@@ -239,6 +239,33 @@ describe('an installed PWA opens the application', () => {
  * there. The failure is silent, because a cached export returns 200 with
  * the right bytes and looks exactly like a working one.
  */
+/**
+ * B-120. A session list and a revoke are never served from a cache.
+ *
+ * They fall to the `unclassified` network-only default today rather than to
+ * a rule of their own, which is the right answer and an accident away from
+ * a wrong one: anything later matching `/api/v1/auth/` would silently make a
+ * security screen stale, and a stale session list is one that still shows a
+ * device the person has already ended.
+ */
+describe('B-120 — session management is never cached', () => {
+  const get = (url: string) => route({ url, method: 'GET' });
+
+  test('THE ONE THAT MATTERS — the session list is network-only', () => {
+    const d = get('https://x.test/api/v1/auth/sessions?deviceId=abc');
+    assert.equal(d.strategy, 'network-only');
+    assert.equal(d.cache, undefined, 'a session list was given a cache bucket');
+  });
+
+  test('and so is every auth route beside it', () => {
+    for (const p of ['/api/v1/auth/refresh', '/api/v1/auth/logout',
+                     '/api/v1/auth/sessions/revoke',
+                     '/api/v1/auth/sessions/revoke-others']) {
+      assert.equal(get(`https://x.test${p}`).strategy, 'network-only', p);
+    }
+  });
+});
+
 describe('P11 — exports are never cached', () => {
   const get = (url: string) => route({ url, method: 'GET' });
 

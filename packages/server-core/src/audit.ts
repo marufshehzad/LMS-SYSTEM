@@ -130,7 +130,10 @@ export type AuditAction =
   // turns up where it should not, this row is the only thing that can say
   // who took it and when. `after` carries the dataset name and the row
   // count — never the rows.
-  | 'ops.data.export';
+  | 'ops.data.export'
+  // B-120. A person ended a session — their own, on a device they named.
+  // The device and the count, never a token or a hash.
+  | 'identity.session.revoke';
 
 export interface AuditEntry {
   action: AuditAction;

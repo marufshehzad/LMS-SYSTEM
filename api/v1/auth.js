@@ -40,6 +40,10 @@ function header(req, name) {
   const v = req.headers[name.toLowerCase()];
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";
 }
+function query(req) {
+  const url = new URL(req.url ?? "/", "http://internal");
+  return url.searchParams;
+}
 async function readJson(req) {
   const raw = await readBody(req);
   return JSON.parse(raw);
@@ -2194,13 +2198,175 @@ async function redeem(res, cors, body) {
   json(res, 200, result, cors);
 }
 
+// packages/server-core/src/audit.ts
+async function writeAudit(client, actor, entry) {
+  const sp = `audit_${Math.random().toString(36).slice(2, 10)}`;
+  try {
+    await client.query(`SAVEPOINT ${sp}`);
+  } catch {
+  }
+  try {
+    await client.query(
+      `INSERT INTO audit.activity_log
+         (tenant_id, actor_id, actor_role, action, entity_type, entity_id,
+          before_state, after_state)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)`,
+      [
+        actor.tenantId,
+        actor.userId,
+        actor.role,
+        entry.action,
+        entry.entityType,
+        entry.entityId ?? null,
+        entry.before === void 0 ? null : JSON.stringify(entry.before),
+        entry.after === void 0 ? null : JSON.stringify(entry.after)
+      ]
+    );
+    try {
+      await client.query(`RELEASE SAVEPOINT ${sp}`);
+    } catch {
+    }
+  } catch {
+    try {
+      await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+    } catch {
+    }
+  }
+}
+
+// services/identity-svc/api/sessions.ts
+function describe(r) {
+  if (r.device_label && r.device_label.trim()) return r.device_label.trim();
+  const ua = r.user_agent ?? "";
+  const browser = /Edg\//.test(ua) ? "Edge" : /OPR\//.test(ua) ? "Opera" : /Chrome\//.test(ua) ? "Chrome" : /Firefox\//.test(ua) ? "Firefox" : /Safari\//.test(ua) ? "Safari" : "";
+  const os = /Android/.test(ua) ? "Android" : /iPhone|iPad|iOS/.test(ua) ? "iOS" : /Windows/.test(ua) ? "Windows" : /Mac OS X|Macintosh/.test(ua) ? "Mac" : /Linux/.test(ua) ? "Linux" : "";
+  const parts = [browser, os].filter(Boolean);
+  return parts.length ? parts.join(" \xB7 ") : "\u0985\u099C\u09BE\u09A8\u09BE \u09A1\u09BF\u09AD\u09BE\u0987\u09B8";
+}
+async function handler6(req, res) {
+  const cors = corsHeaders();
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, cors);
+    res.end();
+    return;
+  }
+  try {
+    const claims = await authenticate(req);
+    const db = await sharedDb();
+    const actor = { tenantId: claims.tid, userId: claims.sub, role: claims.role };
+    const path = new URL(req.url ?? "/", "http://internal").pathname;
+    const isRevokeOthers = /revoke-others$/.test(path) || (query(req).get("path") ?? "") === "sessions/revoke-others";
+    const isRevoke = !isRevokeOthers && (/revoke$/.test(path) || (query(req).get("path") ?? "") === "sessions/revoke");
+    if (req.method === "GET" && !isRevoke && !isRevokeOthers) {
+      const current = (query(req).get("deviceId") ?? "").trim();
+      return json(res, 200, await list(db, actor, current), cors);
+    }
+    if (req.method !== "POST") {
+      json(res, 405, { error: "method_not_allowed" }, cors);
+      return;
+    }
+    const body = await readJson(req);
+    const deviceId = (body.deviceId ?? "").trim();
+    if (!deviceId) {
+      throw new HttpError(400, "deviceId is required", "device_required");
+    }
+    if (isRevokeOthers) return json(res, 200, await revokeOthers(db, actor, deviceId), cors);
+    if (isRevoke) return json(res, 200, await revokeOne(db, actor, deviceId), cors);
+    json(res, 404, { error: "not_found" }, cors);
+  } catch (err) {
+    if (err instanceof HttpError) {
+      json(res, err.status, { error: err.code ?? "error", message: err.message }, cors);
+      return;
+    }
+    json(res, 500, { error: "internal_error" }, cors);
+  }
+}
+async function list(db, actor, currentDevice) {
+  return db.withTenant(actor, async (c) => {
+    const { rows } = await c.query(
+      `SELECT DISTINCT ON (s.device_id)
+              s.device_id, s.device_label, s.user_agent,
+              s.issued_at::text     AS issued_at,
+              s.last_seen_at::text  AS last_seen_at,
+              s.expires_at::text    AS expires_at
+         FROM user_sessions s
+        WHERE s.user_id = $1
+          AND s.revoked_at IS NULL
+          AND s.expires_at > now()
+        ORDER BY s.device_id, s.issued_at DESC`,
+      [actor.userId]
+    );
+    return {
+      sessions: rows.map((r) => ({
+        // The device id is the handle the client passes back to revoke. It
+        // is the client's OWN identifier, not a server secret, and it is the
+        // only id here — no session row id, no token, no hash.
+        deviceId: r.device_id,
+        label: describe(r),
+        current: !!r.device_id && r.device_id === currentDevice,
+        signedInAt: r.issued_at,
+        lastSeenAt: r.last_seen_at,
+        expiresAt: r.expires_at
+      }))
+    };
+  });
+}
+async function revokeOne(db, actor, deviceId) {
+  return db.withTenant(actor, async (c) => {
+    const { rowCount } = await c.query(
+      `UPDATE user_sessions
+          SET revoked_at = now(), revoked_reason = 'user_revoked'
+        WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL`,
+      [actor.userId, deviceId]
+    );
+    const revoked = rowCount ?? 0;
+    if (revoked > 0) {
+      await writeAudit(c, actor, {
+        action: "identity.session.revoke",
+        entityType: "session",
+        // The device, the count and the reason. Never a token, never a hash
+        // — the row holds `refresh_token_hash` and it does not come near
+        // this.
+        after: { device: deviceId, sessions: revoked, scope: "one" }
+      });
+    }
+    return { revoked };
+  });
+}
+async function revokeOthers(db, actor, keepDevice) {
+  return db.withTenant(actor, async (c) => {
+    const { rowCount } = await c.query(
+      `UPDATE user_sessions
+          SET revoked_at = now(), revoked_reason = 'user_revoked_others'
+        WHERE user_id = $1 AND revoked_at IS NULL
+          AND (device_id IS DISTINCT FROM $2)`,
+      [actor.userId, keepDevice]
+    );
+    const revoked = rowCount ?? 0;
+    if (revoked > 0) {
+      await writeAudit(c, actor, {
+        action: "identity.session.revoke",
+        entityType: "session",
+        after: { kept: keepDevice, sessions: revoked, scope: "others" }
+      });
+    }
+    return { revoked };
+  });
+}
+
 // services/identity-svc/api/index.ts
 var ROUTES = {
   "otp/request": handler,
   "otp/verify": handler2,
   "refresh": handler3,
   "logout": handler4,
-  "activate": handler5
+  "activate": handler5,
+  // One handler, three sub-paths: it needs the same authenticated identity
+  // and the same device rule for all three, and splitting it would put that
+  // rule in three files.
+  "sessions": handler6,
+  "sessions/revoke": handler6,
+  "sessions/revoke-others": handler6
 };
 var LIMIT_CLASS = {
   "otp/request": "otp_request",
@@ -2209,9 +2375,13 @@ var LIMIT_CLASS = {
   "logout": "auth",
   // Redemption is code-guessing surface, so it gets the strict OTP-verify
   // buckets; the identity dimension is charged inside the handler.
-  "activate": "otp_verify"
+  "activate": "otp_verify",
+  // Authenticated and cheap, but a revoke loop is still a write loop.
+  "sessions": "read",
+  "sessions/revoke": "mutation",
+  "sessions/revoke-others": "mutation"
 };
-async function handler6(req, res) {
+async function handler7(req, res) {
   const url = new URL(req.url ?? "/", "http://internal");
   const sub = (url.searchParams.get("path") ?? url.pathname.replace(/^\/api\/v1\/auth\/?/, "")).replace(/\/+$/, "");
   const route = ROUTES[sub];
@@ -2223,5 +2393,5 @@ async function handler6(req, res) {
   return route(req, res);
 }
 export {
-  handler6 as default
+  handler7 as default
 };

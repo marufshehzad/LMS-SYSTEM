@@ -1943,7 +1943,11 @@ guardianship that PATCH could resurrect — reproduced against PostgreSQL before
 **B-119** (the fixture leak; the development database went from 294 tenants to 21) and
 **B-36**. **B-66** had its narrowed cause acted on and its runner made to fail by name, but is
 NOT claimed fixed — it never reproduced on demand. **B-120** was opened for the session/device
-list this plan does not authorize as a phase.
+list this plan does not authorize as a phase, and **closed on 2026-09-08** as pre-pilot
+hardening rather than as a phase: three sub-paths on the existing identity dispatcher plus a
+নিরাপত্তা screen, self-service only, keyed by `device_id` because `refresh` rotates. No second
+authentication system and no new privilege — an administrator ending another person's session
+remains unbuilt and unauthorized.
 
 **There is no P12 in this plan, and that is deliberate rather than an omission.** The only
 place the string appears in `docs/` is `FINAL-FULL-PROJECT-AUDIT-REPORT.md` §29 — *"P12 —

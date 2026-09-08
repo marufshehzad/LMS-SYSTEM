@@ -15196,3 +15196,109 @@ precisely what this pass was told not to do.
 typecheck 0/0/0 * build clean * 80/80 migrations * security probe **38/38**
 over 13 areas * zero fixture residue * `index.html` byte-identical at
 `496199bd`.
+
+
+# B-120 - session and device management (2026-09-08)
+
+`user_sessions` has recorded every sign-in since migration 002 and nothing
+ever read it back to a person. `logout` ended the session making the request;
+somebody whose phone was stolen had no way to end that phone, and the
+practical answer was to wait out the refresh token.
+
+## Not a second authentication system
+
+Nothing added here mints, verifies or stores a credential. Revocation is the
+same `revoked_at` UPDATE that `logout` already performed on one row, and the
+refusal on the next refresh is the check `refresh.ts` has always done. The
+only new thing is that a person can now aim it.
+
+Three sub-paths on the existing identity dispatcher, following its own
+`otp/request`-style naming: `sessions`, `sessions/revoke`,
+`sessions/revoke-others`.
+
+## The design decision: a DEVICE is the unit, not a row
+
+`refresh.ts` rotates. Every refresh inserts a new `user_sessions` row and
+revokes the old one with `superseded_by`, so one signed-in phone is a CHAIN
+whose live head moves every few minutes.
+
+Revoking by row id races that chain: the id a screen listed is already
+superseded by the time somebody presses the button, the UPDATE matches
+nothing, and the phone that was supposed to lose access keeps refreshing -
+while the screen says it worked. That is the worst possible failure for this
+feature, because the person stops worrying.
+
+`device_id` is stable across the whole chain (required at login, re-sent on
+every refresh), so revoking by device ends the chain wherever its head has
+moved. It is also what a person means: they revoke a PHONE, not a token.
+
+The test rotates on purpose before revoking. Mutation-checked by pinning the
+UPDATE to the oldest row - a row-id implementation - which fails exactly the
+two revoke tests and nothing else.
+
+## Authorization: self-service only, deliberately
+
+Every role manages exactly their own devices. There is no user parameter to
+pass, which is the strongest form of the check - not a role test that could
+be widened later, but an endpoint with nowhere to put somebody else's id.
+
+That answers all of the brief's prohibitions at once (a student, a guardian
+and a teacher can each reach only themselves) and adds no privilege. An
+administrator ending another person's session is a genuinely new power over
+an account; it is not in the Master Plan, and inventing it here is what this
+work was told not to do.
+
+## Device privacy
+
+No fingerprinting was added. `ip_address` is on the row and is never
+returned - it identifies a place rather than a device, and in a Bangladeshi
+school it is frequently one shared NAT. The `user_agent` is reduced
+server-side to a browser family and an OS family; the raw string never
+reaches the client. A device that cannot be named reads as
+"অজানা ডিভাইস" rather than as a blank, because an unnamed device is still one
+somebody may want to end.
+
+## What was already right, and is now pinned
+
+**A deactivated account cannot refresh.** M1 built this and it holds:
+carrying the ROTATED token forward, `active` → 200, `suspended` → 403
+`account_not_active`, `left` → 403, reactivated → 200. Asserted now rather
+than assumed, because "a session is not a standing permission" is the other
+half of this feature.
+
+## Two defects found by the repository's own guards
+
+**The Bangla numerals test caught my counts.** `${count}টি ডিভাইস` and
+`${body.revoked}টি সেশন` interpolated LATIN digits into Bangla sentences.
+`bangla-numerals.test.ts` exists for exactly that and named both lines.
+
+**The security probe caught my own probe.** The first version of area 9c
+asserted "no uuid in the session list" and failed - correctly - against a
+body that was fine. A device id IS uuid-shaped: the PWA generates one per
+browser, and it is the handle a revoke is aimed with, so it has to
+round-trip. The check now names the SERVER identifiers that must never
+appear - the account, the school, the session row - which is a stronger
+statement than the shape test it replaced. Scoped rather than weakened.
+
+## Verified
+
+- **13 API tests** (list, current detection, revoke, revoke-others, the
+  rotation race, idempotency, deactivation, authorization, tenant isolation,
+  audit) + **2 service-worker tests**
+- **Security probe 38 → 44**, six new checks that ask the API rather than
+  the screen
+- **Browser, end to end**: two live sessions, clicked revoke, confirmed -
+  revoked device refresh **200 → 401**, remaining session still **200**, list
+  updated. Deactivation verified separately carrying the rotated token.
+- Widths 360 · 375 · 390 · 1024 · 1280 · 1440 · 1600, no horizontal scroll
+- a11y: h1:1, two h2 sections, 0 unnamed buttons, keyboard reachable, badge
+  carries a WORD, no uuid and no token on screen
+- **2,261 tests**, 13/13 workspaces, zero fixture residue (21 → 21 tenants)
+- `index.html` byte-identical at `496199bd`
+
+## Honest note on B-66
+
+The flake recurred during today's runs - `test-failure-*.log` artifacts for
+`identity-svc` and `platform-svc` were written while this work was under way.
+The pre-pilot pass acted on its narrowed cause and explicitly did not claim
+it fixed; that remains the position.

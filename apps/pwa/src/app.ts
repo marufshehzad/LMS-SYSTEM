@@ -50,6 +50,8 @@ import { InvoiceView } from './invoice-view.ts';
 import { AdminSettingsView } from './admin-settings-view.ts';
 // P11. The school's own copy of its own data.
 import { ExportView } from './export-view.ts';
+// B-120. Where am I signed in, and how do I stop it.
+import { SecurityView } from './security-view.ts';
 import { RolloverView } from './rollover-view.ts';
 import { UsersView } from './users-view.ts';
 import { StaffAttendanceView } from './staff-attendance-view.ts';
@@ -684,6 +686,7 @@ async function main() {
               { path: 'calendar', glyph: 'calendar', titleBn: 'শিক্ষাপঞ্জি', subtitleBn: 'ছুটি, পরীক্ষা ও অনুষ্ঠান — সব ভূমিকার জন্য' },
               { path: 'audit', glyph: 'lock', titleBn: 'কার্যবিবরণী', subtitleBn: 'কে কখন কী পরিবর্তন করেছেন — শুধু পড়ার জন্য' },
               { path: 'export', glyph: 'download', titleBn: 'তথ্য রপ্তানি', subtitleBn: 'শিক্ষার্থীর তালিকা CSV ফাইলে — এক্সেলে খোলে' },
+              { path: 'security', glyph: 'lock', titleBn: 'নিরাপত্তা', subtitleBn: 'আপনার অ্যাকাউন্ট কোন কোন ডিভাইসে খোলা আছে' },
               { path: 'branding', glyph: 'star', titleBn: 'প্রতিষ্ঠানের পরিচয়', subtitleBn: 'নাম, লোগো, রং ও ছাপা কাগজের শীর্ষভাগ' },
               { path: 'system', glyph: 'settings', titleBn: 'সিস্টেম ও ইন্টিগ্রেশন', subtitleBn: 'ওয়ার্কার · কিল-সুইচ · অদৃশ্য গ্যারান্টি' },
             ],
@@ -1121,6 +1124,15 @@ async function main() {
         glyph: 'lock',
         hidden: true,
         mount: (container) => { new AuditView({ root: container, doc: document, auth }); },
+      },
+      {
+        path: 'security',
+        labelBn: 'নিরাপত্তা',
+        glyph: 'lock',
+        hidden: true,
+        mount: (container) => {
+          new SecurityView({ root: container, doc: document, auth });
+        },
       },
       {
         path: 'export',

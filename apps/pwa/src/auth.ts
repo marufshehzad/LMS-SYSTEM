@@ -94,6 +94,15 @@ export class Auth {
 
   get tenantId(): string { return this.state?.tenantId ?? ''; }
   get userId(): string { return this.state?.user.id ?? ''; }
+  /**
+   * This device's own id — the same one sent at login and on every refresh.
+   *
+   * Exposed for the security screen (B-120), which needs it to say which
+   * row in the list is the machine the person is holding. It is the
+   * client's own identifier, not a server secret.
+   */
+  get deviceId(): string { return this.o.deviceId; }
+
   get role(): string { return this.state?.user.role ?? ''; }
   get roles(): string[] { return this.state?.user.roles ?? []; }
   get user(): AuthUser | null { return this.state?.user ?? null; }

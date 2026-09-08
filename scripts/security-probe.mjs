@@ -485,6 +485,74 @@ if (expA.status === 200 && expB.status === 200) {
     + 'export for the content comparison to mean anything');
 }
 
+/* ═══ 9c. Session management — B-120 ═════════════════════ */
+setArea('9c. Session and device management (B-120)');
+
+/**
+ * A revoke that only hides a row is worse than none, because the person who
+ * used it believes the stolen phone is out. So these ask the API, never a
+ * screen.
+ */
+const SESSIONS = '/api/v1/auth/sessions';
+
+// 1. It is authenticated at all.
+const sessAnon = await call(SESSIONS);
+record(sessAnon.status === 401, 'the session list requires a token',
+  `\u2192 ${sessAnon.status}`);
+
+// 2. A list is your OWN devices. There is no user parameter to widen it, and
+//    that is the check: a forged one must change nothing.
+const sessA = await call(`${SESSIONS}?deviceId=probe`, auth(tokenA));
+const sessForged = await call(
+  `${SESSIONS}?deviceId=probe&userId=${B.principal}&user_id=${B.principal}`,
+  auth(tokenA, { 'x-user-id': B.principal, 'x-tenant-id': B.id }));
+record(sessA.status === sessForged.status && sessA.text === sessForged.text,
+  'a forged user or tenant cannot widen a session list',
+  sessA.text === sessForged.text
+    ? 'identical to the honest request'
+    : `DIFFERENT: ${sessA.text.length}b vs ${sessForged.text.length}b`);
+
+// 3. Nothing in the list is a credential. The row holds a refresh token
+//    HASH and an IP; neither may leave.
+if (sessA.status === 200) {
+  const leaked = /refresh_token|token_hash|hash|secret|ip_address|"ip"/i.test(sessA.text);
+  record(!leaked, 'a session list carries no token, hash or IP address',
+    leaked ? 'a credential-shaped field is in the body' : 'none present');
+
+  // Deliberately NOT "no uuid anywhere", which is the check this started as
+  // and which failed correctly against a body that was fine. A device id IS
+  // uuid-shaped — the PWA generates one per browser and stores it in
+  // localStorage — and it is the handle a revoke is aimed with, so it has to
+  // round-trip. What must never appear is a SERVER identifier: the account,
+  // the school, or the session row. Those are named exactly, which is a
+  // stronger statement than the shape test it replaces.
+  const serverIds = [A.id, A.principal, A.section, A.student].filter(Boolean);
+  const leakedId = serverIds.find((id) => sessA.text.includes(id));
+  record(!leakedId, 'a session list exposes no user, tenant or row identifier',
+    leakedId ? `a server identifier is in the body: ${leakedId}` : 'only the client’s own device handle');
+} else {
+  skip('session list content checks', `the list answered ${sessA.status} for this fixture`);
+}
+
+// 4. Revoking somebody else's device does nothing. The device id is not a
+//    secret — knowing it must not be enough.
+const revokeOther = await call(`${SESSIONS}/revoke`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: `Bearer ${tokenA}` },
+  body: JSON.stringify({ deviceId: 'a-device-belonging-to-somebody-else' }),
+});
+let revokedCount = null;
+try { revokedCount = JSON.parse(revokeOther.text).revoked; } catch { /* not json */ }
+record(revokeOther.status === 200 && revokedCount === 0,
+  'revoking a device that is not yours ends nothing',
+  `\u2192 ${revokeOther.status}, revoked=${revokedCount}`);
+
+// 5. Never cached. A stale session list still shows a device already ended.
+const cc = sessA.headers.get('cache-control') ?? '';
+record(!/max-age=[1-9]/.test(cc) && !/public/.test(cc),
+  'a session list is not publicly cacheable',
+  `cache-control: ${cc || '(absent)'}`);
+
 /* ═══ 10. Secret exposure ════════════════════════════════════════════════ */
 setArea('10. Secret exposure');
 
