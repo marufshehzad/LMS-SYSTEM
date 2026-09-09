@@ -1762,3 +1762,33 @@ off the grid. The screen keeps its own responsive scale; the same data, two
 presentations. The document's Bangla face is now Hind Siliguri, matching
 `--font-bn` on screen, where the document stack had been Noto Sans Bengali
 with Hind Siliguri absent entirely.
+
+
+---
+
+## P12 audit — UI/UX findings (2026-09-10)
+
+All 24 principal routes were rendered against real data and scanned; mobile was
+checked at 375px; the light theme was measured.
+
+**Held up:** `lang="bn"`, a skip link, `main`/`nav`/`header` landmarks, zero
+unlabelled inputs, zero images without `alt`, no touch target under 32px, light
+theme body contrast **8.06:1** (AA needs 4.5), Hind Siliguri in the stack behind
+a numeral-specific face, and Bangla-first throughout — no English leaked into a
+principal's screens. Twenty-three of 24 routes carry exactly one `h1`.
+
+**Three defects, all MINOR:**
+
+1. **The academic year is in Latin digits** inside Bangla sentences —
+   "শিক্ষাবর্ষ 2026" — on home, academic structure, import and exams. The date
+   beside it is correctly Bangla, so the mismatch sits in one line. It is a
+   database value interpolated raw; `bnNum()` exists and is used a few
+   characters away on the same line in `import-view.ts`.
+2. **`#/students` has no `h1`** — the outline starts at `h2`. It is the only
+   route of the 24 that does this.
+3. **16px horizontal overflow on `#/academic` at 375px** — the bottom tab bar
+   measures 391px against a 375px viewport, reproducibly, while measuring
+   exactly 375px on home.
+
+**Not assessed:** printed A4 output on physical paper, and font readability in
+print. That needs a printer, and remains genuinely untested.

@@ -1019,3 +1019,25 @@ name into `settings->branding`, which is what appears on its documents and app
 shell. So a school can look correct to itself while the operator console still
 shows the typo. If a school says "we already fixed our name", check
 `tenants.name_bn` and not only the branding.
+
+
+---
+
+## P12 audit — production readiness (2026-09-10)
+
+**Ready:** six systemd units and a cron runbook in `deploy/`; a `readiness`
+endpoint that reads no database and names no tenant; backup configured and a
+restore drill recorded `verified`; 80 migrations; a reproducible build; and a
+runtime floor in `scripts/test-all.mjs` that refuses a Node build carrying the
+B-66 defect.
+
+**Blocked, and external to this repository** — all four recorded `blocked` in
+`docs/production-evidence.json`: wildcard DNS, wildcard TLS, subdomain routing,
+and real push delivery. An SMS aggregator contract is also outstanding; the
+provider abstraction is complete and throws loudly if a provider is named but
+unconfigured, so a school can never believe messages are going out when they are
+not.
+
+**One gap to close:** migrations `038`, `076`, `077`, `078` and `079` have no
+`.down.sql`. Rolling back a deploy that includes them is not possible by the
+documented path.

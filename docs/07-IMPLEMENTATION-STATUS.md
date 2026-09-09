@@ -17,6 +17,24 @@ New to the repository? Read [00-START-HERE.md](00-START-HERE.md) first.
 
 ---
 
+
+## P12 audit status (2026-09-10)
+
+Audited against the running system - see `docs/P12-FINAL-AUDIT-REPORT.md`.
+**~93% complete for pilot; production deployability blocked on infrastructure,
+not on code.** Thirteen of sixteen areas implemented and verified; three carry
+work external to this repository.
+
+| Area | Verified live | Rests on the suite | Outstanding |
+|---|---|---|---|
+| Platform console, guardian/student access, tenant isolation, commercial lifecycle, UI/UX across 24 routes | yes | - | - |
+| Exams, fees, routine generation, import/export, sync idempotency | - | 2,270 tests, 13/13 workspaces | - |
+| A4 print on paper, real SMS delivery | - | - | needs a printer and a contract |
+
+Known minor defects: P12-1 (Latin year digits), P12-2 (missing `h1` on
+`#/students`), P12-3 (16px mobile overflow on `#/academic`), P12-4 (5 migrations
+without rollbacks), P12-5 (stale dev tenants). See BACKLOG.
+
 ## 1. Current state at a glance
 
 | | |

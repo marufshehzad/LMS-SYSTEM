@@ -12,6 +12,21 @@ Last updated **2026-09-08** after **P11** — see
 [PHASE_LOG.md](PHASE_LOG.md). Resolved rows keep their ID, their history and
 their reason; nothing is deleted.
 
+
+## P12 final audit findings (2026-09-10)
+
+From `docs/P12-FINAL-AUDIT-REPORT.md`. No CRITICAL, no MAJOR. Verdict
+**CONDITIONAL GO** - conditional on external infrastructure, not on these.
+
+| ID | Finding | Severity | Where | Status |
+|---|---|---|---|---|
+| **P12-1** | The academic year renders in **Latin digits** inside Bangla sentences - "শিক্ষাবর্ষ 2026" - on `#/home`, `#/academic`, `#/import`, `#/exams`. The year is a DATABASE value interpolated raw at `academic-view.ts:388,484`, `import-view.ts:305`, `principal-home-view.ts:146`, `structure-forms.ts:298`. `bnNum()` exists and is used elsewhere; `import-view.ts:305` passes the STEP through `bn()` on the same line while leaving the year alone. `bangla-numerals.test.ts` scans source literals, so it structurally cannot catch digits arriving from PostgreSQL. | MINOR | PWA | **OPEN** |
+| **P12-2** | `#/students` renders **no `h1`** - the document outline starts at `h2` ("শিক্ষার্থী খুঁজুন"). All 23 other routes have exactly one `h1`. A screen-reader user landing here gets no page heading. | MINOR | PWA | **OPEN** |
+| **P12-3** | **16px horizontal overflow** on `#/academic` at 375px: the bottom tab bar measures 391px against a 375px viewport, reproducible across repeated probes. On `#/home` it measures exactly 375px. | MINOR | PWA | **OPEN** |
+| **P12-4** | **5 of 80 migrations have no rollback script** - 038, 076, 077, 078, 079, four of them the most recent. A bad deploy of those cannot be rolled back by the documented path. | MINOR | db | **OPEN** |
+| **P12-5** | **5 stale tenants** in the development database from earlier audit runs (`audit-onb-*`, `p7-probe-*`). Development only, but it is how B-119's 294-tenant leak started. This audit created 3 and removed all 3. | MINOR | dev env | **OPEN** |
+| **P12-E** | **EXTERNAL, not code:** wildcard DNS, wildcard TLS, subdomain routing and real push delivery are all recorded `blocked` in `production-evidence.json`; the SMS aggregator contract does not exist. Without these a school cannot be onboarded onto its own address or send a guardian a message. | BLOCKER (external) | infra | **OPEN** |
+
 ## How to use it
 
 - **One row, one ID.** IDs are permanent. A resolved item keeps its ID and its

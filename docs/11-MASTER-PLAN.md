@@ -1964,6 +1964,8 @@ instead of offering a retry that cannot succeed. The load-bearing half is the NE
 whole school out over a bad minute — and the unsent outbox survives the ending, because a
 teacher's morning register exists nowhere else.
 
+**P12 ran on 2026-09-10 as a full-system production AUDIT, not as a feature phase** - which is the only form §29's P12 could honestly take while B-5 (a pilot institution) is still open, since the thing that would order a post-pilot feature wave does not yet exist. Verdict **CONDITIONAL GO**: no critical and no major defect, five minor, and four external blockers (DNS, TLS, subdomain routing, SMS contract) that are procurement rather than engineering. Full report: `docs/P12-FINAL-AUDIT-REPORT.md`.
+
 **There is no P12 in this plan, and that is deliberate rather than an omission.** The only
 place the string appears in `docs/` is `FINAL-FULL-PROJECT-AUDIT-REPORT.md` §29 — *"P12 —
 Post-pilot feature wave from §27, ordered by pilot feedback"* — and **B-5, a pilot

@@ -15627,3 +15627,83 @@ What broke it open was refusing to accept a green run as proof, and building a
 ladder where each rung differed from the last by exactly one thing. The moment
 the failing fixture contained nothing but `node:net` and `node:test`, the
 product was exonerated and the only remaining variable was the runtime.
+
+
+# P12 - final full-system production audit (2026-09-10)
+
+The whole product, tested as a customer uses it, on the running system. Full
+report: `docs/P12-FINAL-AUDIT-REPORT.md`.
+
+## Verdict: CONDITIONAL GO
+
+No CRITICAL and no MAJOR defect. Five MINOR. The condition is not the defects -
+it is four things outside this repository: wildcard DNS, TLS, subdomain routing
+and an SMS aggregator contract. Without them a real school cannot be put on its
+own address or send a guardian a message.
+
+## What was driven live, and what was not
+
+The audit states its own coverage first, because an audit that implies more than
+it did is worse than a short one.
+
+**Driven by hand against the live handlers:** the platform console end to end (an
+institution created, provisioned, branded, given an admin, a plan, a cap, a
+payment and a grace extension - 13 checks); the guardian relationship on real
+data with two families (6); the student portal (3); tenant isolation and role
+boundaries (5); the suspend/reactivate lifecycle with row counts either side (7);
+all 24 principal routes rendered and scanned; mobile at 375px; light-theme
+contrast; accessibility landmarks.
+
+**Left to the automated suite** (2,270 tests, 13/13 workspaces, 28 SQL suites,
+green on Node 24.21.0): exam/marks/result and fee/invoice/ledger lifecycles,
+routine generation, import/export round-trips, sync idempotency.
+
+**Tested by nobody, and said so:** A4 landscape print on paper, and real SMS
+delivery. Those need a printer and a contract.
+
+## The two answers that mattered
+
+**Suspension does not destroy a school's records.** Rows before and after a
+suspend → reactivate cycle were identical, and enforced access moved
+`full → none → full`. This is the promise a school in arrears is really buying.
+
+**No cross-tenant read.** A token minted for another school returned 404 for this
+school's student - with the positive control proving the same route serves the
+right school 200. Fourteen isolation checks, each denial paired with the proof
+that the route works.
+
+## Findings
+
+| id | finding | severity |
+|---|---|---|
+| M1 | the academic year renders in LATIN digits inside Bangla sentences ("শিক্ষাবর্ষ 2026") on 4 surfaces | MINOR |
+| M2 | `#/students` renders no `h1`; the outline starts at `h2`, unlike all 23 other routes | MINOR |
+| M3 | 16px horizontal overflow on `#/academic` at 375px - the tab bar measures 391px | MINOR |
+| M4 | 5 of 80 migrations have no rollback script (038, 076-079) | MINOR |
+| M5 | 5 stale tenants in the development database from earlier audits | MINOR |
+
+M1 is the interesting one. The year is a DATABASE value interpolated raw into a
+Bangla sentence, and `import-view.ts:305` passes the step number through `bn()`
+on the same line while leaving the year alone. `bangla-numerals.test.ts` scans
+source literals, so it cannot see digits that arrive from PostgreSQL - the guard
+was never able to catch this class.
+
+## Two strengths worth recording as design, not as passes
+
+**Read-only is enforced by PostgreSQL**, not by a flag every endpoint has to
+remember: `SET LOCAL transaction_read_only = on`, so a write on a path nobody
+thought about still fails.
+
+**Every commercial mutation requires a stated reason** - 400 `reason_required`
+otherwise - and the audit row records the transition itself:
+`set_tenant_status trial → suspended`, `plan pilot/500 → standard/500`. Ten such
+rows were written during this audit and read back.
+
+## Audit hygiene
+
+This audit created three tenants and removed all three: 21 before, 21 after, zero
+`p12-*` remaining. Three of my own intermediate findings were retracted before
+they reached the report - a duplicate-role count that had grouped by NAME across
+a 2,000-user fixture, a missing-rollback count of 32 that was really 5, and an
+audit-trail FAIL that was my querying the wrong table. A finding that survives
+only because nobody checked it is worse than no finding.
