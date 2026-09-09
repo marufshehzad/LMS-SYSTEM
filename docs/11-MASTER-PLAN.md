@@ -1941,7 +1941,7 @@ repository-complete and externally blocked**: `deploy/` carries all six systemd 
 closed in that pass: **B-56** (one contact rule across three routes, and a revoked
 guardianship that PATCH could resurrect — reproduced against PostgreSQL before it was fixed),
 **B-119** (the fixture leak; the development database went from 294 tenants to 21) and
-**B-36**. **B-66**'s mechanism was **proven on 2026-09-10 and the repository fix landed**, and it was never this repository's code (it stays OPEN only until the developer machine's Node is installed): a TCP
+**B-36**. **B-66** was **CLOSED on 2026-09-10**, and it was never this repository's code: a TCP
 socket opened inside a `node --test` per-file child process intermittently aborts that
 child on Node 24 before 24.21.0 on Windows (`0xC0000409`), before it can write a byte —
 which is why the runner could only report the whole file with no assertion and no stderr.
@@ -1949,7 +1949,9 @@ Proven by a one-variable ladder (20,900 children clean without a socket; 3% with
 by the runtime itself (v24.15.0 → 11 crashes/500 runs, v24.21.0 → 0/500). Concurrency was
 NOT the cause — it reproduces at `--test-concurrency=1` — so the concurrency cap that
 looked indicated would have fixed nothing. CI was never affected because it pins Node 22,
-which is clean at 0/500. **B-120** was opened for the session/device
+which is clean at 0/500. Verified on the installed runtime after upgrade: 0 crashes / 500 reproducer
+runs where the same fixture crashed 11/500 before it, plus 10/10 consecutive full 13-workspace
+suites. **B-58 closes with it.** **B-120** was opened for the session/device
 list this plan does not authorize as a phase, and **closed on 2026-09-08** as pre-pilot
 hardening rather than as a phase: three sub-paths on the existing identity dispatcher plus a
 নিরাপত্তা screen, self-service only, keyed by `device_id` because `refresh` rotates. No second

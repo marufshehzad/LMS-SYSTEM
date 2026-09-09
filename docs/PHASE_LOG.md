@@ -15588,11 +15588,42 @@ unless the container is up and the port answers.
 (STATUS_DLL_INIT_FAILED_LOGOFF) across nine iterations. Also VOID. Only the
 six clean iterations before it were kept.
 
-## Still outstanding
+## CLOSED - verified on the real system runtime (2026-09-10)
 
-**The system-wide Node upgrade has NOT happened.** The UAC prompt was
-cancelled, so `msiexec` never ran and this machine still has v24.15.0 on PATH.
-All validation above was run against a verified portable 24.21.0 build
-(SHA-256 checked against the release `SHASUMS256.txt`). Until the MSI is
-installed, `node scripts/test-all.mjs` on this machine will correctly refuse
-to run.
+The upgrade happened. `node --version` from inside the repository now reports
+**v24.21.0** (`C:\Program Files\nodejs\node.exe`), installed from the MSI whose
+SHA-256 was checked against the release `SHASUMS256.txt` before it was run.
+
+Every earlier number in this entry was measured against a *portable* 24.21.0.
+These were re-measured against the installed one, because a fix validated only
+on a binary nobody actually runs is not a validated fix:
+
+| check | result |
+|---|---|
+| minimal TCP + `node --test` reproducer | **0 crashes / 500 runs (5,500 children)** |
+| real `academics-svc` suite | **185 tests, 0 fail** |
+| runtime guard | allows 24.21.0, no refusal |
+| crashed-child detector | still names a deliberately aborted child, and says B-66 is NOT the explanation on this runtime |
+
+Before the upgrade, the same reproducer on the same machine crashed **11 times
+in 500 runs**. After it, zero in 500 - and zero in the 1,000-run portable
+stress, and zero across 10 consecutive full 13-workspace suites.
+
+**B-58 closes with this.** It was the same mechanism, first seen in
+`ops-svc/branding.test.ts` at P0 checkpoint 3, and it was never a test.
+
+## What this cost, and what it is worth remembering for
+
+Three phases of investigation chased a defect in someone else's code, because
+the symptom - a whole file failing with no assertion and no stderr - is
+indistinguishable from a test that failed, and the runner had no way to say
+otherwise. Four separate hypotheses were held with some confidence and all
+four were wrong: an unref'd socket, memory pressure, process fan-out, and
+concurrency. The last one had a p-value attached to it and was still wrong;
+the sample was simply too small, and a concurrency cap would have turned the
+suite green while fixing nothing.
+
+What broke it open was refusing to accept a green run as proof, and building a
+ladder where each rung differed from the last by exactly one thing. The moment
+the failing fixture contained nothing but `node:net` and `node:test`, the
+product was exonerated and the only remaining variable was the runtime.
