@@ -202,6 +202,21 @@ describe('B-120 §3 — revoking actually revokes', { skip }, () => {
     // The whole point. Not "is it hidden" — can it still get a token.
     assert.equal(await canRefresh(T_A, lost, PHONE_LOST), false,
       'a revoked device could still refresh');
+
+    // WHICH refusal, not merely that it was refused.  (B-121)
+    //
+    // The PWA decides from this status whether to end the session or to
+    // treat the failure as transient, so the exact code is a contract
+    // between the two. `refresh.ts` finds the session with
+    // `… AND revoked_at IS NULL`, so a revoked device misses the row exactly
+    // as a dead or already-rotated token does: 401, not 403. B-121 relied on
+    // that being true; this is where it is proven rather than read.
+    const refused = await call(refresh, {
+      method: 'POST', url: '/api/v1/auth/refresh',
+      body: { tenantId: T_A, refreshToken: lost, deviceId: PHONE_LOST },
+    });
+    assert.equal(refused.status, 401, 'a revoked device must be refused with 401');
+    assert.equal((refused.body as { error: string }).error, 'invalid_refresh_token');
   });
 
   test('THE RACE — revoking survives a rotation between listing and pressing', async () => {

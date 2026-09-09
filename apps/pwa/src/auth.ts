@@ -63,7 +63,36 @@ export interface AuthOptions {
   apiBase: string;
   deviceId: string;
   now?: () => number;
+  /**
+   * The session is over and it is not coming back.  (B-121)
+   *
+   * Fired ONLY when the server refuses the refresh on authentication
+   * grounds — the token is dead, rotated, revoked, or the account is no
+   * longer active. Never for a network failure and never for a 5xx, because
+   * signing somebody out over a server hiccup is a worse bug than the one
+   * this exists to fix.
+   */
+  onSessionEnded?: (reason: SessionEndReason) => void;
 }
+
+/**
+ * Why a session ended, in the words the screen needs to choose.
+ *
+ * There are two, not three, and that is a fact about the SERVER rather than
+ * a simplification here. `refresh.ts` looks the token up with
+ * `… AND revoked_at IS NULL AND expires_at > now()`, so a session revoked
+ * from the নিরাপত্তা screen (B-120) is indistinguishable from one that
+ * expired or was already rotated: all three miss the row and all three come
+ * back `401 invalid_refresh_token`. A separate `revoked` reason would be a
+ * branch nothing could ever reach — and, worse, the obvious way to reach it
+ * (treat 403 as revocation) captures `no_active_role`, which would tell
+ * somebody whose role was removed that their device had been signed out.
+ *
+ * 401 and 403 differ in what the person can DO, which is the only
+ * distinction a screen needs: 401 means sign in again, 403 means only the
+ * office can fix this.
+ */
+export type SessionEndReason = 'expired' | 'account_inactive';
 
 export class Auth {
   private readonly o: AuthOptions;
@@ -204,10 +233,36 @@ export class Auth {
         }),
       });
       if (!res.ok) {
-        // The refresh token is dead (expired/revoked/already-rotated) —
-        // nothing left to do but ask the teacher to log in again.
+        // B-121. WHICH kind of "not ok" decides whether this is a logout.
+        //
+        // This used to clear the session on any non-2xx, which turns a 500
+        // or a 502 into a school-wide sign-out: every device that happened
+        // to refresh during a bad minute loses its session and has to find
+        // an OTP. A transient failure must leave the session alone and let
+        // the next attempt succeed.
+        //
+        // 401 and 403 are the server saying the CREDENTIAL is finished —
+        // dead, rotated, revoked, or the account is no longer active. Only
+        // those two end the session.
+        if (res.status !== 401 && res.status !== 403) {
+          // Keep the (possibly stale) token: the caller's request may still
+          // fail, but it fails as a request rather than as a logout.
+          return current.accessToken;
+        }
+
+        // 403 is `account_not_active` (suspended, left, deleted) or
+        // `no_active_role`. Neither is fixed by signing in again, so both
+        // send the person to the office rather than round a login loop.
+        // 401 covers dead, rotated AND revoked — see SessionEndReason.
+        const reason: SessionEndReason = res.status === 403
+          ? 'account_inactive'
+          : 'expired';
+
         this.state = null;
         this.persist();
+        // After the state is cleared, so a handler that re-renders cannot
+        // find a half-dead session still in place.
+        this.o.onSessionEnded?.(reason);
         return null;
       }
       const body = (await res.json()) as { accessToken: string; refreshToken: string; expiresIn: number };

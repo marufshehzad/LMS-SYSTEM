@@ -15302,3 +15302,297 @@ The flake recurred during today's runs - `test-failure-*.log` artifacts for
 `identity-svc` and `platform-svc` were written while this work was under way.
 The pre-pilot pass acted on its narrowed cause and explicitly did not claim
 it fixed; that remains the position.
+
+
+# B-121 - a dead session is not a network error (2026-09-08)
+
+The owner's screenshot of the হাজিরা tab: "কিছু সমস্যা হয়েছে। আবার চেষ্টা
+করুন।" above a retry button. The screen was not broken. The session was: an
+access token past its expiry, and a refresh token that had already been
+rotated. Both legs returned 401, `authedFetch` threw, every view caught it
+with its generic handler, and the person was offered a retry that could never
+succeed - because the credential, not the network, was finished.
+
+## The dangerous half
+
+The obvious repair is "clear the session when refresh fails", and it is a
+worse bug than the one it fixes. `ensureFreshToken` runs on a timer, ahead of
+expiry, on every device. One bad minute on the server - a 500, a 502, a
+deploy - would sign out every device that happened to refresh during it, and
+each one would need a fresh OTP to come back. In a school on a shared SMS
+budget that is a real cost, and it would arrive as a mystery.
+
+So the change is a DISTINCTION, not a clear:
+
+- **401 or 403** - the server is refusing the credential. Dead, rotated,
+  revoked (B-120), or the account is no longer active. The session ends.
+- **Anything else, or a thrown `fetch`** - the server did not answer, or
+  answered badly. The stale token is returned unchanged and the caller's
+  request fails as a REQUEST. Nobody is signed out.
+
+The negative tests are therefore the load-bearing ones: a 500, a 503 and an
+offline `fetch` that throws must each leave the session exactly where it was.
+Mutation-checked - deleting the `res.status !== 401 && res.status !== 403`
+guard fails exactly those two transient-failure tests and nothing else, which
+is what makes it a guard rather than a comment.
+
+## Two endings, and the third one that could never happen
+
+`showSessionEnded(reason)` replaces the generic error with `role="alert"`, a
+heading, one sentence and one focused action:
+
+| reason | from | heading | action |
+|---|---|---|---|
+| `expired` | 401 `invalid_refresh_token` | আপনার সেশন শেষ হয়েছে | আবার লগইন করুন |
+| `account_inactive` | 403 `account_not_active` / `no_active_role` | অ্যাকাউন্টটি সক্রিয় নেই | লগইন স্ক্রিনে ফিরে যান |
+
+The second row is the one worth arguing about. Telling somebody whose account
+was suspended that their "session ended", and offering them a login, sends
+them round a loop only the office can break - they will press the button
+until a person explains. It gets its own heading and a button that promises
+only what it does. The way back still exists, because a shared device may
+hold somebody else's account.
+
+### The branch nothing could reach
+
+The first version of this had THREE reasons, with `revoked` mapped from a
+403 `session_revoked` - and it was wrong twice over.
+
+`refresh.ts` finds the session with
+`… AND revoked_at IS NULL AND expires_at > now()`. A device revoked from the
+নিরাপত্তা screen therefore misses the row in exactly the way a dead or
+already-rotated token does, and gets **401 `invalid_refresh_token`**. There
+is no `session_revoked` response anywhere in this system. The branch was
+unreachable, and the unit test that "proved" it asserted a reply the server
+cannot produce - the same defect class as B-120's security probe that could
+not fail, committed again, three days later, by the same hand.
+
+Worse than dead: 403 is `account_not_active` **or** `no_active_role`. Mapping
+403 to "revoked" would have told somebody whose ROLE was removed that their
+device had been signed out, and sent them to log in again instead of to the
+office.
+
+So the reasons are two, and they split on what the person can DO - 401 means
+sign in again, 403 means only the office can fix this. **The contract is now
+pinned on the server side too**: `sessions.test.ts` asserts that a revoked
+device's refresh returns exactly `401 invalid_refresh_token`, because the PWA
+now decides from that status whether to end a session. Before this it
+asserted only `status === 200 ? true : false`, which is precisely the level
+of detail that let the wrong assumption through.
+
+## Once, however many views were in flight
+
+A screen loads several sections at boot, so a dead credential refuses several
+requests within a few milliseconds and `onSessionEnded` fires once per
+request - three times, in the browser check. Re-rendering each time would
+clear the `role="alert"` out from under a screen reader and snatch focus back
+to the button while somebody was already reading it, and would re-run the
+purge for nothing.
+
+The screen is therefore drawn once, guarded by a marker on the node itself
+(`[data-session-ended]`) rather than by a variable, so it cannot go stale:
+`showLogin` replaces the node, which resets it. Verified in the browser -
+3 refusals, 1 screen.
+
+## What is cleared, and what is NOT
+
+The same `purgeLocalData('logout')` a real logout runs: the session key and
+every read-through screen cache, so the next person's first paint is not this
+person's roster.
+
+The IndexedDB **outbox is deliberately untouched**, exactly as in `doLogout`.
+A teacher's unsent attendance exists nowhere else, and a revoked session is
+not a reason to lose a morning's register. The sync engine only ever sends
+ops matching the signed-in identity, so it cannot be posted by whoever signs
+in next. The **device id survives** for the same reason it survives a logout:
+it identifies the machine, not the person - and B-120's revoke is aimed with
+it.
+
+## Verified
+
+- **9 unit tests** (`apps/pwa/test/session-ended.test.ts`), four of them
+  negative, plus one added server-side assertion in `sessions.test.ts`
+- **Both guards mutation-checked.** Deleting the transient-failure guard
+  fails exactly the 500 and 503 tests and nothing else; collapsing the 403
+  mapping to `expired` fails exactly the two 403 tests and nothing else.
+- **Browser, through the app's own boot.** The screen was driven by booting
+  the real bundle in a same-origin iframe with a fault installed ahead of the
+  deferred module, so the app's own `Auth` and `showSessionEnded` ran
+  untouched. The **401 case is the harness's positive control** - it
+  reproduces the owner's screen - and the transient cases run through the
+  identical harness:
+
+  | injected | screen | session |
+  |---|---|---|
+  | 401 `invalid_refresh_token` (expired, rotated, **or revoked**) | আপনার সেশন শেষ হয়েছে | cleared |
+  | 403 `account_not_active` | its own heading and button | cleared |
+  | 403 `no_active_role` | the same office sentence, not a login prompt | cleared |
+  | 500 | dashboard, retry offered | **kept** |
+  | offline (thrown `fetch`) | dashboard, offline banner | **kept** |
+
+- **Outbox survival, in the browser**: an unsent op written to IndexedDB,
+  then a 401 session-end - outbox 1 → 1, payload intact, device id intact,
+  auth cleared.
+- Focus lands on the single action; the retry button that could never succeed
+  is gone from this path.
+
+The first browser attempt proved nothing and is worth recording: patching
+`fetch` after boot gave `refreshCalls: 0`, because `Auth` reads localStorage
+in its constructor and the app was already past it. A check that cannot
+observe the thing it is checking passes for the wrong reason - the same class
+of defect as the security probe that could not fail (B-120).
+
+
+# B-66 - the flake was never ours (2026-09-10)
+
+For three phases this repository carried a fault it could not name. A whole
+test FILE would fail, at line 1:1, with the bare string `'test failed'`, no
+assertion, and an empty stderr. A different file each time. Never reproducible
+alone. B-58 opened it, B-66 inherited it with three instances, and the P12
+audit added three more observations. The pre-pilot pass narrowed it to an
+unref'd socket in `lockFixtures`, acted on that, and honestly declined to call
+it fixed. It was right to decline: that was not the cause.
+
+## What it actually is
+
+**A TCP socket opened inside a `node --test` PER-FILE CHILD PROCESS
+intermittently aborts that child, on Node 24 before 24.21.0, on Windows.**
+
+The child dies with Windows status `0xC0000409` - which on Windows is what a
+Release-mode process reports when it calls `abort()`. It dies during startup,
+around 220-450 ms in, before it can write a single byte. So the runner sees a
+child that exited non-zero having reported nothing, and prints the only thing
+it can: the whole file failed. No assertion, because none ran. No stderr,
+because the process was gone.
+
+Nothing in this product is involved.
+
+## How it was proven
+
+A ladder, one variable at a time, every rung under `node --test` at the same
+11-wide fan-out. Rungs that never open a socket:
+
+| rung | adds | runs | children | crashes |
+|---|---|---|---|---|
+| synthetic `.ts` | no project code at all | 400 | 4,400 | 0 |
+| synthetic `.js` | no type-stripping | 400 | 4,400 | 0 |
+| syn-big | 8 large generated TS modules per child | 200 | 2,200 | 0 |
+| v3 | the project module graph, nothing called | 300 | 3,300 | 0 |
+| v4 | + `installTestKeys()` (Ed25519 via jose) | 300 | 3,300 | 0 |
+| v5 | + `createDb()` pool constructed, never connected | 300 | 3,300 | 0 |
+
+**20,900 child processes, zero crashes.** Then one component:
+
+| rung | adds | runs | crashes | rate |
+|---|---|---|---|---|
+| v6 | + `lockFixtures()` - connection AND advisory lock | 500 | 5 | 1.0% |
+| **v6a** | **+ a connection, advisory lock REMOVED** | 300 | **9** | 3.0% |
+
+Removing the advisory lock did not remove the failure, which is what finally
+killed the `lockFixtures` theory the pre-pilot pass had acted on.
+
+Then the component was narrowed until nothing of ours was left:
+
+| rung | what it is | runs | crashes |
+|---|---|---|---|
+| v7 | raw `net.connect()` to a port. No `pg`, no project imports | 300 | 8 |
+| v8 | `net.connect()` to a throwaway server **inside the child** - no database anywhere | 300 | 3 |
+| v10 | a **UDP** socket instead | 300 | **0** |
+| v7 + `--test-isolation=none` | same sockets, no per-file child | 300 | **0** |
+| v9 | the identical socket work as a plain `node file.mjs` | 300 | **0** (3,300 children) |
+
+So it needs a TCP socket, and it needs the per-file child process. It is not
+`pg`, not PostgreSQL, not the fixture lock, not project code.
+
+## Two of my own hypotheses died here, and one of them I had argued for
+
+**Memory pressure and spawn storm: falsified.** `apps/pwa` runs 54 files
+31-wide with no database and crashed 0 times in 25 runs - more fan-out than
+academics-svc, no failures.
+
+**Concurrency: falsified.** It still happens at `--test-concurrency=1`, where
+exactly one file runs at a time. Normalised per child the rate is flat:
+
+| fan-out | per-child rate |
+|---|---|
+| 11-wide | 0.242% |
+| 4-wide | 0.182% |
+| serial (1) | 0.273% |
+
+An earlier reading of "0 failures at concurrency <= 8" over 60 runs looked
+significant and was a small-sample artifact: 60 runs at a 2% rate expects about
+one failure, so observing none means nothing. **A concurrency cap would have
+turned the suite green and fixed nothing** - the exact shape of fix this
+project has repeatedly caught elsewhere: a control that appears to work because
+the thing it targets was never the cause.
+
+## The proof: one variable, the runtime
+
+Same machine, same session, same fixture, same fan-out:
+
+| Node | runs | children | crashes |
+|---|---|---|---|
+| **v24.15.0** | 500 | 5,500 | **11** (2.2%) |
+| **v24.21.0** | 500 | 5,500 | **0** |
+
+Fisher exact one-tailed **p ~ 0.0005**. Node 22.23.2 - the version CI pins -
+is also clean at **0 / 500**, which is why the guard below allows it rather
+than assuming.
+
+## Why it only ever hit the DB suites, and never CI
+
+Only DB-backed test files open TCP sockets, so only they were exposed. And
+every workflow pins `node-version: '22'`, which does not carry the defect -
+which is why CI has been green throughout and the flake looked local and
+unreproducible.
+
+## The fix
+
+`scripts/test-all.mjs` refuses to start on a Node 24 build below 24.21.0 and
+prints the diagnosis with its measured evidence, rather than letting the suite
+produce a misleading `'test failed'`. `engines` stays at `>=22` deliberately:
+Node 22 is what CI runs and is unaffected, so a global `>=24.21.0` would
+invalidate a green CI to fix a Windows-only defect CI does not have. Off
+Windows the guard warns instead of refusing, because it was never measured
+there.
+
+The runner also names a crashed child for what it is: whole file, line 1:1,
+`'test failed'`, empty stderr - and says so, with the workspace and the file.
+The diagnosis is conditional on the runtime: on a patched Node it explicitly
+says B-66 is NOT the explanation, so the next person is not sent chasing a
+cause that has been excluded. Verified against a deliberately aborted child.
+
+No retries. No concurrency cap. No test weakened. No application code touched.
+
+## Validated
+
+- **Minimal reproducer on 24.21.0: 1,000 runs, 11,000 children, 0 crashes**
+- **Full 13-workspace suite x10 on 24.21.0: 10/10 green, 2,270 tests, 13/13
+  workspaces, total stable at 2,270 every run**
+- Real `academics-svc` suite on 24.21.0: 0 failures / 40 runs (1/40 on 24.15.0)
+- Guard: refuses 24.15.0 (exit 1), allows 22.23.2 and 24.21.0
+- Detector: names a deliberately crashed child, and declines to blame B-66 on
+  a patched runtime
+
+## Two interruptions recorded as interruptions, not as evidence
+
+**The PostgreSQL container exited** (status 255) when the machine restarted
+mid-investigation. A v6 rung recorded 181/200 "failures" that were all
+`exit=1` with `ECONNREFUSED 127.0.0.1:55432` - deterministic, legible, and
+nothing to do with B-66. Classified VOID; the rung was re-run against a live
+database. Every experiment after that runs a preflight that refuses to start
+unless the container is up and the port answers.
+
+**A previous session's teardown** killed a control mid-run, producing
+`0x40010004` (DBG_TERMINATE_PROCESS) and `0xC000026B`
+(STATUS_DLL_INIT_FAILED_LOGOFF) across nine iterations. Also VOID. Only the
+six clean iterations before it were kept.
+
+## Still outstanding
+
+**The system-wide Node upgrade has NOT happened.** The UAC prompt was
+cancelled, so `msiexec` never ran and this machine still has v24.15.0 on PATH.
+All validation above was run against a verified portable 24.21.0 build
+(SHA-256 checked against the release `SHASUMS256.txt`). Until the MSI is
+installed, `node scripts/test-all.mjs` on this machine will correctly refuse
+to run.

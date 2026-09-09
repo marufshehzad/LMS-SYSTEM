@@ -422,7 +422,13 @@ async function main() {
   // when OTP is disabled it offers the activation-code path, which is how
   // every newly onboarded school signs in anyway. The dead-end the fallback
   // existed to avoid does not exist.
-  const realAuth = new Auth({ apiBase, deviceId: deviceId('d') });
+  const realAuth = new Auth({
+    apiBase,
+    deviceId: deviceId('d'),
+    // B-121. Only fires when the server refuses the refresh on
+    // authentication grounds — never for a network failure or a 5xx.
+    onSessionEnded: (reason) => { showSessionEnded(reason); },
+  });
   const demoMode = params.get('demo') === '1' || isDemoSurface();
   const auth = demoMode ? new (await loadDemoAuth())() : realAuth;
   // F-1503. One tracker for the session; flushed on boot (draining
@@ -1310,6 +1316,90 @@ async function main() {
     applyBranding(document, b, { tenantKey: brandingKey });
     shell?.setInstitution({ name: brandName(b), logoUrl: b.logoUrl });
   });
+
+  /**
+   * The session is over.  (B-121)
+   *
+   * What this replaces: a dead session fell through `authedFetch` as a
+   * thrown `AuthError`, every view caught it with its generic handler, and
+   * the person got "কিছু সমস্যা হয়েছে। আবার চেষ্টা করুন।" above a retry
+   * button that could never succeed — because the credential, not the
+   * network, was finished. Observed by the owner on the হাজিরা tab.
+   *
+   * ── What is cleared, and what is NOT ──────────────────────────────────
+   * The same `purgeLocalData('logout')` a real logout runs: the session key
+   * and every read-through screen cache, so the next person's first paint
+   * is not this person's roster.
+   *
+   * The IndexedDB OUTBOX is deliberately untouched, exactly as in
+   * `doLogout` — a teacher's unsent attendance exists nowhere else, and a
+   * revoked session is not a reason to lose a morning's register. The sync
+   * engine only ever sends ops matching the signed-in identity, so it
+   * cannot be posted by whoever signs in next. Device facts (the device id)
+   * survive for the same reason they survive a logout: they identify the
+   * machine, not the person.
+   */
+  function showSessionEnded(reason: 'expired' | 'account_inactive'): void {
+    // Once, however many views were in flight.
+    //
+    // A screen has several sections loading at boot, so a dead credential
+    // refuses several requests within a few milliseconds and this fires once
+    // per request. Re-rendering each time would clear the alert out from
+    // under a screen reader and snatch focus back to the button while
+    // somebody is already reading it — and would re-run the purge for no
+    // reason. The marker lives on the node rather than in a variable so it
+    // cannot go stale: `showLogin` replaces the node, which resets it.
+    if (root.querySelector('[data-session-ended]')) return;
+
+    shell?.destroy();
+    shell = null;
+    root.textContent = '';
+
+    // Cleared BEFORE the screen is drawn, so nothing can re-cache behind it.
+    void purgeLocalData('logout').finally(() => { sweepNow('logout'); });
+
+    const wrap = document.createElement('div');
+    wrap.className = 'ui-state';
+    wrap.setAttribute('role', 'alert');
+    wrap.setAttribute('data-session-ended', reason);
+    wrap.style.padding = 'var(--s-5) var(--s-4)';
+
+    // Two endings, two screens — heading, sentence and button together.
+    // Telling somebody whose account was suspended that their "session
+    // ended" and offering them a login sends them round a loop only the
+    // office can break, and they will press the button until somebody tells
+    // them why it does not work.
+    //
+    // A session revoked from the নিরাপত্তা screen (B-120) lands in the
+    // `expired` case, and that is correct rather than a gap: the server
+    // cannot tell the three apart (see `SessionEndReason`), and "sign in
+    // again" is the true and useful instruction for all of them.
+    const inactive = reason === 'account_inactive';
+
+    const h = document.createElement('h1');
+    h.textContent = inactive ? 'অ্যাকাউন্টটি সক্রিয় নেই' : 'আপনার সেশন শেষ হয়েছে';
+    wrap.append(h);
+
+    const p = document.createElement('p');
+    p.textContent = inactive
+      ? 'আপনার অ্যাকাউন্টটি এখন সক্রিয় নেই। প্রতিষ্ঠানের অফিসে যোগাযোগ করুন।'
+      : 'আপনার সেশন শেষ হয়েছে। আবার লগইন করুন।';
+    wrap.append(p);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-primary';
+    // The way back exists either way — a shared device may hold somebody
+    // else's account — but it is not dressed up as a login that will work.
+    btn.textContent = inactive ? 'লগইন স্ক্রিনে ফিরে যান' : 'আবার লগইন করুন';
+    btn.addEventListener('click', () => { showLogin(); });
+    wrap.append(btn);
+
+    root.append(wrap);
+    // Focus the one action, so a keyboard or screen-reader user lands on it
+    // rather than at the top of an empty page.
+    btn.focus();
+  }
 
   function showLogin(): void {
     shell?.destroy();

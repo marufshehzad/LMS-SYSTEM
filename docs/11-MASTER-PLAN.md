@@ -1941,13 +1941,26 @@ repository-complete and externally blocked**: `deploy/` carries all six systemd 
 closed in that pass: **B-56** (one contact rule across three routes, and a revoked
 guardianship that PATCH could resurrect — reproduced against PostgreSQL before it was fixed),
 **B-119** (the fixture leak; the development database went from 294 tenants to 21) and
-**B-36**. **B-66** had its narrowed cause acted on and its runner made to fail by name, but is
-NOT claimed fixed — it never reproduced on demand. **B-120** was opened for the session/device
+**B-36**. **B-66**'s mechanism was **proven on 2026-09-10 and the repository fix landed**, and it was never this repository's code (it stays OPEN only until the developer machine's Node is installed): a TCP
+socket opened inside a `node --test` per-file child process intermittently aborts that
+child on Node 24 before 24.21.0 on Windows (`0xC0000409`), before it can write a byte —
+which is why the runner could only report the whole file with no assertion and no stderr.
+Proven by a one-variable ladder (20,900 children clean without a socket; 3% with one) and
+by the runtime itself (v24.15.0 → 11 crashes/500 runs, v24.21.0 → 0/500). Concurrency was
+NOT the cause — it reproduces at `--test-concurrency=1` — so the concurrency cap that
+looked indicated would have fixed nothing. CI was never affected because it pins Node 22,
+which is clean at 0/500. **B-120** was opened for the session/device
 list this plan does not authorize as a phase, and **closed on 2026-09-08** as pre-pilot
 hardening rather than as a phase: three sub-paths on the existing identity dispatcher plus a
 নিরাপত্তা screen, self-service only, keyed by `device_id` because `refresh` rotates. No second
 authentication system and no new privilege — an administrator ending another person's session
 remains unbuilt and unauthorized.
+
+**B-121** closed on 2026-09-08 in the same pre-pilot line: a dead session now says so
+instead of offering a retry that cannot succeed. The load-bearing half is the NEGATIVE one
+— only a 401/403 ends a session, so a 5xx or an offline moment no longer risks signing a
+whole school out over a bad minute — and the unsent outbox survives the ending, because a
+teacher's morning register exists nowhere else.
 
 **There is no P12 in this plan, and that is deliberate rather than an omission.** The only
 place the string appears in `docs/` is `FINAL-FULL-PROJECT-AUDIT-REPORT.md` §29 — *"P12 —

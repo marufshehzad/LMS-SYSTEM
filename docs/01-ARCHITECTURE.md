@@ -470,6 +470,11 @@ unwrap writes to `audit.pii_access` with actor, purpose code and legal basis.
 | Super Admin | SSO + hardware key (WebAuthn) | — | 2 h, break-glass audited |
 
 Access tokens are EdDSA-signed JWTs, 15-minute TTL, with refresh rotation and reuse detection.
+A refresh that is **refused** (401/403 — dead, rotated, revoked, or the account is no longer
+active) ends the session and says so; a refresh that merely **fails** (5xx, or no network) does
+not, because signing every device out over a server hiccup costs each of them a new OTP. The
+client draws that distinction in `apps/pwa/src/auth.ts` and shows the ending rather than a
+generic retry — see B-121.
 Because guardians are often on shared or borrowed phones, guardian sessions are additionally
 bound to a device fingerprint and can be revoked from the school's admin panel in one tap.
 

@@ -55,6 +55,7 @@
     "apps/pwa/test/routine-generate-view.test.ts",
     "apps/pwa/test/routine-publish-view.test.ts",
     "apps/pwa/test/routine-setup-view.test.ts",
+    "apps/pwa/test/session-ended.test.ts",
     "apps/pwa/test/shell-desktop.test.ts",
     "apps/pwa/test/shell-tabs.test.ts",
     "apps/pwa/test/shikho-view.test.ts",
