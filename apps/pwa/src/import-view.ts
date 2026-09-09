@@ -55,7 +55,7 @@
  * Framework-free manual DOM, same as every other view here.
  */
 import type { Auth } from './auth.ts';
-import { formatCount } from '../../../packages/ui-core/src/format.ts';
+import { formatCount, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 import {
   pageHeader, card, button, buttonRow, fileUpload, dataTable, statusBadge,
   statRow, statCard, permissionState, permissionMessage, el, append, tabs,
@@ -302,7 +302,7 @@ export class ImportView {
       subtitle: barred
         ? undefined
         : this.kind === 'student' && this.yearLabel
-          ? `শিক্ষাবর্ষ ${this.yearLabel} · ধাপ ${bn(this.step)} / ${bn(4)}`
+          ? `শিক্ষাবর্ষ ${formatAcademicYear(this.yearLabel)} · ধাপ ${bn(this.step)} / ${bn(4)}`
           : `ধাপ ${bn(this.step)} / ${bn(4)}`,
     }));
 

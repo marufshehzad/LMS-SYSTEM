@@ -24,7 +24,7 @@
  * office they set something.
  */
 import { emptyState, successNote, bnNum } from './view-states.ts';
-import { levelNameBn } from '../../../packages/ui-core/src/format.ts';
+import { levelNameBn, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 
 export interface StructureOptions {
   defaultStream: string;
@@ -226,7 +226,9 @@ export function structureForm(o: StructureFormOptions): HTMLElement {
     }
 
     const year = select(o.options.years.map((y) => ({
-      value: y.id, label: y.label + (y.isCurrent ? ' (চলতি)' : ''), selected: y.isCurrent,
+      value: y.id,
+      label: formatAcademicYear(y.label) + (y.isCurrent ? ' (চলতি)' : ''),
+      selected: y.isCurrent,
     })));
     const klass = select(o.options.classes.map((c) => ({
       value: c.id,
@@ -295,7 +297,7 @@ export function structureForm(o: StructureFormOptions): HTMLElement {
 export function createdNote(doc: Document, body: {
   kind?: string; label?: string; nameBn?: string; name?: string; classNameBn?: string;
 }): HTMLElement {
-  const what = body.kind === 'year' ? `শিক্ষাবর্ষ ${body.label} তৈরি হয়েছে।`
+  const what = body.kind === 'year' ? `শিক্ষাবর্ষ ${formatAcademicYear(body.label)} তৈরি হয়েছে।`
     : body.kind === 'class' ? `${body.nameBn} তৈরি হয়েছে — এবার এর সেকশন তৈরি করুন।`
     : `${body.classNameBn ?? ''} সেকশন ${body.name} তৈরি হয়েছে।`;
   return successNote(doc, what);

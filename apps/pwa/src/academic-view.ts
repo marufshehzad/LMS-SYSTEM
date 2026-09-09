@@ -24,7 +24,7 @@
  * replacements at all, and then the register and the truth diverge quietly.
  */
 import type { Auth } from './auth.ts';
-import { todayLocalIso, toBanglaDigits } from '../../../packages/ui-core/src/format.ts';
+import { todayLocalIso, toBanglaDigits, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 import { iconSvg } from './icon.ts';
 import {
   skeleton, errorState, emptyState, successNote, confirmDialog, bnNum, bnDate,
@@ -385,7 +385,7 @@ export class AcademicView {
     const year = this.tree?.year?.label ?? '';
     if (this.depth.at !== 'tree') {
       crumbs.push({
-        label: year ? `শিক্ষাবর্ষ ${year}` : 'একাডেমিক কাঠামো',
+        label: year ? `শিক্ষাবর্ষ ${formatAcademicYear(year)}` : 'একাডেমিক কাঠামো',
         onClick: () => { this.depth = { at: 'tree' }; this.error = ''; this.notice = ''; this.render(); },
       });
     }
@@ -481,7 +481,7 @@ export class AcademicView {
       const c = this.student.current;
       return `${c.classBn} · ${c.groupBn} · সেকশন ${c.section} · রোল ${bnNum(c.rollNo)}`;
     }
-    return year ? `শিক্ষাবর্ষ ${year}` : '';
+    return year ? `শিক্ষাবর্ষ ${formatAcademicYear(year)}` : '';
   }
 
   /**

@@ -49,7 +49,7 @@ import {
   statusBadge, list, listItem, listSkeleton, emptyState, errorState,
   permissionState, permissionMessage, humanError, dataTable,} from './ui/index.ts';
 import { refuseUnlessOk, isDenied, statusOf } from './http-status.ts';
-import { formatCount, formatBdt, formatIdentifier, weekdayDateBn } from '../../../packages/ui-core/src/format.ts';
+import { formatCount, formatBdt, formatIdentifier, weekdayDateBn, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 
 const bn = (n: number): string => formatCount(n, 'bn');
 
@@ -143,7 +143,7 @@ export class PrincipalHomeView {
     append(root, pageHeader(d, {
       title: greeting(this.now()) + (this.o.displayName ? `, ${this.o.displayName}` : ''),
       subtitle: this.data?.year
-        ? `${weekdayDateBn(this.now())} · শিক্ষাবর্ষ ${this.data.year.label}`
+        ? `${weekdayDateBn(this.now())} · শিক্ষাবর্ষ ${formatAcademicYear(this.data.year.label)}`
         : weekdayDateBn(this.now()),
     }));
 

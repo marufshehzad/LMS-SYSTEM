@@ -24,7 +24,7 @@
  * head, so the override is visible rather than inferred.
  */
 import type { Auth } from './auth.ts';
-import { formatBdt } from '../../../packages/ui-core/src/format.ts';
+import { formatBdt, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 import { skeleton, errorState, emptyState, successNote, bnNum } from './view-states.ts';
 import { pageHeader } from './ui/page-header.ts';
 import {
@@ -291,7 +291,10 @@ export class FeeStructuresView {
       label: 'শিক্ষাবর্ষ', name: 'year', kind: 'select',
       value: this.yearId,
       options: data.years.map((y) => ({
-        value: y.id, label: y.isCurrent ? `${y.label} (চলতি)` : y.label,
+        value: y.id,
+        label: y.isCurrent
+          ? `${formatAcademicYear(y.label)} (চলতি)`
+          : formatAcademicYear(y.label),
       })),
       onChange: (v) => { this.yearId = v; void this.load(); },
     });

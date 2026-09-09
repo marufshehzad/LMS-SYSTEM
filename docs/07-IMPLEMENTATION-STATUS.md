@@ -31,9 +31,17 @@ work external to this repository.
 | Exams, fees, routine generation, import/export, sync idempotency | - | 2,270 tests, 13/13 workspaces | - |
 | A4 print on paper, real SMS delivery | - | - | needs a printer and a contract |
 
-Known minor defects: P12-1 (Latin year digits), P12-2 (missing `h1` on
-`#/students`), P12-3 (16px mobile overflow on `#/academic`), P12-4 (5 migrations
-without rollbacks), P12-5 (stale dev tenants). See BACKLOG.
+**All five P12 minor defects were fixed on 2026-09-10.** P12-1 became one shared
+`formatAcademicYear()` applied at 15 render sites across 11 files (the audit had
+found 4); P12-2 routed `#/students` through the shared `pageHeader()`; P12-3 was
+traced past the tab-bar symptom to `.btn-secondary` carrying a layout margin and
+fixed at the cause, verified at 320/375/390/430px; P12-4 turned out to be a wrong
+finding hiding a worse one — the rollback runbook globbed `*.down.sql` and would
+have skipped 27 of 75 files; P12-5 removed five stale tenants, 21 → 16.
+
+Two new guards ship with them: `academic-year-numerals.test.ts` and
+`heading-hierarchy.test.ts`, both with negative controls. Suite is now **2,279
+tests**, 13/13 workspaces, 28 SQL suites. See BACKLOG and PHASE_LOG.
 
 ## 1. Current state at a glance
 

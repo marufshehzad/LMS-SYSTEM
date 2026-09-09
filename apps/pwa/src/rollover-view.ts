@@ -31,6 +31,7 @@ import {
   skeleton, errorState, emptyState, successNote, confirmDialog, bnNum,
 } from './view-states.ts';
 import { pageHeader } from './ui/page-header.ts';
+import { formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 
 interface Preview {
   years: { id: string; label: string; isCurrent: boolean }[];
@@ -251,7 +252,7 @@ export class RolloverView {
       for (const y of this.data?.years ?? []) {
         const opt = d.createElement('option');
         opt.value = y.id;
-        opt.textContent = y.label + (y.isCurrent ? ' (চলতি)' : '');
+        opt.textContent = formatAcademicYear(y.label) + (y.isCurrent ? ' (চলতি)' : '');
         opt.selected = (which === 'from' ? this.from : this.to) === y.id;
         select.append(opt);
       }

@@ -562,9 +562,21 @@ textarea:focus {
   box-shadow: var(--shadow-sm);
 }
 .btn-primary:hover:not(:disabled) { background: var(--color-primary-hover); }
+/* P12-3. A colour variant must not carry a layout margin.
+   This rule used to end `margin: 0 var(--s-4)`, and the horizontal half of it
+   caused a real defect: `.ui-button-row > * { width: 100% }` applies below
+   1024px, and a 100%-wide element with 16px side margins is wider than its
+   container by exactly those margins — the hazard already written down on
+   `.ui-card` further down this file. On `#/academic` at 375px that pushed the
+   document to 391px and the whole page could be dragged sideways; the fixed
+   tab bar stretching to 391px was the symptom, not the cause.
+   The margin was never wanted in most places either: four separate rules
+   (`.empty-state`, `.prac-actions`, `.choice-footer`, `.editor-holding`)
+   existed only to undo it. Removing it here deletes the cause instead of
+   adding a fifth patch. Vertical rhythm belongs to the container's `gap`. */
 .btn-secondary {
   background: var(--color-bg); color: var(--color-text);
-  border-color: var(--color-border-strong); margin: 0 var(--s-4);
+  border-color: var(--color-border-strong);
 }
 .btn-success {
   background: var(--color-success); color: #fff; width: 100%;

@@ -32,6 +32,8 @@
 import type { Auth } from './auth.ts';
 import { skeleton, errorState, emptyState, bnNum, bnDate } from './view-states.ts';
 import { dataTable, statusBadge } from './ui/index.ts';
+import { pageHeader } from './ui/page-header.ts';
+import { formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 
 export interface StudentsViewOptions {
   root: HTMLElement;
@@ -235,10 +237,18 @@ export class StudentsView {
     const d = this.doc;
     this.o.root.replaceChildren();
 
-    const h = d.createElement('h2');
-    h.className = 'page-header';
-    h.textContent = 'শিক্ষার্থী খুঁজুন';
-    this.o.root.append(h);
+    // P12-2. The shared header, not a hand-rolled `h2`.
+    //
+    // This screen built its own `<h2 class="page-header">`, which is why it
+    // was the only one of the shell's 24 routes with no `<h1>` at all: a
+    // screen-reader user landing here got no page heading, and the document
+    // outline started at level 2. The class was already the shared one, so
+    // the look does not change — only the element, and the fact that it now
+    // comes from the same place every other screen's header comes from.
+    this.o.root.append(pageHeader(d, {
+      title: 'শিক্ষার্থী খুঁজুন',
+      subtitle: 'আইডি, নাম বা মোবাইল দিয়ে যেকোনো শিক্ষার্থীর তথ্য ও ইতিহাস দেখুন।',
+    }));
 
     if (this.openId) { this.renderDetail(); return; }
     this.renderSearch();
@@ -722,5 +732,5 @@ function whereOf(s: SearchResult): string {
   ].filter(Boolean);
   // A past year is named; the current one is not, because "this year" is the
   // default a reader already assumes.
-  return (s.latest.isCurrent ? '' : `${bnNum(s.latest.yearLabel)} · `) + parts.join(' · ');
+  return (s.latest.isCurrent ? '' : `${formatAcademicYear(s.latest.yearLabel)} · `) + parts.join(' · ');
 }

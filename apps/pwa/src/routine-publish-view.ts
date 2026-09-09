@@ -44,9 +44,7 @@ import {
   announce, listSkeleton, confirmOverlay, emptyState, errorState,
 } from './ui/index.ts';
 import { refuseUnlessOk, isDenied } from './http-status.ts';
-import {
-  formatCount, formatDayMonth, formatTime,
-} from '../../../packages/ui-core/src/format.ts';
+import { formatCount, formatDayMonth, formatTime, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 import type { Auth } from './auth.ts';
 
 /** One thing wrong, in the server's words. */
@@ -313,7 +311,7 @@ export class RoutinePublishView {
     root.append(pageHeader(d, {
       title: 'রুটিন প্রকাশ',
       subtitle: this.tenantNameBn
-        ? `${this.tenantNameBn} · ${this.yearLabel} শিক্ষাবর্ষ`
+        ? `${this.tenantNameBn} · ${formatAcademicYear(this.yearLabel)} শিক্ষাবর্ষ`
         : 'তৈরি হওয়া রুটিন দেখে নিন, তারপর প্রকাশ করুন',
     }));
 

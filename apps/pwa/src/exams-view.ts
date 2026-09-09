@@ -44,6 +44,7 @@ import {
   permissionState, permissionMessage, openDrawer,
   statCard, statRow, setBusy, announce, type OverlayHandle,
 } from './ui/index.ts';
+import { formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 
 interface Exam {
   id: string;
@@ -362,7 +363,10 @@ export class ExamsView {
       label: 'শিক্ষাবর্ষ', name: 'year', kind: 'select',
       value: this.yearId,
       options: tree.years.map((y) => ({
-        value: y.id, label: y.isCurrent ? `${y.label} (চলতি)` : y.label,
+        value: y.id,
+        label: y.isCurrent
+          ? `${formatAcademicYear(y.label)} (চলতি)`
+          : formatAcademicYear(y.label),
       })),
       onChange: (v) => { this.yearId = v; void this.load(); },
     });
@@ -451,7 +455,7 @@ export class ExamsView {
     const startsOn = field(d, {
       label: 'শুরুর তারিখ', name: 'startsOn', kind: 'date',
       value: existing?.startsOn ?? '',
-      helper: `ঐচ্ছিক — ${tree.year.label} শিক্ষাবর্ষের ভেতরে হতে হবে।`,
+      helper: `ঐচ্ছিক — ${formatAcademicYear(tree.year.label)} শিক্ষাবর্ষের ভেতরে হতে হবে।`,
     });
     const endsOn = field(d, {
       label: 'শেষ তারিখ', name: 'endsOn', kind: 'date',

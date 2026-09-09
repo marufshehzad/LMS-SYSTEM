@@ -15707,3 +15707,119 @@ they reached the report - a duplicate-role count that had grouped by NAME across
 a 2,000-user fixture, a missing-rollback count of 32 that was really 5, and an
 audit-trail FAIL that was my querying the wrong table. A finding that survives
 only because nobody checked it is worse than no finding.
+
+
+# P12 remediation - all five findings closed (2026-09-10)
+
+The audit's five MINOR findings, fixed at the cause. Two of them turned out to
+be larger than the audit had measured, and one turned out to be smaller.
+
+## P12-1 - the academic year, in Bangla
+
+The audit found `শিক্ষাবর্ষ 2026` on four surfaces. Fixing the shared path
+rather than the four screens found **fifteen render sites across eleven files** -
+home, academic structure, import, exams, fee structures, rollover, the routine
+editor, the routine publisher, the students list, the timetable and the
+structure forms.
+
+The fix is one formatter, `formatAcademicYear()` in `packages/ui-core/src/format.ts`,
+placed deliberately beside `formatIdentifier()` - the rule it is the other half
+of. Identifiers and money stay Latin because they are cross-checked against
+paper; a year is read aloud in a Bangla sentence beside a Bangla date.
+
+It is **idempotent on purpose**: `academic_years.label` is free text and the
+database already holds both `2026` and `২০২৬`, so a label that is already Bangla
+passes through untouched, and `2026-27` keeps its separator.
+
+**Why the existing guard could never have caught it.** `bangla-numerals.test.ts`
+reads source LITERALS and is good at it. These digits never appear in source -
+they arrive from PostgreSQL. `import-view.ts` was the proof: it passed the STEP
+number through a numeral helper and left the year raw, a few characters apart on
+the same line. So `academic-year-numerals.test.ts` checks the two things the
+other guard structurally cannot - the formatter's behaviour on values the
+database really holds, and that no view interpolates a year label without it. It
+carries a negative control, because a check that cannot fail proves nothing.
+
+**Verified on live data, not only in source:** home, academic and import all read
+`শিক্ষাবর্ষ ২০২৬`, the exams picker reads `২০২৬ (চলতি)`, and a scan of the rendered
+text on five routes found **0 Latin-digit nodes** where there had been one each.
+
+## P12-2 - the students screen names itself
+
+`students-view.ts` built its own `<h2 class="page-header">` instead of calling
+the shared `pageHeader()`, which is why it was the only one of 24 routes with no
+`<h1>`. It looked identical - same class, same position - so nothing about the
+screen gave it away. What gave it away was counting.
+
+Now `h1: 1` on `#/students`, and `heading-hierarchy.test.ts` checks that no view
+hand-rolls a page-level heading again, with a negative control written from the
+shape that actually shipped.
+
+## P12-3 - the mobile overflow, and what was really causing it
+
+The audit reported the bottom tab bar rendering 391px against a 375px viewport.
+The tab bar was the **symptom**. It is `position: fixed; inset: auto 0 0 0`, so
+it can only ever be as wide as the document - and the document had grown.
+
+Measuring every element whose right edge passed the viewport found three header
+buttons - শিক্ষাবর্ষ তৈরি, নতুন শ্রেণি, নতুন সেকশন - each 375px wide starting at
+x=16, so ending at 391. Walking the matched CSS rules gave the cause exactly:
+
+    .btn-secondary { margin: 0 var(--s-4); }        /* a COLOUR variant */
+    .ui-button-row > * { width: 100%; }             /* below 1024px */
+
+A 100%-wide element with 16px side margins is wider than its container by
+exactly those margins - the hazard already written down a few hundred lines
+away on `.ui-card`, in this same file.
+
+The margin was never wanted in most places either: **four** separate rules
+(`.empty-state`, `.prac-actions`, `.choice-footer`, `.editor-holding`) existed
+only to undo it. So the fix removes it from the variant rather than adding a
+fifth patch, and no `overflow-x: hidden` was used - that hides a defect, it does
+not fix one.
+
+**Verified at 320, 375, 390 and 430px across the routes: overflow 0 everywhere.**
+
+## P12-4 - the rollback finding was wrong, and the real one was worse
+
+The audit said five migrations had no rollback and implied that was a gap. It
+is not. `080_platform_operators.down.sql` already explains in its own header why
+076-079 do not need one: the chain drops the **base tables** in 001-037 and
+`CASCADE` takes everything later migrations hung off them. Those four add only
+`CREATE OR REPLACE FUNCTION` over existing tables, and 038 adds columns and
+constraints to a table that is itself dropped. 080 is the exception because
+`platform_operators` is the first table in this schema that references nothing,
+so nothing cascades to it.
+
+Creating five rollback files would have been inventing work. They are documented
+instead, in `db/rollback/README.md`, with the reason for each.
+
+**But looking properly found something real.** There are 75 rollback files: 48
+end `.down.sql` and 27 end plain `.sql`. The README documented the loop as
+
+    for f in $(ls -r db/rollback/*.down.sql)
+
+which matches only the first 48. An operator following the runbook during an
+incident would have silently skipped **27 rollbacks** and stopped with a
+half-dropped schema. CI was never affected - `database.yml` globs `*.sql` and
+passes - so nothing here was ever red. The runbook and the thing that is
+actually tested now agree.
+
+The names are left alone deliberately: renaming 27 files to fix a glob is the
+riskier of the two changes, and the glob is what was wrong.
+
+## P12-5 - development database hygiene
+
+Five stale tenants from earlier audits removed by explicit id rather than by
+pattern: three empty `p7-probe-*`, and two `audit-onb-*` carrying 11 users each.
+**21 → 16 tenants**, with a before/after slug diff proving exactly those five
+went and nothing else moved. Zero `audit-`, `probe` or `p12-` tenants remain.
+
+No customer data was touched: every removed row was an audit artifact created by
+this project's own tooling.
+
+## Regression
+
+2,279 tests (up from 2,270 - nine new guard tests), 13/13 workspaces, 28 SQL
+suites; typecheck 0/0/0; build clean; security probe 44/44 over 14 areas;
+tenant isolation 14/14; `index.html` byte-identical at `496199bd`.

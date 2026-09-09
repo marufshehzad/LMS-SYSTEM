@@ -94,6 +94,16 @@ The two things that would have been critical were tested specifically and hold:
 
 ## 5. MINOR issues
 
+> **STATUS: all five fixed on 2026-09-10.** See `docs/PHASE_LOG.md` for the
+> remediation record. Fixing them found more than this audit had measured:
+> P12-1 was **15** render sites across 11 files, not 4; P12-3's tab bar was a
+> symptom of `.btn-secondary` carrying a layout margin, not a cause; and P12-4
+> was **a wrong finding concealing a worse one** — 038 and 076-079 correctly
+> need no rollback, but the runbook's `*.down.sql` glob would have skipped 27
+> of the 75 rollback files that do exist. Retained below as written, so the
+> record shows what the audit saw at the time.
+
+
 ### M1 — The academic year renders in Latin digits inside Bangla sentences
 - **Where:** `#/home`, `#/academic`, `#/import`, `#/exams`
 - **Symptom:** "শিক্ষাবর্ষ 2026" — the date beside it is correctly Bangla ("বৃহস্পতিবার, ১০ সেপ্টেম্বর"), so the mismatch is visible in one line.

@@ -32,10 +32,7 @@ import {
   type OverlayHandle,
 } from './ui/index.ts';
 import { refuseUnlessOk, isDenied } from './http-status.ts';
-import {
-  formatCount, formatTime, formatDayMonth, toBanglaDigits,
-  formatClockRange, ordinalBn,
-} from '../../../packages/ui-core/src/format.ts';
+import { formatCount, formatTime, formatDayMonth, toBanglaDigits, formatClockRange, ordinalBn, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 import type { Auth } from './auth.ts';
 
 export interface Lesson {
@@ -253,7 +250,7 @@ export class TimetableView {
         // B-116. The version beside it was already Bangla and the year was
         // not, on the same line. Digits only — a school that labels its
         // session '2026-27' gets ২০২৬-২৭, not a rewritten label.
-        text: `${toBanglaDigits(r.yearLabel)} শিক্ষাবর্ষ · সংস্করণ ${formatCount(r.version, 'bn')}`
+        text: `${formatAcademicYear(r.yearLabel)} শিক্ষাবর্ষ · সংস্করণ ${formatCount(r.version, 'bn')}`
             + ` · প্রকাশ: ${dateBn(r.publishedAt)}`,
       }));
     }

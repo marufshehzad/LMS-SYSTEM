@@ -41,7 +41,7 @@ import {
   el, append, setBusy, announce, confirmOverlay, sectionHeading,
   type OverlayHandle,
 } from './ui/index.ts';
-import { formatCount, formatTime } from '../../../packages/ui-core/src/format.ts';
+import { formatCount, formatTime, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 
 /**
  * The teaching week comes from the SERVER, which reads `tenants.weekend_days`.
@@ -405,7 +405,7 @@ export class RoutineEditorView {
       }
       root.append(emptyState(d, {
         glyph: 'clock',
-        message: `${setup.sectionLabel} · ${setup.yearLabel} শিক্ষাবর্ষের জন্য এখনো কোনো রুটিন নেই। `
+        message: `${setup.sectionLabel} · ${formatAcademicYear(setup.yearLabel)} শিক্ষাবর্ষের জন্য এখনো কোনো রুটিন নেই। `
           + 'রুটিন তৈরি করলে সপ্তাহের ছক খুলবে এবং ক্লাস বসানো যাবে।',
         action: { label: 'রুটিন তৈরি করুন', onClick: () => this.openCreate(setup) },
       }));
@@ -484,7 +484,7 @@ export class RoutineEditorView {
     });
     const name = field(d, {
       label: 'রুটিনের নাম', name: 'nameBn', required: true,
-      value: `নিয়মিত রুটিন ${setup.yearLabel}`,
+      value: `নিয়মিত রুটিন ${formatAcademicYear(setup.yearLabel)}`,
       helper: `${SHIFT_BN[setup.shift] ?? setup.shift} শিফট · ঘণ্টার সময়সূচি: ${setup.periodTemplateName ?? '—'}`,
       attrs: { maxlength: 120 },
     });
