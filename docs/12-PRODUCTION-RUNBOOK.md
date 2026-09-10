@@ -1041,3 +1041,59 @@ not.
 **One gap to close:** migrations `038`, `076`, `077`, `078` and `079` have no
 `.down.sql`. Rolling back a deploy that includes them is not possible by the
 documented path.
+
+
+---
+
+## P13 — backup / restore runbook (2026-09-10)
+
+### Restore drill — rehearsed and passing
+
+```bash
+DRILL_SOURCE_URL=<the database to back up> \
+DRILL_ADMIN_URL=<a connection able to CREATE/DROP DATABASE> \
+DRILL_TARGET_DB=shikhon_restore_drill \
+DRILL_DOCKER=<container name, if pg_dump is not on PATH> \
+  node scripts/restore-drill.mjs
+```
+
+Last run 2026-09-10 against the development database:
+
+```
+backup 5.1 MB (1.3s) → restore into an isolated database (4.0s)
+7 schema counts and 27 table counts identical
+16 tenants identical per entity
+   (students · teachers · guardians · attendance · marks · invoices)
+RTO observed: 5.9s          PASSED
+```
+
+**This is a rehearsal, not the production drill.** The script stamps
+`environment: local-docker` on its own evidence block and says so. Production is
+a managed host with branch-based restores and different failure modes; what a
+local drill proves is that the procedure, the verification queries and the
+pass/fail criteria all work — so the production run is a repeat of a rehearsed
+thing rather than a first attempt during an incident.
+
+**Re-run it against production once a backup schedule exists**, and paste the
+evidence block it prints into `docs/production-evidence.json`.
+
+### Why the drill compares rather than reports
+
+`pg_restore` exits 0 having skipped objects it could not create; a dump taken
+with the wrong flags restores a schema with no rows; a partitioned table can
+come back with its parent and none of its children. Every one of those looks
+like a successful restore and has lost a school's attendance. So the script
+counts what went in, counts what came out, and treats any difference as a
+failure — including a difference of zero rows where rows were expected.
+
+### RPO is not measured here
+
+RPO is a property of the backup **schedule**, not of any restore. The drill
+declines to report it rather than inventing a number. **Setting that schedule is
+an outstanding external action (P13-7).**
+
+### Suspension never destroys data
+
+Verified in P12 and unchanged: suspend → reactivate left every row identical
+while enforced access moved `full → none → full`. A school behind on fees loses
+access, never records.

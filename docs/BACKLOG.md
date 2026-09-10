@@ -13,6 +13,26 @@ Last updated **2026-09-08** after **P11** — see
 their reason; nothing is deleted.
 
 
+
+## P13 production readiness (2026-09-10)
+
+From `docs/P13-PRODUCTION-READINESS-REPORT.md`. Verdict **NO-GO for
+production** — every repository-side requirement is met; the blockers are
+external.
+
+| ID | Item | Owner | Status |
+|---|---|---|---|
+| **P13-1** | Wildcard DNS `*.sikhon.systems` | owner / DNS provider | **EXTERNAL — OPEN** |
+| **P13-2** | Wildcard TLS certificate | owner / CA | **EXTERNAL — OPEN** |
+| **P13-3** | `WILDCARD_DNS_READY=1` — set only AFTER 1 and 2; the flag fails closed by design | owner | **BLOCKED on 1,2** |
+| **P13-4** | SMS aggregator contract + `SMS_*` credentials. The SSL Wireless adapter is written and tested. **`SMS_TEST_RECIPIENTS` must be set before the first dispatch** or real guardians are texted. | owner / commercial | **EXTERNAL — OPEN** |
+| **P13-5** | VAPID keys (`scripts/generate-vapid-keys.mjs`) + real push delivery | owner | **EXTERNAL — OPEN** |
+| **P13-6** | `ALERT_WEBHOOK_URL` — until set, the monitor logs but pages nobody | owner | **EXTERNAL — OPEN** |
+| **P13-7** | Production backup **schedule** (RPO). Restore is rehearsed and passing: 27 tables and 16 tenants identical, RTO 5.9s. | owner / host | **EXTERNAL — OPEN** |
+| **P13-8** | Production secrets: `JWT_*`, `PLATFORM_API_KEY`, `ACTIVATION_PEPPER`, `PII_MASTER_KEY_V1`, `CRON_SECRET`, `SERVICE_API_KEY` | owner | **EXTERNAL — OPEN** |
+| **P13-9** | **A real pilot institution** (B-5). Without one the pilot journey cannot be run at all. | owner | **EXTERNAL — OPEN** |
+| ~~**P13-10**~~ | **FIXED 2026-09-10** — five production-runtime variables were read by services and undocumented in `deploy/env.example`; worst was `SMS_WORKER_TENANT_IDS`, where empty means no school's queue is drained and nothing sends. Now documented with consequences, and guarded by `env-template.test.ts` with a negative control. | — | **CLOSED** |
+
 ## P12 final audit findings (2026-09-10)
 
 From `docs/P12-FINAL-AUDIT-REPORT.md`. No CRITICAL, no MAJOR. Verdict

@@ -18,6 +18,25 @@ New to the repository? Read [00-START-HERE.md](00-START-HERE.md) first.
 ---
 
 
+
+## P13 production readiness (2026-09-10)
+
+**NO-GO for production; every repository-side requirement met.** See
+`docs/P13-PRODUCTION-READINESS-REPORT.md`.
+
+| capability | code | delivery |
+|---|---|---|
+| Subdomain routing | **PASS** — 16 hostname shapes, full lifecycle, forged Host ignored | gated off until DNS + TLS |
+| Backup / restore | **PASS** — drill run: 27 tables, 16 tenants, RTO 5.9s | backup *schedule* external |
+| Env / secrets | **PASS** — 5 undocumented runtime vars closed + guard test | production values external |
+| Push | **PASS** — 48 tests, whole lifecycle | **BLOCKED** — no VAPID keys, never delivered |
+| SMS | **PASS** — 79 tests, allowlist, throws if named-but-unconfigured | **BLOCKED** — no aggregator |
+| Cron / workers | **PASS** — three systemd timers | needs `systemctl enable` |
+| Monitoring | **PASS** — readiness endpoint, 11 checks | **BLOCKED** — no `ALERT_WEBHOOK_URL` |
+
+The pilot journey was **not run**: no real pilot institution exists (B-5) and
+the infrastructure it would run on does not exist yet. It was not simulated.
+
 ## P12 audit status (2026-09-10)
 
 Audited against the running system - see `docs/P12-FINAL-AUDIT-REPORT.md`.

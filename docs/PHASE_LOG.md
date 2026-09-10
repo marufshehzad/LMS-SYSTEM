@@ -15823,3 +15823,118 @@ this project's own tooling.
 2,279 tests (up from 2,270 - nine new guard tests), 13/13 workspaces, 28 SQL
 suites; typecheck 0/0/0; build clean; security probe 44/44 over 14 areas;
 tenant isolation 14/14; `index.html` byte-identical at `496199bd`.
+
+
+# P13 - production infrastructure and first pilot readiness (2026-09-10)
+
+Verdict **NO-GO for production**, and the blockers are not code. Full report:
+`docs/P13-PRODUCTION-READINESS-REPORT.md`.
+
+Every repository-side requirement is implemented and evidenced. What stands
+between this and a live pilot is five external dependencies and one real
+school. This report does not say GO, because two of the gates the brief itself
+sets - infrastructure available, and one complete real pilot journey - cannot
+be evidenced from here.
+
+## The subdomain model, verified rather than assumed
+
+`school-slug.<platform-domain>` resolves a slug to a tenant and paints that
+school's branding BEFORE anyone signs in. What it must never do is decide who
+you are: authenticated tenancy comes from the JWT's `tid`.
+
+Sixteen hostname shapes were checked and every one is correct - reserved labels
+(`www`, `app`, `platform`, `api`, `staging`), the apex domain, a bare hostname,
+a hyphen-leading slug, an underscore, a too-short label, `../etc`, `%2e%2e`,
+`x'or'1=1` and `<script>` all resolve to nothing.
+
+Across the commercial lifecycle:
+
+| state | identity resolves | API |
+|---|---|---|
+| active | yes | open |
+| **suspended** | **yes - the school still exists** | closed (`access=none`) |
+| archived | no - neutral branding, `tenantId: null` | closed |
+| unknown | no | n/a |
+| malformed | no, and a 200 rather than a 500 | n/a |
+
+Suspended still resolving is deliberate: a parent typing their school's address
+should see THEIR school, not a stranger's error page.
+
+**A forged `Host` / `X-Forwarded-Host` changed nothing** - the authenticated
+response was byte-identical to the honest one. No handler in `services/` or
+`packages/` reads the Host header for tenant identity at all; the only
+host-adjacent route is `GET /ops/brand`, pre-auth by design, seven public
+fields.
+
+## The restore drill was run, not read
+
+Against the development database: 5.1 MB backup, restore into an isolated
+database, **7 schema counts and 27 table counts identical, 16 tenants identical
+per entity**, RTO 5.9s. PASSED.
+
+It is a comparison rather than a ceremony - `pg_restore` exits 0 having skipped
+objects it could not create, so the script counts what went in, counts what came
+out, and fails on any difference. It also refuses to overstate itself: the
+evidence block records `environment: local-docker` and says plainly that this
+rehearses the production restore rather than closing it. RPO is untouched,
+because RPO is a property of the backup SCHEDULE and this drill would be
+measuring nothing.
+
+## A real gap closed: the production env template
+
+Diffing every `process.env.*` in `services/` and `packages/` against
+`deploy/env.example` found **five production-runtime variables the template
+never documented**. None of them fails loudly - the deployment starts and
+behaves however the fallback behaves.
+
+The worst is `SMS_WORKER_TENANT_IDS`: the SMS worker is a cron with no tenant
+context of its own, and **empty means no school's queue is drained at all**,
+which from the outside is indistinguishable from a broken aggregator. Also
+missing: `SERVICE_KEY_TENANT_SWITCH`, `ANS_SIGNING_SECRET`, `AI_MODEL_SIKHOK`,
+`AI_MODEL_SHIKHO`.
+
+All five are now documented with the consequence spelled out, and
+`env-template.test.ts` fails the build if the template drifts from what the code
+reads again - with a negative control, because a guard that cannot fail proves
+nothing.
+
+## What the SMS and push layers already get right
+
+Worth recording, because these are the two places a pilot can be damaged
+irreversibly.
+
+**Unconfigured SMS is the stub, not a failure** - messages land in the log. A
+provider **named without credentials THROWS** rather than falling back, because
+a school that believes its messages are going out is worse off than one that
+knows they are not. **HTTP 200 with a failure body is treated as a failure**,
+which is the case aggregators actually produce. And `SMS_TEST_RECIPIENTS` is an
+allowlist whose tests pin the trap: *empty means unrestricted, not "send to
+nobody"*, a withheld row is **recorded rather than hidden**, and withholding
+does not consume an attempt. That allowlist is what makes a first pilot
+survivable - a real aggregator can run against real school data without one
+message reaching a real parent.
+
+**Push** is 48 tests across the whole lifecycle, and reports itself unavailable
+without VAPID keys rather than pretending.
+
+Neither has ever delivered anything to a real device or a real phone, and
+nothing in this phase claims otherwise.
+
+## Two false alarms, checked before they became findings
+
+`shikhon-monitor.timer` has no `OnCalendar` - it uses `OnBootSec=5min` +
+`OnUnitActiveSec=15min`, a valid every-fifteen-minutes schedule. And
+`OTP_SENDING_ENABLED`, `VAPID_SUBJECT` and `WILDCARD_DNS_READY` looked
+undocumented to a first pass of the env detector because they are read through
+`enabled('NAME', env)` with the name as a string rather than as
+`env.NAME`. Both would have been wrong to report.
+
+## Not run: the pilot journey
+
+The brief asks for one complete journey using a real pilot institution, not
+fixtures. It has not been run and was not simulated. No real pilot institution
+exists (B-5 is open), and the infrastructure it would run on does not exist yet.
+What has been driven end to end, on real data, is the whole of that journey's
+mechanism - platform admin through guardian/student/teacher visibility,
+suspension and reactivation, and now the subdomain model. The distance between
+that and a pilot is a school and a domain, not code.
