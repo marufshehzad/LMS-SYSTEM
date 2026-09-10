@@ -31,6 +31,8 @@ external.
 | **P13-7** | Production backup **schedule** (RPO). Restore is rehearsed and passing: 27 tables and 16 tenants identical, RTO 5.9s. | owner / host | **EXTERNAL — OPEN** |
 | **P13-8** | Production secrets: `JWT_*`, `PLATFORM_API_KEY`, `ACTIVATION_PEPPER`, `PII_MASTER_KEY_V1`, `CRON_SECRET`, `SERVICE_API_KEY` | owner | **EXTERNAL — OPEN** |
 | **P13-9** | **A real pilot institution** (B-5). Without one the pilot journey cannot be run at all. | owner | **EXTERNAL — OPEN** |
+| ~~**P13-11**~~ | **Content-Security-Policy is not set on the production server.** Added deliberately as a follow-up rather than shipped blind: a CSP is the one header that can break a working application, and it must be derived from what the app actually loads and then verified in a browser. `deploy/server.mjs` now sets the other four including HSTS. | LOW | deploy | **OPEN** |
+| ~~**P13-12**~~ | **No unauthenticated health path** — `/health` and `/api/health` are 404 on production. A load balancer or uptime monitor needs one; `/platform/readiness` requires platform credentials by design. | LOW | deploy | **OPEN** |
 | ~~**P13-10**~~ | **FIXED 2026-09-10** — five production-runtime variables were read by services and undocumented in `deploy/env.example`; worst was `SMS_WORKER_TENANT_IDS`, where empty means no school's queue is drained and nothing sends. Now documented with consequences, and guarded by `env-template.test.ts` with a negative control. | — | **CLOSED** |
 
 ## P12 final audit findings (2026-09-10)

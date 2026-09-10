@@ -15938,3 +15938,70 @@ What has been driven end to end, on real data, is the whole of that journey's
 mechanism - platform admin through guardian/student/teacher visibility,
 suspension and reactivation, and now the subdomain model. The distance between
 that and a pilot is a school and a domain, not code.
+
+
+# P13 setup pass - the deployment was already live (2026-09-10)
+
+The P13 audit implied production did not exist. It does, and probing it rather
+than assuming corrected three items and found a defect only a live deployment
+could show.
+
+## What is actually running
+
+`https://sikhon.systems` resolves to 200.234.43.179, serves the landing page
+and the application over valid TLS behind **Caddy**, and answers the API.
+`/app.html` is 200, `/api/v1/ops/brand` returns JSON, an unknown slug gets
+neutral branding and a null tenant id exactly as it does locally, and
+`otpLogin` is `false` - correct, because there is no aggregator.
+
+The authorization boundaries hold from the open internet: the platform console
+answers **403 `platform credentials required`** to an anonymous caller and the
+ops monitor **401**, with the same sentence whichever credential is wrong.
+
+**Wildcard DNS is absent, and that was verified rather than assumed:**
+`app.sikhon.systems` and `test-school.sikhon.systems` do not resolve, while the
+apex and `www` do.
+
+## The defect a live deployment revealed
+
+`netlify.toml` has set `X-Content-Type-Options`, `Referrer-Policy` and
+`X-Frame-Options` for `/*` since P-ops. Production is not Netlify - it is Caddy
+in front of `deploy/server.mjs`, which set only the first. Reading the headers
+back off the live site returned exactly one.
+
+Three protections had been "configured" for two phases in a file the product is
+not served from. No test could have caught it, because both files were
+individually correct; what caught it was asking the running site what it
+actually sends.
+
+`deploy/server.mjs` now sets all four including **HSTS**, on every response
+including the API's, applied with `setHeader` so a route that deliberately
+differs still wins - `document.ts` uses `SAMEORIGIN` so a school can preview a
+printable in a frame, and that still works (verified against Node's merge
+semantics rather than assumed).
+
+`deploy-headers.test.ts` now fails the build if the VPS path becomes weaker
+than the Netlify one. Its first version failed on my own explanatory comment,
+which is a mistake this repository has made before in a CI guard; it now
+matches the header VALUE rather than the file.
+
+Two omissions, both deliberate and both written down at the code:
+
+**HSTS without `includeSubDomains`.** That is where it ends up, but a browser
+that has seen the directive refuses a subdomain served without TLS and
+remembers for a year. It goes in with `WILDCARD_DNS_READY`, after a subdomain
+has actually been served over HTTPS.
+
+**No Content-Security-Policy.** It is the one header here that can break a
+working application, and it must be derived from what the app loads and
+verified in a browser. Guessing one onto a live deployment would be the
+opposite of what this phase is for.
+
+## What was NOT done, and why
+
+Items 3-5, 7-13 of the setup brief all need access I do not have: the DNS
+provider, the host, the database credentials, an aggregator contract, and a
+webhook that reaches a person. Nothing was simulated. The VAPID generator was
+verified with a **throwaway** keypair whose values were never printed and which
+was deleted - the production pair must be generated ON the host so the private
+key never travels.

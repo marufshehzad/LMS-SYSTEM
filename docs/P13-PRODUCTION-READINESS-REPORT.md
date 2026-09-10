@@ -6,6 +6,21 @@
 
 ---
 
+> ## Correction, 2026-09-10 (infrastructure setup pass)
+>
+> **The production deployment is LIVE, and the first version of this report
+> implied otherwise.** `https://sikhon.systems` resolves, serves the landing
+> page and the application over valid TLS behind **Caddy**, and answers the
+> API. That was established by probing it, not by being told.
+>
+> What that changes: items 1, 2 and 4 below (VPS, production domain, apex TLS)
+> are **PASS**, not pending. What it does **not** change is the verdict —
+> wildcard DNS still does not exist, and neither does a pilot school.
+>
+> It also turned up a defect that only a live deployment could show, now
+> fixed: the VPS was serving **one** security header where Netlify serves
+> four. See §2.7.
+
 ## Verdict
 
 ## **NO-GO for production — and the blockers are not code.**
@@ -31,10 +46,10 @@ turns it on*.
 
 | # | Item | Status here | What turns it on |
 |---|---|---|---|
-| 1 | Wildcard DNS | **EXTERNAL — not done** | `*.sikhon.systems` A/CNAME at the DNS provider |
-| 2 | Wildcard TLS | **EXTERNAL — not done** | wildcard certificate for `*.sikhon.systems` |
+| 1 | Wildcard DNS | **MISSING — verified absent** | `*.sikhon.systems` A/CNAME at the DNS provider |
+| 2 | Wildcard TLS | **MISSING** (apex TLS is **PASS**) | wildcard certificate for `*.sikhon.systems` |
 | 3 | Subdomain routing | **PASS (code)** — gated off by `WILDCARD_DNS_READY` | set the flag *after* 1 and 2 |
-| 4 | Production domain | **EXTERNAL** | `sikhon.systems` pointed at the deployment |
+| 4 | Production domain | **PASS — live** | already serving; nothing to do |
 | 5 | Push delivery | **PASS (code), BLOCKED (delivery)** | `scripts/generate-vapid-keys.mjs`, then `VAPID_*` |
 | 6 | SMS aggregator | **PASS (code), BLOCKED (delivery)** | an aggregator contract + `SMS_*` |
 | 7 | Env vars / secrets | **PASS — completed in this phase** | `deploy/env.example`, now guarded by a test |
@@ -185,13 +200,67 @@ SMS 18:00 UTC (00:00 BST), monitor every 15 minutes via
 `ALERT_WEBHOOK_URL`; unset, it reports `delivered: false` with the reason rather
 than silently succeeding. **Paging is BLOCKED until that URL exists.**
 
+### 2.7 The live deployment — probed from the internet
+
+Everything here was read off `https://sikhon.systems`. Nothing was changed on
+the host; I have no access to it.
+
+| probe | result |
+|---|---|
+| `sikhon.systems` DNS | resolves → `200.234.43.179` |
+| `www.sikhon.systems` | resolves (alias of the apex) |
+| `app.sikhon.systems`, `test-school.sikhon.systems` | **do not resolve — wildcard DNS is absent** |
+| `https://sikhon.systems` | **200**, valid TLS, `Via: 1.1 Caddy` |
+| `/app.html`, `/app` | **200** — the application is deployed |
+| `/api/v1/ops/brand?slug=…` | **200 JSON** — the API is live |
+| unknown slug | neutral branding, `tenantId: null` — same as locally |
+| `otpLogin` | `false` — correct; there is no aggregator |
+| `/api/v1/platform/tenants` | **403** `platform credentials required` |
+| `/api/v1/platform/readiness` | **403** |
+| `/api/v1/ops/monitor` | **401** |
+
+The authorization boundaries hold when attacked from the open internet, and the
+platform console answers with the same sentence whether the key or the token is
+wrong — no oracle.
+
+**The defect a live deployment revealed.** `netlify.toml` has set
+`X-Content-Type-Options`, `Referrer-Policy` and `X-Frame-Options` for `/*`
+since P-ops. Production is not Netlify — it is Caddy in front of
+`deploy/server.mjs`, which set only the first of them. Reading the headers back
+off the live site returned exactly one. Three protections had been "configured"
+in a file the product is not served from.
+
+Now fixed: `deploy/server.mjs` sets all four, including **HSTS**, on every
+response including the API's, applied with `setHeader` so a route that
+deliberately differs still wins (`document.ts` uses `SAMEORIGIN` so a school can
+preview a printable in a frame). `deploy-headers.test.ts` fails the build if the
+VPS path ever becomes weaker than the Netlify one, and carries a negative
+control.
+
+Two deliberate omissions, both documented at the code:
+
+- **HSTS without `includeSubDomains`.** That directive is where this ends up,
+  but a browser that has seen it refuses a subdomain served without TLS and
+  remembers for a year. It goes in with `WILDCARD_DNS_READY`, once a subdomain
+  has actually been served over HTTPS — not before.
+- **No Content-Security-Policy.** It is the one header on the list that can
+  break a working application, and it has to be derived from what the app
+  actually loads and verified in a browser. Guessing one onto a live deployment
+  is the opposite of what this phase is for. Tracked as **P13-11**.
+
+**Minor, noted not fixed:** there is no unauthenticated health path — `/health`
+and `/api/health` are 404. A load balancer or uptime monitor needs one; the
+readiness endpoint requires platform credentials by design.
+
+---
+
 ---
 
 ## 3. What I need from you — exact owner and action
 
 | # | Blocker | Owner | Action |
 |---|---|---|---|
-| 1 | Wildcard DNS | you / DNS provider | point `*.sikhon.systems` at the deployment |
+| 1 | Wildcard DNS | you / DNS provider | point `*.sikhon.systems` at `200.234.43.179` — the apex already does |
 | 2 | Wildcard TLS | you / CA | issue and install a `*.sikhon.systems` certificate |
 | 3 | Flip subdomains on | you | set `WILDCARD_DNS_READY=1` **after** 1 and 2, never before |
 | 4 | SMS aggregator | you / commercial | contract with a BD aggregator (SSL Wireless adapter is written); then `SMS_PROVIDER`, `SMS_ENDPOINT`, `SMS_API_TOKEN`, `SMS_SENDER_ID`, `SMS_DLR_SECRET` — **and `SMS_TEST_RECIPIENTS` before the first dispatch** |
