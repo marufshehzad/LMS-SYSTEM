@@ -22,13 +22,15 @@ white-label seam. See PHASE_LOG. The rest of IMPLEMENTATION.md §8 is open.
 
 | ID | Item | Severity | Status |
 |---|---|---|---|
-| **AE-1** | **Design palette misses WCAG AA** - white on `--accent #ec3013` is **4.20:1** (primary button); `--ink-3` 3.55-4.30; উপস্থিত chip 4.30; দেরি chip 4.35. Shipped exactly as designed at the owner's instruction, pinned by name and ratio in `design-tokens.test.ts` so none can worsen silently. The previous palette's red was 4.23:1 and was corrected for exactly this. | HIGH (a11y) | **OWNER DECISION** |
+| **AE-1** | **Design palette misses WCAG AA** - white on `--accent #ec3013` is **4.20:1** (primary button); `--ink-3` 3.55-4.30; উপস্থিত chip 4.30; দেরি chip 4.35. Shipped exactly as designed at the owner's instruction, pinned by name and ratio in `design-tokens.test.ts` so none can worsen silently. The previous palette's red was 4.23:1 and was corrected for exactly this. **Owner decided 2026-09-16: keep `#ec3013` exactly** (“rakho”). The shortfalls stay pinned by ratio in `design-tokens.test.ts` so none can worsen silently, and so the decision is visible rather than mistaken for an oversight. | HIGH (a11y) | **DECIDED — KEEP** |
 | **AE-2** | **§8 step 3 - `.n` on every numeric element.** Figures in carried screens still render in the text face. | MEDIUM | **OPEN** |
 | **AE-3** | **§8 steps 5-6 - component markup and all 52 routes** against their design pages, role by role. Carried screens currently render in the new palette through the alias layer. | HIGH | **OPEN** |
 | **AE-4** | **§8 step 7 - five states per screen** (loading, empty, error, offline, denied). | MEDIUM | **OPEN** |
 | **AE-5** | **§8 step 8 - non-route surfaces**: practice, structure forms, offline page. | MEDIUM | **OPEN** |
 | **AE-6** | **Attendance path খ** - the one behaviour change: `markAllPresent()` primary, drop `grid.cycle()`, start unset, show names, three guards (unmarked blocks submit, 5-second undo, confirm by name). Updates `attendance-screen.test.ts` and `attendance-view.test.ts`, as §9 expects. | HIGH | **OPEN** |
 | **AE-7** | **Deviation kept on purpose - B-108 numeral face named first in `--font-bn`.** The design's plain Hind Siliguri reintroduces ১/৮ misreading for digits inside sentences, which `.n` cannot reach. | - | **DECIDED** |
+| **AE-8** | **Component defects noted in wave 1, not fixed (outside a design change).** (a) An interactive `card()` is a `<button>` holding an `h2`/`h3` and body content — a button's children are presentational, so heading navigation skips them (admin-settings). (b) `countBadge` names a role-less `<span>` with `aria-label`; some screen readers read only the digit. (c) `confirmOverlay` leaves an unhandled rejection when `onConfirm` rejects (dialog behaves correctly). (d) `tooltip()`'s comment promises `aria-describedby`; the code sets only `title` (no callers). | LOW (a11y) | **OPEN** |
+| **AE-9** | **Where the drawings disagree with the design sheet, the sheet was kept (rule R1).** Page title (sheet 28px; drawings 22 / 26 / 17px bar), small-button size, search as one box vs three, dropzone vs button upload, avatar squares, toast strip. Recorded per unit in the wave-1 results; each is CSS-only if the owner prefers a drawing. | LOW | **DECIDED (sheet)** |
 
 ## P13 production readiness (2026-09-10)
 

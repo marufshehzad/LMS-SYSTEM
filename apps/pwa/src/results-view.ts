@@ -69,10 +69,18 @@ export interface ResultsViewOptions {
   root: HTMLElement;
   doc: Document;
   auth: Auth;
+  /**
+   * Whose results. A guardian opens a CHILD's mark sheet, and the API reads
+   * the caller's own id when none is given — a guardian has no results of
+   * their own, so without this the screen said "nothing published" to every
+   * parent. Absent for a student reading their own.
+   */
+  studentId?: string;
 }
 
 export class ResultsView {
   private readonly o: ResultsViewOptions;
+  private readonly cacheKey: string;
   private results: Result[] = [];
   private selected: string | null = null;
   private loading = true;
@@ -88,6 +96,10 @@ export class ResultsView {
 
   constructor(options: ResultsViewOptions) {
     this.o = options;
+    // One cache per child: a guardian with two children must never be shown
+    // the other child's marks while the network is slow. Still `shikhon_`
+    // prefixed, so logout's purge clears every one of them.
+    this.cacheKey = options.studentId ? `${CACHE_KEY}_${options.studentId}` : CACHE_KEY;
     this.results = this.readCache();
     this.selected = this.results[0]?.examId ?? null;
     this.loading = this.results.length === 0;
@@ -97,7 +109,7 @@ export class ResultsView {
 
   private readCache(): Result[] {
     try {
-      const raw = localStorage.getItem(CACHE_KEY);
+      const raw = localStorage.getItem(this.cacheKey);
       const p = raw ? (JSON.parse(raw) as Result[]) : [];
       return Array.isArray(p) ? p : [];
     } catch { return []; }
@@ -105,7 +117,8 @@ export class ResultsView {
 
   private async load(): Promise<void> {
     try {
-      const res = await this.o.auth.authedFetch('/api/v1/academics/results');
+      const who = this.o.studentId ? `?studentId=${encodeURIComponent(this.o.studentId)}` : '';
+      const res = await this.o.auth.authedFetch(`/api/v1/academics/results${who}`);
       await refuseUnlessOk(res);
       const body = (await res.json()) as { results?: Result[] };
       this.results = body.results ?? [];
@@ -113,12 +126,12 @@ export class ResultsView {
         ? this.selected
         : this.results[0]?.examId ?? null;
       this.offline = false;
-      try { localStorage.setItem(CACHE_KEY, JSON.stringify(this.results)); } catch { /* quota */ }
+      try { localStorage.setItem(this.cacheKey, JSON.stringify(this.results)); } catch { /* quota */ }
     } catch (err) {
       if (isDenied(err)) {
         this.denied = true;
         this.deniedErr = err; this.results = []; this.offline = false;
-        try { localStorage.removeItem(CACHE_KEY); } catch { /* private mode */ }
+        try { localStorage.removeItem(this.cacheKey); } catch { /* private mode */ }
         return;
       }
       if (this.results.length > 0) this.offline = true;

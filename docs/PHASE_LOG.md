@@ -16083,8 +16083,8 @@ The owner asked for the design "100% same", so the exact colours shipped. They
 were NOT hidden: `design-tokens.test.ts` pins each by name and ratio, fails on
 any NEW shortfall, and fails if a pinned one gets worse. The primary-button
 number is the one to read twice - this product's previous palette recorded its
-old red at 4.23:1 and was changed specifically to clear AA. **Owner decision
-pending.**
+old red at 4.23:1 and was changed specifically to clear AA. **Owner decided
+2026-09-16: keep `#ec3013` exactly** (BACKLOG AE-1).
 
 ## Dark mode removed (§5)
 
@@ -16129,3 +16129,100 @@ forgets the key. The other five tests §9 names are byte-unchanged.
 - **Attendance, path খ** - the one behaviour change: `markAllPresent()` as the
   primary action, no `grid.cycle()`, start unset, show names, and the three
   guards. Not started.
+
+---
+
+# Ata Ekta — wave 1: the shared components (2026-09-16)
+
+The twelve modules every screen is built from — `ui/page-header`, `button`,
+`card`, `badge`, `field`, `upload`, `filter`, `table`, `overlay`, `feedback`,
+`child-selector`, and `view-states.ts` — rebuilt against 14 Components and
+00 Foundations. Done before any screen, so the 53 views that call them change
+once, the same way.
+
+## How
+
+A spec phase first (86 agents: one spec per unit, 14 completeness critics),
+then one implementer per component, a skeptical reviewer per component who
+read the actual diff, and a repair pass where the reviewer found a blocker or
+major issue (3 of 12: page header, button, card). The 1,136 ambiguities the
+spec phase raised were settled once, as thirteen written rules, before any
+code was touched; every agent applied the same ones. Implementers edited only
+their own file and returned CSS, icons and test changes as data, merged
+centrally.
+
+The CSS merge is a script, not trust. It refused 7 declarations that
+restated a value the design sheet already sets for the same selector (the
+sheet wins over a specimen drawing), and would have refused any raw hex or
+undefined token (none). Two of the refusals were 44px tap targets, and those
+were put back by hand: accessibility outranks the specimen. 136 rules added,
+26 carried rules the components no longer need removed.
+
+## What changed on screen
+
+- Numbers inside component text are in the numeral face (`.n` on the
+  smallest element holding the digits, never on the whole sentence).
+- State cards (empty, error, success, inline confirm) use the design's card
+  anatomy and glyphs; a destructive inline confirm is now the danger button —
+  both branches of the old ternary said primary.
+- Cards and avatars are neutral: the six hand-picked avatar tints and the
+  unscoped `[data-tone]` rules that bled onto toasts and stat cells are gone.
+- Tables: one shell, table from 1024px and list below it; pagination reads
+  position first with words, not icons.
+- Overlays are bottom sheets with a grab handle below 1024px.
+- Seven Feather glyphs added: inbox, alert-circle, check-circle, info, check,
+  file-text, trash-2.
+- `color-scheme: light` declared. With no dark mode, a phone in system dark
+  mode was drawing native selects and date pickers dark on the light page.
+- iOS form controls keep a 16px floor, because iOS zooms the page when a
+  smaller input takes focus. Everywhere else the design's 15px stands.
+
+## Defects found on the way, fixed with tests that fail on the old code
+
+1. **Platform console: an empty reason vanished the dialog.** `confirmDialog`
+   removed itself before `onConfirm` ran, so the required-reason error in the
+   tenant state, service and portal changes was set on a detached node — the
+   operator saw the dialog disappear and nothing happen. `confirmDialog` gained
+   `validate`, checked while the dialog is still on screen.
+2. A field whose caller listened only to `change` kept its error while the
+   person typed.
+3. A table with no title column promoted column 0 on the phone whatever its
+   role — a subtitle rendered twice, a hidden column showed.
+4. `blocked` (routine setup and generate) was not a status, so that trouble
+   state was red with no glyph.
+
+`component-defects.test.ts`: 5 tests; against the pre-wave code 4 fail.
+
+5. **Guardians saw no results.** The guardian screen passes the child's id to
+   `onOpenResults`; `app.ts` dropped it, the results screen fetched with no
+   `studentId`, and the API read the caller's own id — a guardian has no
+   results, so every parent was told nothing was published. The id now rides
+   the route (`#/results?studentId=…`), and the cache is per child so one
+   child's marks never paint under another while offline.
+   `guardian-results.test.ts`: 4 tests; against the old code 3 fail.
+
+## Two shared pieces added for the screens that follow
+
+- **`ui/irreversible.ts`** — the §7 pattern once, for the four actions that
+  cannot be undone (ফলাফল প্রকাশ, বার্ষিক উন্নয়ন, ইনভয়েস তৈরি, নোটিশ পাঠান
+  ২০০+): a `--danger-tint` statement, a checklist with the caller's real
+  counts, "আমি বুঝেছি এটি ফেরানো যাবে না", and the primary disabled until
+  ticked. Drawn from 05 publishScreen and 08 rolloverScreen; 07 and 09 do not
+  draw it, but §7 requires it on all four. One trap found while building it:
+  `setBusy(btn, false)` always re-enables a button, so a screen resetting the
+  panel inside a busy action would leave a live button over an unticked box.
+  The panel re-disables and ignores clicks while unticked. 19 tests.
+- **`numText` / `numClass` in `ui/dom.ts`** — the one digit splitter for R6.
+  The components had grown eight private copies; 59 screens were about to add
+  59 more.
+
+Icons `arrow-up`, `rotate-ccw`, `archive` added for the rollover checklist.
+
+## Verified
+
+- Full suite **2,349 tests**, 13/13 workspaces, 28 SQL suites (was 2,293);
+  typecheck 0/0/0; build clean; security probe 44/44; `index.html`
+  byte-identical at `496199bd`.
+Browser, component gallery at 1280 and 375: Hind Siliguri and Anek Bangla
+loaded, primary 44px `#ec3013`, stat figures in Anek Bangla, no horizontal
+overflow at 375, `color-scheme` light.

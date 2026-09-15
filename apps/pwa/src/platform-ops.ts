@@ -1534,12 +1534,15 @@ export class PlatformOpsView {
       body: meta.effect,
       confirmLabel: meta.label,
       danger: state === 'suspended' || state === 'limited',
+      // The reason is checked while the dialog is still on screen: onConfirm
+      // runs after it closes, where an error has nowhere to show.
+      validate: () => {
+        if (reason.value().trim()) return true;
+        setFieldError(reason.root, 'কারণ ছাড়া পরিবর্তন করা যায় না।');
+        reason.input.focus();
+        return false;
+      },
       onConfirm: () => {
-        if (!reason.value().trim()) {
-          setFieldError(reason.root, 'কারণ ছাড়া পরিবর্তন করা যায় না।');
-          reason.input.focus();
-          return;
-        }
         void this.act('/opsstate',
           { tenantId: id, state, reason: reason.value().trim() },
           `${meta.label} করা হয়েছে।`);
@@ -1618,12 +1621,15 @@ export class PlatformOpsView {
         : `${s.nameBn} আবার চালু হবে — প্ল্যানে থাকলে।`,
       confirmLabel: label,
       danger: next === 'disabled',
+      // The reason is checked while the dialog is still on screen: onConfirm
+      // runs after it closes, where an error has nowhere to show.
+      validate: () => {
+        if (reason.value().trim()) return true;
+        setFieldError(reason.root, 'কারণ লিখুন।');
+        reason.input.focus();
+        return false;
+      },
       onConfirm: () => {
-        if (!reason.value().trim()) {
-          setFieldError(reason.root, 'কারণ লিখুন।');
-          reason.input.focus();
-          return;
-        }
         void this.act('/service',
           { tenantId: id, service: s.code, state: next, reason: reason.value().trim() },
           `${s.nameBn} — ${label} করা হয়েছে।`);
@@ -1686,12 +1692,15 @@ export class PlatformOpsView {
           + 'তাঁদের অ্যাকাউন্ট, ভূমিকা ও সব তথ্য অক্ষত থাকবে।',
       confirmLabel: open ? 'খুলে দিন' : 'বন্ধ করুন',
       danger: !open,
+      // The reason is checked while the dialog is still on screen: onConfirm
+      // runs after it closes, where an error has nowhere to show.
+      validate: () => {
+        if (reason.value().trim()) return true;
+        setFieldError(reason.root, 'কারণ লিখুন।');
+        reason.input.focus();
+        return false;
+      },
       onConfirm: () => {
-        if (!reason.value().trim()) {
-          setFieldError(reason.root, 'কারণ লিখুন।');
-          reason.input.focus();
-          return;
-        }
         void this.act('/portal',
           { tenantId: id, portal, open, reason: reason.value().trim() },
           `${PORTAL_BN[portal]} — ${open ? 'প্রবেশ খোলা হয়েছে' : 'প্রবেশ বন্ধ করা হয়েছে'}।`);

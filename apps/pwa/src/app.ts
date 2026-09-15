@@ -761,7 +761,11 @@ async function main() {
           new GuardianView({
             root: container, doc: document, auth,
             onOpenFees: () => { location.hash = '#/fees'; },
-            onOpenResults: () => { location.hash = '#/results'; },
+            // The child's id travels with the link: the results API reads the
+            // caller's own id when none is given, and a guardian has none.
+            onOpenResults: (studentId) => {
+              location.hash = `#/results?studentId=${encodeURIComponent(studentId)}`;
+            },
           });
         },
       },
@@ -859,7 +863,11 @@ async function main() {
         labelBn: 'ফলাফল',
         glyph: 'award',
         hidden: true,
-        mount: (container) => { new ResultsView({ root: container, doc: document, auth }); },
+        mount: (container) => {
+          const studentId = new URLSearchParams(
+            (location.hash.split('?')[1] ?? '')).get('studentId') ?? undefined;
+          new ResultsView({ root: container, doc: document, auth, studentId });
+        },
       },
       // ── R-3: the management surface ───────────────────────────────
       // Every route stays REGISTERED for every role, as the comment on

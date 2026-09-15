@@ -30,7 +30,7 @@
  * app is framework-free by decision (D1/D3) and its views own their rendering.
  */
 
-export { el, append, icon, lang, clear, uid, resetUid } from './dom.ts';
+export { el, append, icon, lang, clear, uid, resetUid, numText, numClass, hasDigit } from './dom.ts';
 export type { Child, ElProps } from './dom.ts';
 
 export { button, iconButton, buttonRow, setBusy, onClickBusy } from './button.ts';
@@ -62,6 +62,13 @@ export {
   openOverlay, openDrawer, confirmOverlay, setOverlayBody,
 } from './overlay.ts';
 export type { OverlayOptions, OverlayHandle, OverlayKind } from './overlay.ts';
+
+// §7 / R11 — the one barrier in front of ফলাফল প্রকাশ, বার্ষিক উন্নয়ন,
+// ইনভয়েস তৈরি and নোটিশ পাঠান (২০০+).
+export { irreversiblePanel } from './irreversible.ts';
+export type {
+  IrreversibleOptions, IrreversibleItem, IrreversiblePanel, IrreversibleTone,
+} from './irreversible.ts';
 
 export { tabs, filterBar } from './filter.ts';
 export type { TabItem, FilterDef } from './filter.ts';

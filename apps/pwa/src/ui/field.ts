@@ -26,8 +26,60 @@
  * entry time. Phone fields get `inputmode="tel"` and `dir="ltr"` — a Bangladeshi
  * number typed into an RTL-neutral Bangla context renders its digits in the
  * wrong order often enough to matter.
+ *
+ * ── Numbers (Ata Ekta §2, R6) ─────────────────────────────────────────────
+ * A number, tel, date, time or month input is `ui-input n is-num`: its value is
+ * a figure, so it is set in the number face with tabular digits (`.n` alone
+ * loses to `.ui-input`'s font at equal specificity; `.ui-input.is-num` wins).
+ * Every slot filled with CALLER text — label, helper, error, search result
+ * note — sets its numbers in the `.n` face the same way `card.ts` does: text
+ * that is only a number gets `n` on the element, a number inside words
+ * ("১১ সংখ্যার নম্বর দিন") gets a `<span class="n">` around the digits so the
+ * words stay in the text face. textContent is unchanged either way.
  */
-import { el, icon, append, uid, type Child } from './dom.ts';
+import { el, icon, append, uid, type Child, type ElProps } from './dom.ts';
+
+/** A digit, Latin or Bangla. */
+const DIGIT = /[0-9০-৯]/;
+/**
+ * One number as a reader sees it: digits, with the separators that sit
+ * between digits ("১২,৫০০.৭৫", "১০:৪৫", "২–৩১"), and a trailing % or +.
+ */
+const NUMBER = '[0-9০-৯]+(?:[.,:/\\u2013-][0-9০-৯]+)*[%+]?';
+const NUMBER_RUN = new RegExp(NUMBER, 'g');
+const ONLY_NUMBER = new RegExp(`^\\s*${NUMBER}\\s*$`);
+
+/**
+ * Replace `node`'s content with caller text, its numbers in the `.n` face.
+ * Built from text nodes only — the text is school data, never markup. The
+ * node's own `n` class is set or removed, so a node that is refilled (the
+ * error line) never keeps a stale one.
+ */
+function fillText(node: HTMLElement, text: string): void {
+  const hasDigit = DIGIT.test(text);
+  const only = hasDigit && ONLY_NUMBER.test(text);
+  node.classList.toggle('n', only);
+  node.textContent = hasDigit && !only ? '' : text;
+  if (!hasDigit || only) return;
+  const doc = node.ownerDocument;
+  let at = 0;
+  for (const m of text.matchAll(NUMBER_RUN)) {
+    const i = m.index ?? 0;
+    if (i > at) append(node, text.slice(at, i));
+    append(node, el(doc, 'span', { className: 'n', text: m[0] }));
+    at = i + m[0].length;
+  }
+  if (at < text.length) append(node, text.slice(at));
+}
+
+/** `el()` for an element holding caller text, numbers in the `.n` face. */
+function textEl<K extends keyof HTMLElementTagNameMap>(
+  doc: Document, tag: K, props: ElProps, text: string,
+): HTMLElementTagNameMap[K] {
+  const node = el(doc, tag, props);
+  fillText(node, text);
+  return node;
+}
 
 export type FieldKind =
   | 'text' | 'number' | 'tel' | 'email' | 'password' | 'date' | 'time'
@@ -72,6 +124,9 @@ const INPUTMODE: Partial<Record<FieldKind, string>> = {
   number: 'numeric', tel: 'tel', email: 'email', search: 'search',
 };
 
+/** Kinds whose value is a figure: set in the number face (§2 `<input class="n is-num">`). */
+const NUMERIC_KINDS: ReadonlySet<FieldKind> = new Set<FieldKind>(['number', 'tel', 'date', 'time', 'month']);
+
 /**
  * One labelled control, wired for a screen reader.
  *
@@ -91,7 +146,7 @@ export function field(doc: Document, o: FieldOptions): Field {
   });
 
   const label = el(doc, 'label', { className: 'ui-field-label', attrs: { for: id } },
-    el(doc, 'span', { text: o.label }));
+    textEl(doc, 'span', {}, o.label));
   if (o.required) {
     // A word, not just an asterisk: "*" alone is a convention people are
     // assumed to know, and 04-UIUX §5 forbids meaning carried by one glyph.
@@ -128,7 +183,7 @@ export function field(doc: Document, o: FieldOptions): Field {
     input = sel;
   } else {
     input = el(doc, 'input', {
-      className: 'ui-input',
+      className: NUMERIC_KINDS.has(kind) ? 'ui-input n is-num' : 'ui-input',
       attrs: {
         ...shared,
         type: kind === 'number' ? 'text' : kind,
@@ -149,9 +204,9 @@ export function field(doc: Document, o: FieldOptions): Field {
   root.append(control);
 
   if (o.helper) {
-    root.append(el(doc, 'p', {
-      className: 'ui-field-help', text: o.helper, attrs: { id: helpId },
-    }));
+    root.append(textEl(doc, 'p', {
+      className: 'ui-field-help', attrs: { id: helpId },
+    }, o.helper));
   }
   // The error node exists from the start, empty and hidden. Creating it later
   // means `aria-describedby` has to be rewritten at the moment of failure,
@@ -166,9 +221,10 @@ export function field(doc: Document, o: FieldOptions): Field {
     clearFieldError(root);
     fn?.((input as HTMLInputElement).value, e);
   };
-  if (o.onInput) input.addEventListener('input', emit(o.onInput));
+  // Always on `input`: a caller that listens only to `change` still gets the
+  // error cleared while the person types, not after they leave the field.
+  input.addEventListener('input', emit(o.onInput));
   if (o.onChange) input.addEventListener('change', emit(o.onChange));
-  else input.addEventListener('input', emit());
 
   return { root, input, value: () => (input as HTMLInputElement).value };
 }
@@ -185,9 +241,12 @@ export function setFieldError(root: HTMLElement, message: string): void {
   const input = root.querySelector<HTMLElement>('.ui-input');
   const err = root.querySelector<HTMLElement>('.ui-field-error');
   if (!input || !err) return;
-  err.textContent = message;
+  fillText(err, message);
   err.hidden = false;
   root.dataset.invalid = 'true';
+  // The look: `.ui-field.is-error .ui-input` — 2px --danger border on
+  // --danger-tint. The state itself stays in data-invalid + aria-invalid.
+  root.classList.add('is-error');
   input.setAttribute('aria-invalid', 'true');
   const help = root.querySelector('.ui-field-help')?.id;
   input.setAttribute('aria-describedby', [help, err.id].filter(Boolean).join(' '));
@@ -199,8 +258,10 @@ export function clearFieldError(root: HTMLElement): void {
   const err = root.querySelector<HTMLElement>('.ui-field-error');
   if (!input || !err || err.hidden) return;
   err.textContent = '';
+  err.classList.remove('n');
   err.hidden = true;
   delete root.dataset.invalid;
+  root.classList.remove('is-error');
   input.removeAttribute('aria-invalid');
   const help = root.querySelector('.ui-field-help')?.id;
   if (help) input.setAttribute('aria-describedby', help);
@@ -295,10 +356,10 @@ export function searchField(doc: Document, o: {
   if (o.resultNote) {
     // polite, not assertive: a count that interrupts what is being read is
     // worse than one that waits for a pause.
-    append(form, el(doc, 'p', {
-      className: 'ui-search-note', text: o.resultNote,
+    append(form, textEl(doc, 'p', {
+      className: 'ui-search-note',
       attrs: { 'aria-live': 'polite' },
-    }));
+    }, o.resultNote));
   }
   return { root: form, input };
 }

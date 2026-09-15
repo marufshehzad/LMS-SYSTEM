@@ -198,10 +198,10 @@ describe('homework inbox filter', () => {
     // it used to render a literal `·` whatever the caller asked for, which is
     // why this screen hand-rolled its own ✓. "Nothing due" now gets the tick
     // icon from the real set.
-    const glyph = root.querySelector('.empty-glyph');
+    const glyph = root.querySelector('.ui-state-glyph');
     assert.ok(glyph, 'a hurried reader gets one signal, and it is this');
     assert.ok(glyph!.querySelector('svg'), 'a drawn icon, not a stray character');
     assert.notEqual(glyph!.textContent, '·', 'and not the placeholder dot');
-    assert.match(root.querySelector('.empty-state p')?.textContent ?? '', /বাকি নেই/);
+    assert.match(root.querySelector('.ui-state-empty .ui-state-title')?.textContent ?? '', /বাকি নেই/);
   });
 });

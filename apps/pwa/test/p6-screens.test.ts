@@ -152,7 +152,7 @@ describe('P6 — emptyState draws the icon it is given', () => {
     const box = emptyState(dom.window.document, {
       glyph: 'check-square', message: 'কিছু নেই',
     });
-    const g = box.querySelector('.empty-glyph');
+    const g = box.querySelector('.ui-state-glyph');
     assert.ok(g, 'the glyph node exists');
     assert.ok(g!.querySelector('svg'), 'and it is a drawn icon');
     assert.notEqual(g!.textContent, '·');
@@ -162,12 +162,18 @@ describe('P6 — emptyState draws the icon it is given', () => {
     const box = emptyState(dom.window.document, {
       glyph: 'not-a-real-icon', message: 'কিছু নেই',
     });
-    assert.equal(box.querySelector('.empty-glyph')?.textContent, '·');
+    assert.equal(box.querySelector('.ui-state-glyph')?.textContent, '·');
   });
 
-  test('no glyph asked for means no glyph node', () => {
+  test('no glyph asked for means the design empty glyph, never the dot', () => {
+    // Ata Ekta (14 Components §06) draws every empty card with `inbox`. The
+    // guarantee this test keeps is the one it was written for: a caller who
+    // named no glyph never gets the unknown-icon dot.
     const box = emptyState(dom.window.document, { message: 'কিছু নেই' });
-    assert.equal(box.querySelector('.empty-glyph'), null);
+    const g = box.querySelector('.ui-state-glyph');
+    assert.ok(g, 'the default glyph is drawn');
+    assert.ok(g!.querySelector('svg'), 'as a real icon');
+    assert.notEqual(g!.textContent, '·', 'and never the placeholder dot');
   });
 });
 

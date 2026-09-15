@@ -189,6 +189,11 @@ describe('§3 — contrast obligations of the text tokens', () => {
    * Remove an entry the moment its colour is corrected. The primary-button
    * ratio is the one to read twice: this product's previous palette recorded
    * its old red at 4.23:1 and was changed specifically to clear AA.
+   *
+   * DECIDED 2026-09-16: the owner chose to keep the design accent `#ec3013`
+   * exactly (BACKLOG AE-1). These pins are therefore a record of a deliberate
+   * choice, not an oversight waiting for a fix — do not "correct" the colour
+   * without asking.
    */
   const KNOWN_SHORTFALLS: Record<string, { worst: number; why: string }> = {
     '--ink-3': { worst: 3.55, why: 'labels, meta and placeholders — small text, needs 4.5' },

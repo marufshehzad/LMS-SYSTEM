@@ -19,7 +19,49 @@
 import { el, icon, append } from './dom.ts';
 import { toBanglaDigits } from '../../../../packages/ui-core/src/format.ts';
 
+/**
+ * The tones a badge can carry. Ata Ekta draws five: success · neutral · info ·
+ * warn · danger (14 Components §02, IMPLEMENTATION §1f).
+ *
+ * `'primary'` stays in the union only so existing callers still compile (the
+ * dev gallery passes it). It is painted as `neutral`: the accent belongs to the
+ * page's one primary button and the active nav row, never to a label, and the
+ * sheet has no primary badge. New code: use `'neutral'`.
+ */
 export type BadgeTone = 'neutral' | 'primary' | 'info' | 'success' | 'warn' | 'danger';
+
+/** A digit, Latin or Bangla. */
+const DIGIT = /[0-9০-৯]/;
+/**
+ * One number as a reader sees it: digits, with the separators that sit
+ * between digits ("১২,৫০০.৭৫", "১০:৪৫", "২০২৫–২৬"), and a trailing % or + ("৯+").
+ */
+const NUMBER = '[0-9০-৯]+(?:[.,:/\\u2013-][0-9০-৯]+)*[%+]?';
+const NUMBER_RUN = new RegExp(NUMBER, 'g');
+const ONLY_NUMBER = new RegExp(`^\\s*${NUMBER}\\s*$`);
+
+/**
+ * The label, with every number in the `.n` face (R6).
+ *
+ * A label that is only a number gets `.n` on the label span itself. A number
+ * inside words ("৩টি অপেক্ষমাণ") gets the smallest element that holds it — a
+ * `<span class="n">` around the digits — so the words stay in the text face.
+ * Built from text nodes only: labels are school data, never markup.
+ */
+function labelSpan(doc: Document, label: string): HTMLElement {
+  if (!DIGIT.test(label)) return el(doc, 'span', { text: label });
+  if (ONLY_NUMBER.test(label)) return el(doc, 'span', { className: 'n', text: label });
+  const span = el(doc, 'span');
+  let at = 0;
+  for (const m of label.matchAll(NUMBER_RUN)) {
+    const i = m.index ?? 0;
+    if (i > at) append(span, label.slice(at, i));
+    append(span, el(doc, 'span', { className: 'n', text: m[0] }));
+    at = i + m[0].length;
+  }
+  if (at < label.length) append(span, label.slice(at));
+  return span;
+}
 
 /** A plain label. No state, no announcement. */
 export function badge(doc: Document, o: {
@@ -28,12 +70,13 @@ export function badge(doc: Document, o: {
   glyph?: string;
   className?: string;
 }): HTMLElement {
+  const tone = !o.tone || o.tone === 'primary' ? 'neutral' : o.tone;
   const b = el(doc, 'span', {
     className: ['ui-badge', o.className ?? ''].filter(Boolean).join(' '),
-    data: { tone: o.tone ?? 'neutral' },
+    data: { tone },
   });
   if (o.glyph) append(b, icon(doc, o.glyph, 'ui-badge-glyph'));
-  append(b, el(doc, 'span', { text: o.label }));
+  append(b, labelSpan(doc, o.label));
   return b;
 }
 
@@ -60,6 +103,10 @@ export const STATUS: Record<string, { tone: BadgeTone; glyph?: string }> = {
   overdue:   { tone: 'danger', glyph: 'alert-triangle' },
   absent:    { tone: 'danger' },
   failed:    { tone: 'danger', glyph: 'alert-triangle' },
+  // The routine setup and generate checks report a hard stop as 'blocked'.
+  // It was not a key, so that trouble state rendered red with no glyph —
+  // colour alone, which this table exists to prevent.
+  blocked:   { tone: 'danger', glyph: 'alert-triangle' },
   suspended: { tone: 'danger', glyph: 'alert-triangle' },
 };
 
@@ -102,7 +149,9 @@ export function countBadge(doc: Document, count: number, label: string): HTMLEle
   const n = Math.max(0, Math.floor(count));
   if (n === 0) return null;
   return el(doc, 'span', {
-    className: 'ui-count',
+    // `.n`: a count is always a number (R6). The sheet's .ui-count already
+    // sets the numeral face; the class keeps the markup contract.
+    className: 'ui-count n',
     text: n > 9 ? '৯+' : toBanglaDigits(n),
     // Bangla digits in the accessible name too. This painted "৩" and
     // announced "3": a sighted user read Bangla and a screen-reader

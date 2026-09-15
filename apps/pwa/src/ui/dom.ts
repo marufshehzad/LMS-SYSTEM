@@ -141,3 +141,54 @@ export function uid(prefix = 'ui'): string {
 export function resetUid(): void {
   seq = 0;
 }
+
+/* ── numbers (Ata Ekta R6) ─────────────────────────────────────────────── */
+
+/** A digit, Latin or Bangla. */
+const DIGIT = /[0-9০-৯]/;
+/**
+ * One number as a reader sees it: digits with the separators that sit between
+ * digits ("১২,৫০০.৭৫", "১০:৪৫", "২০২৫–২৬"), and a trailing % or + ("৯+").
+ * The same shape the ui/ components mark, so a figure looks alike everywhere.
+ */
+const NUMBER = '[0-9০-৯]+(?:[.,:/\u2013-][0-9০-৯]+)*[%+]?';
+const NUMBER_RUN = new RegExp(NUMBER, 'g');
+const ONLY_NUMBER = new RegExp(`^\\s*${NUMBER}\\s*$`);
+
+/** True when the text holds a digit (Latin or Bangla). */
+export function hasDigit(text: string): boolean {
+  return DIGIT.test(text);
+}
+
+/**
+ * Text as children, with every number in the numeral face.
+ *
+ * `.n` goes on the smallest element that holds the number — a
+ * `<span class="n">` around the digits — never on the whole sentence, because
+ * `.n` switches typeface and would drag the words into the numeral face too.
+ * Text nodes only: this is school data and is never parsed as markup, and the
+ * resulting `textContent` is exactly `text`.
+ *
+ *   el(d, 'p', {}, ...numText(d, `${formatCount(n, 'bn')} জন উপস্থিত`))
+ */
+export function numText(doc: Document, text: string): Child[] {
+  if (!DIGIT.test(text)) return [text];
+  const out: Child[] = [];
+  let at = 0;
+  for (const m of text.matchAll(NUMBER_RUN)) {
+    const i = m.index ?? 0;
+    if (i > at) out.push(text.slice(at, i));
+    out.push(el(doc, 'span', { className: 'n', text: m[0] }));
+    at = i + m[0].length;
+  }
+  if (at < text.length) out.push(text.slice(at));
+  return out;
+}
+
+/**
+ * The class list for an element whose WHOLE text is `text`: adds `n` when the
+ * text is only a number ("৭৮৪", "৳ ৮৬,৫০০" is not — use numText for that).
+ */
+export function numClass(base: string, text: string): string {
+  return ONLY_NUMBER.test(text) ? [base, 'n'].filter(Boolean).join(' ') : base;
+}

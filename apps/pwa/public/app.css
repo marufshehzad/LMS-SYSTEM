@@ -2820,11 +2820,10 @@ button.subj-card::after {
    why the busy spinner rendered as a 4x30 vertical bar instead of a 16px ring
    until the gallery showed it. Legacy buttons contain one text node and never
    noticed. */
-.btn-glyph { display: inline-flex; width: 18px; height: 18px; flex: none; }
-.btn-glyph svg { width: 100%; height: 100%; }
+
+
 /* A busy button keeps its width (pinned in JS) so nothing beside it moves. */
-@keyframes ui-spin { to { transform: rotate(360deg); } }
-[data-busy='true'] { cursor: progress; opacity: .85; }
+
 /* Primary LAST in the DOM. On a phone the column reverses so the primary is
    bottom-most under the thumb; on desktop the row keeps source order and the
    primary finishes the line on the right. */
@@ -2835,24 +2834,8 @@ button.subj-card::after {
    did the opposite of what its own comment claimed — the rendered gallery is
    what caught it. */
 /* -- cards ---------------------------------------------------------------- */
-.ui-card {
-  /* P6: `width: auto`, not `100%`. A block element with `width: 100%` and any
-     horizontal margin is wider than its container by exactly those margins —
-     `box-sizing` cannot help, because margins are outside the box either way.
-     `my-attendance` inherited `.att-summary { margin: 0 var(--s-4) }` from
-     before it was a card and scrolled a 1024px page sideways. `auto` fills
-     the container MINUS the margins, which is what a card wants and what
-     every legacy class that might be handed to `card({ className })` needs
-     it to do. */
-  display: block; width: auto; text-align: start;
-  padding: var(--s-4);
-  background: var(--color-bg);
-  border: 1px solid var(--c-line);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
-  font: inherit; color: inherit;
-}
-.ui-card-accent { background: var(--c-primary-soft); border-color: transparent; }
+
+
 /* P5. A grid of choice-cards. Used where the rows are a CHOICE with a
    sentence each — which document to print, which setting lives where —
    rather than records with fields, which is what `dataTable` is for. One
@@ -2976,22 +2959,18 @@ button.subj-card::after {
   cursor: pointer; }
 .ui-check:focus-within { outline: 2px solid var(--c-primary); outline-offset: -4px;
   border-radius: var(--radius-sm); }
-[data-tone='primary'] { background: var(--c-primary-soft); color: var(--c-primary-text); }
-[data-tone='info'] { background: var(--c-info-soft);    color: var(--c-info); }
-[data-tone='success'] { background: var(--c-success-soft); color: var(--c-success); }
-[data-tone='warn'] { background: var(--c-warn-soft);    color: var(--c-warn); }
-[data-tone='accent2'] { background: var(--color-accent-2-soft); color: var(--color-accent-2-text); }
+
+
+
+
+
 /* -- stat cards ----------------------------------------------------------- */
 /* The label reads first to a screen reader and second to the eye. */
 /* -- avatar --------------------------------------------------------------- */
-.ui-avatar {
-  display: inline-flex; align-items: center; justify-content: center; flex: none;
-  border-radius: 50%; object-fit: cover;
-  font-weight: 700; line-height: 1; color: #fff;
-}
-.ui-avatar.is-sm { width: 28px; height: 28px; font-size: var(--text-3xs); }
-.ui-avatar.is-md { width: 36px; height: 36px; font-size: var(--text-2xs); }
-.ui-avatar.is-lg { width: 52px; height: 52px; font-size: var(--text-base); }
+
+
+
+
 /* Six fixed tints, each chosen to carry white at AA. Not tenant-branded: a
    roster is scannable because the colours DIFFER, and a class of sixty in one
    brand hue would defeat the point.
@@ -2999,17 +2978,17 @@ button.subj-card::after {
    #A76A47 until P4 put an avatar in the child selector and the sweep measured
    it at 4.38:1 — under AA for 11px text, which every .is-sm avatar is. The
    hue is unchanged; only the lightness moved, to 5.20:1. */
-.ui-avatar[data-tint='0'] { background: #6E5D52; }
+
 /* 6.27:1 */
-.ui-avatar[data-tint='1'] { background: #4E7A94; }
+
 /* 4.63:1 */
-.ui-avatar[data-tint='2'] { background: #557C52; }
+
 /* 4.78:1 */
-.ui-avatar[data-tint='3'] { background: #96603E; }
+
 /* 5.20:1 */
-.ui-avatar[data-tint='4'] { background: #7C5C1B; }
+
 /* 6.17:1 */
-.ui-avatar[data-tint='5'] { background: #8A5A7A; }
+
 /* 5.49:1 */
 /* -- page header ---------------------------------------------------------- */
 /* 24px minimum height even though these are inline links in a trail, which
@@ -3019,8 +2998,8 @@ button.subj-card::after {
 /* P5. A crumb may be a <button> when the depth is in-page rather than in the
    URL (see Crumb.onClick). It must be indistinguishable from the anchor. */
 /* -- badges --------------------------------------------------------------- */
-.ui-badge-glyph { display: inline-flex; width: 13px; height: 13px; }
-.ui-badge-glyph svg { width: 100%; height: 100%; }
+
+
 /* -- fields --------------------------------------------------------------- */
 /* Icon + text, never colour alone (04-UIUX §5). */
 /* -- search --------------------------------------------------------------- */
@@ -3040,16 +3019,13 @@ button.subj-card::after {
    of three 34px targets on a phone is a row of three mistakes. */
 /* -- overlays ------------------------------------------------------------- */
 /* A sheet rises; a modal fades. Both respect the reduced-motion block below. */
-@media (prefers-reduced-motion: no-preference) {
-@keyframes ui-rise { from { transform: translateY(12px); opacity: 0; } }
-}
 /* -- toasts --------------------------------------------------------------- */
-.ui-toast-glyph { display: flex; width: 17px; height: 17px; flex: none; }
-.ui-toast-glyph svg { width: 100%; height: 100%; }
+
+
 /* -- loaders and progress ------------------------------------------------- */
 /* -- permission / error states -------------------------------------------- */
-.ui-state-glyph { display: flex; width: 26px; height: 26px; color: var(--c-ink-3); }
-.ui-state-glyph svg { width: 100%; height: 100%; }
+
+
 /* ==========================================================================
    TEACHER HOME  (P3)
 
@@ -3347,3 +3323,276 @@ button.subj-card::after {
 .routine-slot[data-changed='true'] {
   box-shadow: inset 0 0 0 2px var(--c-primary);
 }
+
+/* ═══ [4] Ata Ekta — wave 1: shared components ═══════════════════════════════════════════
+   Rules the redesign's units needed that the one stylesheet is silent on.
+   Merged by script: a declaration the ata-ekta section already sets for the
+   same selector was refused (the sheet wins), as was any raw hex.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── ui-page-header ── */
+.ui-crumb-link.n { font-family: var(--font-num); }
+.ui-back .ui-icon { width: 14px; height: 14px; flex: none; }
+.page-header .page-header-text h1,
+.ui-section-head .ui-section-title { letter-spacing: -.01em; }
+
+/* ── ui-button ── */
+button[data-busy="true"]:disabled { opacity: .85; cursor: progress; }
+.btn-glyph { display: inline-flex; width: 1em; height: 1em; flex: none; }
+.btn-glyph svg { width: 100%; height: 100%; }
+.ui-icon-btn { font-size: var(--text-h3); }
+.ui-icon-btn:disabled,
+.ui-icon-btn.is-danger:disabled { opacity: .45; cursor: default; background: transparent; border-color: var(--line); }
+:where(.btn-sm) { position: relative; }
+.btn-sm::after { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: var(--tap-min); transform: translateY(-50%); }
+@media (prefers-reduced-motion:reduce) {
+.btn-ghost:active:not(:disabled),
+.btn-danger:active:not(:disabled),
+.btn-success:active:not(:disabled),
+.ui-icon-btn:active,
+.ui-page-btn:active,
+.shell-icon-btn:active,
+.shell-menu-item:active { transform: none; }
+}
+
+/* ── ui-card ── */
+.card.ui-card-interactive { display: block; width: 100%; padding: 0; color: inherit; font-size: inherit; font-weight: inherit; line-height: inherit; }
+.ui-card-body:first-child { padding-top: var(--space-4); }
+.card:not(.ui-card-interactive):hover { box-shadow: none; }
+.ui-stat.ui-card-interactive { width: 100%; color: inherit; font-size: inherit; font-weight: inherit; line-height: inherit; cursor: pointer; }
+.ui-stat.ui-card-interactive:hover { background: var(--neutral-100); }
+.ui-stat.ui-card-interactive:focus-visible { outline-offset: -2px; }
+.card.ui-card-interactive:active,
+.ui-stat.ui-card-interactive:active { background-color: var(--neutral-100); }
+.ui-card-glyph[data-tone="info"] { background: var(--info-tint); color: var(--info); }
+.ui-stat-glyph[data-tone="info"] { color: var(--info); }
+.ui-stat-glyph[data-tone="accent2"] { color: var(--ink-2); }
+.ui-stat[data-tone="success"] .ui-stat-value { color: var(--ok); }
+.ui-stat[data-tone="warn"] .ui-stat-value { color: var(--warn); }
+.ui-stat[data-tone="danger"] .ui-stat-value { color: var(--danger); }
+@media (max-width:1023.98px) {
+.ui-stat-row { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width:1023.98px) {
+.ui-stat-row>.ui-stat:nth-child(2n) { border-right: none; }
+}
+@media (max-width:1023.98px) {
+.ui-stat-row>.ui-stat:nth-child(n+3) { border-top: 1px solid var(--line); }
+}
+@media (max-width:1023.98px) {
+.ui-stat-row[data-count="1"],
+.ui-stat-row[data-count="3"],
+.ui-stat-row[data-count="5"],
+.ui-stat-row[data-count="7"],
+.ui-stat-row[data-count="9"] { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width:1023.98px) {
+.ui-stat-row[data-count="3"]>.ui-stat,
+.ui-stat-row[data-count="5"]>.ui-stat,
+.ui-stat-row[data-count="7"]>.ui-stat,
+.ui-stat-row[data-count="9"]>.ui-stat { border-right: none; }
+}
+@media (max-width:1023.98px) {
+.ui-stat-row[data-count="3"]>.ui-stat+.ui-stat,
+.ui-stat-row[data-count="5"]>.ui-stat+.ui-stat,
+.ui-stat-row[data-count="7"]>.ui-stat+.ui-stat,
+.ui-stat-row[data-count="9"]>.ui-stat+.ui-stat { border-top: 1px solid var(--line); }
+}
+.ui-avatar { display: inline-grid; place-items: center; flex: none; overflow: hidden; border-radius: var(--r-pill); background: var(--inset); border: 1px solid var(--line); color: var(--ink); font-family: var(--font-bn); font-weight: 600; line-height: 1; object-fit: cover; }
+.ui-avatar.is-sm { width: 30px; height: 30px; font-size: 13px; }
+.ui-avatar.is-md { width: 40px; height: 40px; font-size: 16px; }
+.ui-avatar.is-lg { width: 52px; height: 52px; font-size: 22px; }
+
+/* ── ui-badge ── */
+.ui-badge-glyph { display: inline-flex; flex: none; width: 12px; height: 12px; }
+.ui-badge-glyph svg { display: block; width: 100%; height: 100%; stroke-width: 2; }
+
+/* ── ui-field ── */
+.ui-input::placeholder { color: var(--ink-3); opacity: 1; }
+.ui-input:focus,
+.ui-select:focus { box-shadow: none; }
+.ui-input:disabled { border-color: var(--line); }
+.ui-field.is-error .ui-input { padding: 0 11px; }
+.ui-field.is-error textarea.ui-input { padding: 10px 11px; }
+.ui-field.is-error .ui-input:focus { outline: 2px solid var(--danger); outline-offset: 2px; }
+.ui-search-input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+.ui-search-input { -webkit-appearance: none; appearance: none; }
+
+/* ── ui-upload ── */
+.ui-upload { position: relative; }
+.ui-upload .ui-upload-input { position: absolute; width: 1px; height: 1px; min-height: 0; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.ui-upload-input:focus-visible+.ui-upload-trigger { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ui-upload-chosen,
+.ui-upload>.ui-field-error { align-self: stretch; }
+.ui-upload-file { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); }
+.ui-upload-file-glyph { display: inline-flex; flex: none; width: 16px; height: 16px; }
+.ui-upload-file-mark { display: inline-flex; flex: none; width: 15px; height: 15px; color: var(--ink-3); }
+.ui-upload-file[data-state="done"] .ui-upload-file-mark { color: var(--ok); }
+.ui-upload-file-glyph svg,
+.ui-upload-file-mark svg { width: 100%; height: 100%; }
+.ui-upload-file-text { flex: 1; min-width: 0; }
+.ui-upload-file-name { display: block; font-weight: 600; overflow-wrap: anywhere; }
+.ui-upload-file-meta { display: block; }
+
+/* ── ui-filter ── */
+.ui-tabs { overflow-y: hidden; }
+.ui-tab:focus-visible { outline-offset: -2px; }
+.ui-filters-inline>.ui-filter-field { display: none; }
+.ui-filters-inline:not(:has(>.ui-filters-extra)) { display: none; }
+.ui-filters-extra { width: 100%; }
+@media (min-width:1024px) {
+.ui-filters>.ui-filters-inline,
+.ui-filters-inline>.ui-filter-field { display: flex; }
+}
+@media (min-width:1024px) {
+.ui-filters-extra { margin-left: auto; width: auto; }
+}
+@media (min-width:1024px) {
+.ui-filters-open { display: none; }
+}
+.ui-filters-open { align-self: flex-start; }
+.ui-filter-chip { min-height: var(--tap-min); font-family: var(--font-bn); cursor: pointer; }
+.ui-filter-clear { min-height: var(--tap-min); padding: 0 var(--space-2); }
+.ui-filter-field.is-stacked .ui-field-label { margin-bottom: 0; }
+
+/* ── ui-table ── */
+.ui-data[data-shape="table-list"]>.ui-table-scroll { display: none; }
+@media (min-width:1024px) {
+.ui-data[data-shape="table-list"]>.ui-table-scroll { display: block; }
+}
+@media (min-width:1024px) {
+.ui-data[data-shape="table-list"]>.ui-list { display: none; }
+}
+.ui-data[data-shape="table-list"]>.ui-list { border: none; border-radius: 0; }
+.ui-table [data-numeric="true"] { text-align: right; }
+.ui-table tbody th { padding: 10px 12px; font-size: 14px; font-weight: 400; letter-spacing: normal; text-transform: none; color: var(--ink); background: transparent; border-bottom: 1px solid var(--line); white-space: normal; }
+.ui-table tbody tr:last-child>th,
+.ui-table tbody tr:last-child>td { border-bottom: none; }
+.ui-table .ui-table-action { padding-top: 0; padding-bottom: 0; }
+.ui-row-open { display: inline-grid; place-items: center; vertical-align: middle; min-width: var(--tap-min); min-height: var(--tap-min); border-radius: var(--r-sm); font-size: var(--text-body); }
+.ui-row-open:hover { background: var(--inset); color: var(--ink); }
+.ui-row-open:active { transform: scale(.97); }
+.ui-list-hit { color: var(--ink); font-size: inherit; line-height: inherit; }
+.ui-list-glyph>.ui-icon,
+.ui-list-chevron>.ui-icon { display: block; }
+.ui-data[data-shape="table-list"]>.ui-list .ui-list-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-list-status[data-tone] { font-size: var(--text-body); font-weight: 700; }
+.ui-list-status[data-tone="success"] { color: var(--ok); }
+.ui-list-status[data-tone="warn"] { color: var(--warn); }
+.ui-list-status[data-tone="danger"] { color: var(--danger); }
+.ui-list-status[data-tone="info"] { color: var(--info); }
+.ui-list-status[data-tone="neutral"] { color: var(--ink); }
+
+/* ── ui-overlay ── */
+@media (max-width:1023.98px) {
+.ui-scrim[data-kind="modal"],
+.ui-scrim[data-kind="drawer"] { align-items: flex-end; justify-content: stretch; padding: 0; }
+}
+@media (max-width:1023.98px) {
+.ui-scrim[data-kind="modal"] .ui-dialog,
+.ui-scrim[data-kind="drawer"] .ui-dialog { max-width: none; height: auto; max-height: 90dvh; border-radius: var(--r-lg) var(--r-lg) 0 0; }
+}
+.ui-scrim[data-kind="sheet"] .ui-dialog::before { content: ""; display: block; flex: none; width: 34px; height: 4px; margin: var(--space-2) auto 0; border-radius: var(--r-pill); background: var(--line); }
+@media (max-width:1023.98px) {
+.ui-scrim[data-kind="auto"] .ui-dialog::before,
+.ui-scrim[data-kind="modal"] .ui-dialog::before,
+.ui-scrim[data-kind="drawer"] .ui-dialog::before { content: ""; display: block; flex: none; width: 34px; height: 4px; margin: var(--space-2) auto 0; border-radius: var(--r-pill); background: var(--line); }
+}
+@media (max-width:1023.98px) {
+.ui-dialog-foot>.ui-button-row { flex: 1 1 auto; }
+}
+@media (max-width:1023.98px) {
+.ui-dialog-foot>.ui-button-row>:last-child { flex: 1 1 auto; }
+}
+.ui-dialog-glyph { display: inline-flex; flex: none; width: 20px; height: 20px; color: var(--danger); }
+.ui-dialog-glyph svg { width: 100%; height: 100%; }
+.ui-dialog-close .ui-icon { width: 18px; height: 18px; }
+.ui-dialog { padding-bottom: env(safe-area-inset-bottom, 0px); }
+
+/* ── ui-feedback ── */
+.ui-toast-glyph { display: flex; flex: none; width: 16px; height: 16px; }
+.ui-toast-glyph svg { width: 100%; height: 100%; }
+.ui-toast[data-tone="success"] .ui-toast-glyph { color: var(--ok); }
+.ui-toast[data-tone="error"] .ui-toast-glyph { color: var(--accent-400); }
+.ui-toast[data-tone="info"] .ui-toast-glyph { color: var(--info); }
+.ui-toast-close { display: inline-flex; align-items: center; justify-content: center; min-width: var(--tap-min); min-height: var(--tap-min); margin: -12px -10px -12px 0; }
+.ui-inline-loader-label { font-size: var(--text-small); line-height: var(--lh-small); color: var(--ink-2); }
+.ui-progress-head { display: flex; align-items: baseline; gap: var(--space-2); }
+.ui-progress-head .ui-progress-label { flex: 1; min-width: 0; }
+.ui-progress-pct { flex: none; font-size: 12.5px; font-weight: 700; color: var(--ink); }
+.ui-list-skeleton>.ui-skel-row:nth-child(3n+2) .skel-bar { width: 58%; }
+.ui-list-skeleton>.ui-skel-row:nth-child(3n+2) .skel-bar.is-short { width: 38%; }
+.ui-list-skeleton>.ui-skel-row:nth-child(3n) .skel-bar { width: 46%; }
+.ui-list-skeleton>.ui-skel-row:nth-child(3n) .skel-bar.is-short { width: 31%; }
+.ui-state-denied .ui-state-glyph { color: var(--ink-2); }
+
+/* ── ui-child-selector ── */
+.ui-child-opt[aria-selected="true"] { background: var(--surface); border-bottom-color: var(--accent); }
+.ui-child-opt[aria-selected="true"] .ui-child-opt-name { font-weight: 700; color: var(--ink); }
+.ui-child-opt[aria-selected="false"] .ui-child-opt-name { color: var(--ink-2); }
+.ui-child-opt-name { color: var(--ink); }
+.ui-child-opt { min-width: 0; min-height: var(--tap-min); }
+.ui-child-opt-name,
+.ui-child-opt-meta { overflow-wrap: anywhere; }
+.ui-child-opt:focus-visible { outline-offset: -3px; }
+.ui-child-identity-text { flex: 1; }
+
+/* ── view-states ── */
+.ui-skeleton { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-4); }
+.ui-skeleton .skel-title { margin-bottom: var(--space-1); }
+.ui-state-glyph { display: flex; width: 1em; height: 1em; font-size: var(--text-h2); margin-bottom: var(--space-2); color: var(--ink-3); }
+.ui-state-glyph svg { width: 100%; height: 100%; }
+.ui-state-error .ui-state-title,
+.ui-state-error .ui-state-glyph { color: var(--danger); }
+.ui-state-action { margin: var(--space-3) 0 0 -14px; }
+.ui-data>.ui-state,
+.card>.ui-state { border: 0; border-radius: 0; }
+.ui-success-note { display: flex; align-items: center; gap: var(--space-2); margin: var(--space-3) 0; padding: var(--space-2) var(--space-3); background: var(--ok-tint); border-left: 4px solid var(--ok); border-radius: 0 var(--r-sm) var(--r-sm) 0; font-size: var(--text-small); line-height: var(--lh-small); color: var(--ink); }
+.ui-success-note-glyph { flex: none; display: flex; width: 1em; height: 1em; font-size: var(--text-body); color: var(--ok); }
+.ui-success-note-glyph svg { width: 100%; height: 100%; }
+.ui-success-note-text { flex: 1; min-width: 0; }
+.notice-confirm.ui-confirm { display: block; margin: var(--space-3) 0; padding: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+.ui-confirm .ui-dialog-body { overflow: visible; }
+.ui-confirm .notice-confirm-line { font-weight: 400; color: var(--ink-2); flex: none; }
+.ui-dialog-glyph { font-size: var(--text-h2); }
+
+/* ── lead: R8 beats R1 on the tap floor ──
+   The merge refused these because the ata-ekta section sets a smaller value
+   for the same property. R8 (accessibility never regresses) outranks R1: the
+   pre-redesign sheet guaranteed a 44px target on every one of them, and the
+   touch probe measures it. Nothing else about the controls changes. */
+.ui-page-btn, .ui-filters-open { min-height: var(--tap-min); }
+/* iOS Safari zooms the whole page when an input under 16px takes focus, and
+   does not zoom back. The design's 15px body size is kept everywhere else;
+   only iOS form controls get the 16px floor the previous sheet had. */
+@supports (-webkit-touch-callout: none) {
+  input, select, textarea { font-size: max(16px, 1em); }
+}
+/* No dark mode (spec §5), so say so to the browser too. Without it a phone in
+   system dark mode draws native selects, date pickers and scrollbars dark on
+   this light page. The sheet is silent on color-scheme. */
+:root { color-scheme: light; }
+
+/* ── ui/irreversible.ts — §7 / R11, as drawn in 05 publishScreen and 08
+   rolloverScreen. One panel for the four actions that cannot be undone. The
+   tick is --ink, not the accent: the accent belongs to the primary button
+   the tick unlocks. ── */
+.irrev { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+.irrev-head { padding: var(--space-3) var(--space-4); background: var(--danger-tint); border-bottom: 2px solid var(--danger); }
+.irrev-statement { margin: 0 0 var(--space-1); font-size: var(--text-body); line-height: var(--lh-h3); font-weight: 700; color: var(--danger); }
+.irrev-detail { margin: 0; font-size: var(--text-small); line-height: var(--lh-small); color: var(--ink-2); }
+.irrev-body { padding: var(--space-4); }
+.irrev-list-label { display: block; margin: 0 0 var(--space-3); }
+.irrev-list { list-style: none; margin: 0; padding: 0; }
+.irrev-item { display: flex; align-items: center; gap: var(--space-3); padding: calc(var(--space-2) + var(--space-1) / 2) 0; border-bottom: 1px solid var(--line); }
+.irrev-item:last-child { border-bottom: 0; }
+.irrev-glyph { flex: none; font-size: var(--text-h3); color: var(--ink-2); }
+.irrev-item[data-tone="success"] .irrev-glyph { color: var(--ok); }
+.irrev-item[data-tone="info"]    .irrev-glyph { color: var(--info); }
+.irrev-item[data-tone="warn"]    .irrev-glyph { color: var(--warn); }
+.irrev-item[data-tone="danger"]  .irrev-glyph { color: var(--danger); }
+.irrev-item-text { flex: 1; min-width: 0; font-size: var(--text-body); line-height: var(--lh-body); }
+.irrev-item-meta { flex: none; font-size: var(--text-small); color: var(--ink-2); text-align: right; }
+.irrev-foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-top: 2px solid var(--rule); }
+.irrev-ack { flex: 1 1 12rem; display: flex; align-items: center; gap: var(--space-2); min-height: var(--tap-min); font-size: var(--text-small); line-height: var(--lh-small); color: var(--ink); cursor: pointer; }
+.irrev-ack-box { flex: none; width: 20px; height: 20px; margin: 0; accent-color: var(--ink); cursor: pointer; }
