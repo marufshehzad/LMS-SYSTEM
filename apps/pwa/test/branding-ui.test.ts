@@ -106,16 +106,39 @@ describe('applyBranding', () => {
     );
   });
 
-  test('drives the semantic tokens the stylesheet reads, in both themes', () => {
+  test('THE ONE THAT MATTERS — a school\'s colour reaches the Ata Ekta components', () => {
+    // The redesign's components read --accent, not --c-primary. Before this
+    // was emitted, a school's primary button and active nav row — the only
+    // two places the accent appears — rendered in the PLATFORM's red on the
+    // school's own screen, which is precisely what R-1 exists to forbid.
     applyBranding(doc(), SCHOOL_A, { tenantKey: 'tenant-a' });
     const css = doc().getElementById('tenant-branding')?.textContent ?? '';
+    assert.match(css, /--accent:#156a3f/, 'the redesign\'s accent is not repainted');
+    for (const t of ['--accent-ink', '--accent-tint', '--accent-600', '--accent-700', '--on-accent']) {
+      assert.match(css, new RegExp(`${t}:#[0-9a-f]{6}`, 'i'), `${t} is not emitted`);
+    }
+  });
 
-    // app.css writes its rules against --c-primary; setting only
-    // --color-primary would leave the app looking exactly as it did.
+  test('the carried screens still get the school\'s colour too', () => {
+    // 668 carried rules still read --c-primary through the alias layer.
+    applyBranding(doc(), SCHOOL_A, { tenantKey: 'tenant-a' });
+    const css = doc().getElementById('tenant-branding')?.textContent ?? '';
     assert.match(css, /--c-primary:#156a3f/);
-    // The dark block must be emitted at matching specificity, or the
-    // design system's default dark steps win over the tenant's.
-    assert.match(css, /:root\[data-theme='dark'\]\{/);
+  });
+
+  test('a school cannot repaint what an ERROR looks like', () => {
+    // --accent-400 is the redesign\'s error-toast tone. A school chooses its
+    // brand, not the colour that says something went wrong.
+    applyBranding(doc(), SCHOOL_A, { tenantKey: 'tenant-a' });
+    const css = doc().getElementById('tenant-branding')?.textContent ?? '';
+    assert.doesNotMatch(css, /--accent-400:/);
+  });
+
+  test('light only — no dark block is emitted (§5)', () => {
+    applyBranding(doc(), SCHOOL_A, { tenantKey: 'tenant-a' });
+    const css = doc().getElementById('tenant-branding')?.textContent ?? '';
+    assert.doesNotMatch(css, /data-theme/);
+    assert.equal((css.match(/:root\{/g) ?? []).length, 1, 'exactly one :root block');
   });
 
   test('replaces rather than accumulates when branding changes', () => {

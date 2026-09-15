@@ -429,21 +429,7 @@ export class Console_ {
       bar.append(out);
     }
 
-    // §34. The console is a workplace tool used all day; an operator who
-    // cannot pin the theme is stuck with whatever their laptop decided.
-    const theme = d.createElement('button');
-    theme.type = 'button';
-    theme.className = 'ui-btn btn-ghost btn-small';
-    const isDark = d.documentElement.getAttribute('data-theme') === 'dark';
-    theme.textContent = isDark ? 'হালকা' : 'গাঢ়';
-    theme.setAttribute('aria-label', isDark ? 'হালকা রঙে বদলান' : 'গাঢ় রঙে বদলান');
-    theme.addEventListener('click', () => {
-      try { localStorage.setItem('shikhon_theme', isDark ? 'light' : 'dark'); }
-      catch { /* private mode */ }
-      applyTheme();
-      this.render();
-    });
-    bar.append(theme);
+    // No theme toggle: the console is light only, like the app (Ata Ekta §5).
     this.root.append(bar);
 
     const main = d.createElement('main');
@@ -2404,25 +2390,12 @@ export class Console_ {
 }
 
 /**
- * Dark mode is an explicit `data-theme` attribute in this design system, not
- * a media query — so a page that never sets it renders its LIGHT palette on
- * whatever ground the browser paints. On a dark-preference machine that put
- * `#1f2937` text on black, which is how the first screenshot of this console
- * came out unreadable. The tenant app sets the attribute from its own
- * settings; the console has no school to ask, so it follows the operator's
- * machine.
+ * Light only (Ata Ekta §5). The console used to follow the operator's
+ * machine or their pinned choice between light and dark; with one theme it
+ * pins light, so a dark-preference laptop still gets a readable console.
  */
 function applyTheme(): void {
-  // P7. The operator's own CHOICE first, the machine second — the same rule
-  // and the same storage key the tenant app uses, so pinning light in one
-  // place pins it in both. Following the machine unconditionally meant an
-  // operator on a dark laptop could not get the light console §34 calls the
-  // default, and had no control anywhere to ask for it.
-  let pref: string | null = null;
-  try { pref = localStorage.getItem('shikhon_theme'); } catch { /* private mode */ }
-  const dark = pref === 'dark'
-    || (pref !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
-  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  document.documentElement.setAttribute('data-theme', 'light');
 }
 
 /**
@@ -2436,13 +2409,6 @@ function applyTheme(): void {
  */
 if (typeof document !== 'undefined' && typeof matchMedia !== 'undefined') {
   applyTheme();
-  // Only while the operator is on 'system'; an explicit choice is not
-  // overridden by the machine changing its mind at sunset.
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-    let pref: string | null = null;
-    try { pref = localStorage.getItem('shikhon_theme'); } catch { /* private mode */ }
-    if (!pref) applyTheme();
-  });
   const root = document.getElementById('root');
   if (root) new Console_(root);
 }

@@ -298,10 +298,12 @@ export interface BrandingCssVars {
 }
 
 /**
- * app.css's `--c-surface` in each theme (`--color-surface-muted`). Brand text
- * sits on this as often as it sits on the brand-soft tint.
+ * app.css's recessed ground — Ata Ekta's `--inset`, which the carried
+ * `--c-surface` now resolves to. Brand text sits on this as often as it sits on
+ * the brand-soft tint. The dark value is kept only because the derivation
+ * below is pure and tested; the app no longer emits a dark block (§5).
  */
-export const LIGHT_SURFACE = '#E9E3D4';
+export const LIGHT_SURFACE = '#eae9e9';
 export const DARK_SURFACE = '#302821';
 
 export function brandingCssVars(
@@ -328,6 +330,25 @@ export function brandingCssVars(
   const DARK_GROUNDS_FOR = (soft: string) => [soft, DARK_SURFACE] as const;
   return {
     light: {
+      // ── Ata Ekta tokens ────────────────────────────────────────────────
+      // The redesign's components read --accent, --accent-ink and
+      // --accent-tint directly, and the primary button's hover and press
+      // read --accent-600 and --accent-700. Without these five, a school's
+      // brand reached only the older screens: its primary button and its
+      // active nav row — the only two places the accent appears — would have
+      // shown the platform's own red on the school's screen, which is exactly
+      // what R-1 forbids. --accent-400 is deliberately NOT emitted: the
+      // redesign uses it for the ERROR toast, and a school chooses its brand,
+      // not what an error looks like.
+      '--accent': p,
+      '--accent-ink': readableBrandText(p, LIGHT_GROUNDS, -0.28, -0.05),
+      '--accent-tint': softLight,
+      '--accent-600': shade(p, -0.16),
+      '--accent-700': shade(p, -0.30),
+      // The redesign's primary button hard-codes a white label. A pale brand
+      // needs dark type to stay readable, so the label is a token app.css
+      // falls back from — the design's own #fff whenever no school sets it.
+      '--on-accent': onFill,
       // The label for anything filled with --c-primary. Seventeen rules in
       // app.css used a literal #fff; they read this instead.
       '--c-on-primary': onFill,

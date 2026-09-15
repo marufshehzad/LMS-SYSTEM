@@ -35,7 +35,6 @@ import { iconSvg } from './icon.ts';
 import { formatCount } from '../../../packages/ui-core/src/format.ts';
 import { navFor, crumbFor, type RoleNav } from './ui/nav.ts';
 import { roleLabel } from './ui/roles.ts';
-import { readTheme, setTheme, THEME_OPTIONS } from './ui/theme.ts';
 
 export interface ShellRoute {
   path: string;       // hash fragment without '#/', e.g. 'attendance'
@@ -597,39 +596,9 @@ export class Shell {
     }
     menu.append(head);
 
-    // The theme control, same storage and same three options as the More
-    // screen's — one implementation in ui/theme.ts, offered in both places
-    // because a desktop user never opens আরও and a phone user never sees
-    // this menu's full form.
-    const themeLabel = d.createElement('p');
-    themeLabel.className = 'shell-menu-label';
-    themeLabel.id = 'shell-theme-label';
-    themeLabel.textContent = 'রঙের ধরন';
-    const group = d.createElement('div');
-    group.className = 'shell-theme';
-    group.setAttribute('role', 'radiogroup');
-    group.setAttribute('aria-labelledby', 'shell-theme-label');
-    const current = readTheme();
-    for (const opt of THEME_OPTIONS) {
-      const b = d.createElement('button');
-      b.type = 'button';
-      b.className = 'theme-option';
-      b.setAttribute('role', 'radio');
-      const chosen = current === opt.value;
-      b.setAttribute('aria-checked', String(chosen));
-      b.dataset.chosen = String(chosen);
-      b.textContent = opt.labelBn;
-      b.addEventListener('click', () => {
-        setTheme(opt.value);
-        for (const other of group.querySelectorAll('.theme-option')) {
-          const isThis = other === b;
-          other.setAttribute('aria-checked', String(isThis));
-          (other as HTMLElement).dataset.chosen = String(isThis);
-        }
-      });
-      group.append(b);
-    }
-    menu.append(themeLabel, group);
+    // No theme control: Ata Ekta has no dark mode (§5), so the picker that
+    // offered follow-phone / light / dark was removed rather than left
+    // offering one choice.
 
     const logout = d.createElement('button');
     logout.type = 'button';

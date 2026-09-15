@@ -76,14 +76,15 @@ describe('P6 — every screen has a page header', () => {
     assert.equal(root().querySelectorAll('.more-item').length, 0);
   });
 
-  test('the theme choice stays, and says where it is stored', () => {
+  test('there is no theme choice — Ata Ekta has one theme (§5)', () => {
+    // The More screen used to carry a follow-phone / light / dark card. With
+    // no dark mode there is nothing to choose, and a picker offering one
+    // option is worse than none.
     root().textContent = '';
     new MoreView({ root: root(), doc: dom.window.document, items: [] });
-    assert.match(text(), /রঙের ধরন/);
-    // It is a device preference, not a school setting — and the difference
-    // matters on a shared phone.
-    assert.match(text(), /এই যন্ত্রে সংরক্ষিত/);
-    assert.equal(root().querySelectorAll('[role="radio"]').length, 3);
+    assert.doesNotMatch(text(), /রঙের ধরন/);
+    assert.equal(root().querySelectorAll('[role="radio"]').length, 0);
+    assert.equal(root().querySelectorAll('.theme-option, .theme-options').length, 0);
   });
 
   test('শিক্ষক সহায়ক AI has a header and real fields', async () => {

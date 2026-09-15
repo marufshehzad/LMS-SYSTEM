@@ -84,5 +84,4 @@ export { navFor, navPaths, crumbFor, navLabel, NAV_ROLES } from './nav.ts';
 export type { NavItem, NavGroup, RoleNav } from './nav.ts';
 
 export { ROLE_BN, roleLabel } from './roles.ts';
-export { readTheme, setTheme, applyTheme, THEME_OPTIONS } from './theme.ts';
-export type { ThemePref } from './theme.ts';
+export { applyTheme } from './theme.ts';

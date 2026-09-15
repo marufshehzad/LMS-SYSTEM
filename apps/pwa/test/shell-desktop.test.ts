@@ -276,23 +276,28 @@ describe('P1 — the profile menu', () => {
     assert.equal(menu.getAttribute('role'), 'menu');
   });
 
-  test('the theme control writes the same key the boot script reads', () => {
-    // app.html applies the theme before the stylesheet paints, from
-    // `shikhon_theme`. A second control writing a different key would apply
-    // for one session and vanish on reload.
+  test('the profile menu offers no theme choice (§5)', () => {
+    // It used to carry a follow-phone / light / dark radio group. Ata Ekta has
+    // no dark mode, so the control was removed from buildProfileMenu() rather
+    // than left offering a single option.
     mount({ role: 'student' });
     (root().querySelector('.shell-avatar') as HTMLButtonElement).click();
-    const opts = [...root().querySelectorAll('.shell-theme .theme-option')] as HTMLElement[];
-    assert.equal(opts.length, 3, 'phone / light / dark');
-    (opts[2] as HTMLButtonElement).click();
-    assert.equal(dom.window.localStorage.getItem('shikhon_theme'), 'dark');
-    assert.equal(doc().documentElement.getAttribute('data-theme'), 'dark');
-    assert.equal(opts[2].getAttribute('aria-checked'), 'true');
-    assert.equal(opts[0].getAttribute('aria-checked'), 'false');
+    const menu = root().querySelector('.shell-menu') as HTMLElement;
+    assert.ok(menu, 'the menu still opens');
+    assert.equal(menu.querySelectorAll('.shell-theme, .theme-option').length, 0);
+    assert.equal(menu.querySelectorAll('[role="radiogroup"]').length, 0);
+    assert.ok(menu.querySelector('.shell-logout'), 'sign-out is still there');
+  });
 
-    // 'system' is the ABSENCE of the key, never the string 'system'.
-    (opts[0] as HTMLButtonElement).click();
+  test('a device that once chose dark is returned to light and forgets it', async () => {
+    // A phone that picked dark before the redesign still holds shikhon_theme.
+    // applyTheme() pins light and clears the dead key, so it does not linger.
+    dom.window.localStorage.setItem('shikhon_theme', 'dark');
+    doc().documentElement.setAttribute('data-theme', 'dark');
+    const { applyTheme } = await import('../src/ui/theme.ts');
+    applyTheme();
     assert.equal(dom.window.localStorage.getItem('shikhon_theme'), null);
+    assert.equal(doc().documentElement.getAttribute('data-theme'), 'light');
   });
 });
 

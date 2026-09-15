@@ -14,6 +14,22 @@ their reason; nothing is deleted.
 
 
 
+
+## Ata Ekta redesign (opened 2026-09-16)
+
+Foundation shipped: stylesheet, fonts, no dark mode, shell CSS, component CSS,
+white-label seam. See PHASE_LOG. The rest of IMPLEMENTATION.md §8 is open.
+
+| ID | Item | Severity | Status |
+|---|---|---|---|
+| **AE-1** | **Design palette misses WCAG AA** - white on `--accent #ec3013` is **4.20:1** (primary button); `--ink-3` 3.55-4.30; উপস্থিত chip 4.30; দেরি chip 4.35. Shipped exactly as designed at the owner's instruction, pinned by name and ratio in `design-tokens.test.ts` so none can worsen silently. The previous palette's red was 4.23:1 and was corrected for exactly this. | HIGH (a11y) | **OWNER DECISION** |
+| **AE-2** | **§8 step 3 - `.n` on every numeric element.** Figures in carried screens still render in the text face. | MEDIUM | **OPEN** |
+| **AE-3** | **§8 steps 5-6 - component markup and all 52 routes** against their design pages, role by role. Carried screens currently render in the new palette through the alias layer. | HIGH | **OPEN** |
+| **AE-4** | **§8 step 7 - five states per screen** (loading, empty, error, offline, denied). | MEDIUM | **OPEN** |
+| **AE-5** | **§8 step 8 - non-route surfaces**: practice, structure forms, offline page. | MEDIUM | **OPEN** |
+| **AE-6** | **Attendance path খ** - the one behaviour change: `markAllPresent()` primary, drop `grid.cycle()`, start unset, show names, three guards (unmarked blocks submit, 5-second undo, confirm by name). Updates `attendance-screen.test.ts` and `attendance-view.test.ts`, as §9 expects. | HIGH | **OPEN** |
+| **AE-7** | **Deviation kept on purpose - B-108 numeral face named first in `--font-bn`.** The design's plain Hind Siliguri reintroduces ১/৮ misreading for digits inside sentences, which `.n` cannot reach. | - | **DECIDED** |
+
 ## P13 production readiness (2026-09-10)
 
 From `docs/P13-PRODUCTION-READINESS-REPORT.md`. Verdict **NO-GO for

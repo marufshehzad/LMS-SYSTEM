@@ -16005,3 +16005,127 @@ webhook that reaches a person. Nothing was simulated. The VAPID generator was
 verified with a **throwaway** keypair whose values were never printed and which
 was deleted - the production pair must be generated ON the host so the private
 key never travels.
+
+
+# Ata Ekta redesign - foundation (2026-09-16)
+
+The owner handed off a full redesign from Claude Design: `11 Handoff` is the
+index, `IMPLEMENTATION.md` the spec, `tokens/ata-ekta.css` "the one
+stylesheet". It covers every screen except the landing page - 52 routes, 11
+component modules, 7 roles - plus one behaviour change (attendance, path খ)
+and the removal of dark mode.
+
+This entry is the FOUNDATION: build-order steps 1, 2 and 4 of §8, and the
+component CSS of step 5. Every screen stands on it. The per-screen work is
+recorded as open below, not claimed.
+
+Source files used: `Ata Ekta LMS Design System.zip` (standalone export). Its
+`IMPLEMENTATION.md` and `tokens/ata-ekta.css` were compared byte for byte with
+the earlier `-handoff.zip` and are identical.
+
+## The stylesheet could not simply be replaced
+
+§8 says "replace the token block in app.css with tokens/ata-ekta.css". Measured
+first: **404 classes the app emits are styled in the old sheet and absent from
+the new one** - routine (34), branding (27), attendance (25), generation,
+calendar, login, marks, notices and more. Those rules make ~2,000 `var()`
+references to token names the new sheet does not define (`--s-*`, `--c-*`,
+`--text-2xs`, `--radius-*`). A straight replace would have left every one
+unresolved: collapsed spacing and lost colour on every screen not yet
+restyled.
+
+So `app.css` is built, not pasted, by a brace-aware splitter:
+
+1. `tokens/ata-ekta.css`, verbatim.
+2. An **alias layer** - 75 old token names, each mapped by MEANING onto the new
+   palette and scale. The retired second accent maps to neutral ink, not to a
+   colour, because §3 allows one accent.
+3. The old rules the new sheet does NOT own: **668 kept, 383 superseded shared
+   rules dropped, 3 dark rules dropped**, 9 selector lists trimmed so a shared
+   selector inside a mixed list does not override the new design.
+
+It parses cleanly (esbuild: 0 warnings), and `design-tokens.test.ts` proves no
+token of any family is used but never defined.
+
+## Four things the spec did not say, found by measuring
+
+**1. White-labelling would have broken.** The new components read `--accent`;
+`brandingCssVars` wrote only the old names. Every school's primary button and
+active nav row - the only two places the accent appears - would have shown the
+PLATFORM's red on the school's own screen, which R-1 forbids. Branding now
+emits `--accent`, `--accent-ink`, `--accent-tint`, `--accent-600/700` and
+`--on-accent`. Verified in the browser: the demo school's green `#156a3f`
+reached `--accent` and its primary button. `--accent-400` is deliberately NOT
+emitted - it is the error toast, and a school chooses its brand, not what an
+error looks like.
+
+**2. The new primary button hard-codes a white label.** A pale school colour
+needs dark type. `.btn-primary { color: var(--on-accent, #fff) }` - identical
+to the design whenever no school sets it.
+
+**3. The design silently reintroduced B-108.** Its `--font-bn` is plain Hind
+Siliguri, whose ১ reads as ৮ at UI sizes ("১০টি" as "৮০টি"). The per-character
+`ShikhonBnNum` face was still in the sheet and referenced nowhere - the exact
+failure B-108 was filed for. `.n` puts figures on Anek Bangla as designed, but
+cannot reach a digit inside a sentence. The face is named first again: the one
+deliberate deviation from the design's tokens, taken for correctness.
+
+**4. The design's exact palette does not fully meet WCAG AA.** Measured:
+
+| where | ratio | needs |
+|---|---|---|
+| white on `--accent #ec3013` (the primary button) | **4.20** | 4.5 |
+| `--ink-3` (labels, meta, placeholders) | 3.55-4.30 | 4.5 |
+| উপস্থিত chip - `--ok` on `--ok-tint` | 4.30 | 4.5 |
+| দেরি chip - `--warn` on `--warn-tint` | 4.35 | 4.5 |
+
+The owner asked for the design "100% same", so the exact colours shipped. They
+were NOT hidden: `design-tokens.test.ts` pins each by name and ratio, fails on
+any NEW shortfall, and fails if a pinned one gets worse. The primary-button
+number is the one to read twice - this product's previous palette recorded its
+old red at 4.23:1 and was changed specifically to clear AA. **Owner decision
+pending.**
+
+## Dark mode removed (§5)
+
+`ui/theme.ts` is now light only: it pins `data-theme="light"` and clears the
+retired `shikhon_theme` key so a phone that once chose dark does not carry a
+dead preference. Removed: the pre-paint theme script and dark `theme-color` in
+`app.html`, the picker in the shell's profile menu and on the More screen, the
+platform console's toggle and its dark media listener, `THEME_OPTIONS`, the
+dark branding block, and every dark CSS rule including the design sheet's own
+interim `.shell-theme` / `.theme-option` rules (which it says exist "only so a
+not-yet-removed picker is not unstyled mid-migration").
+
+## A conflict inside the spec, resolved in favour of §5
+
+§9 says `shell-desktop.test.ts` "should still pass unchanged". One of its tests
+asserted the theme picker that §5 orders deleted. They cannot both hold. The
+test was replaced with two that guard the new contract: the menu offers no
+theme choice, and a device that once chose dark is returned to light and
+forgets the key. The other five tests §9 names are byte-unchanged.
+
+## Verified
+
+- Full suite **2,293 tests**, 13/13 workspaces, 28 SQL suites; typecheck
+  0/0/0; build clean; security probe 44/44; `index.html` byte-identical at
+  `496199bd`.
+- Browser: ground `#f3f2f2`, ink `#201e1d`, Hind Siliguri, light only, no
+  picker; desktop sidebar exactly **256px**, tab bar hidden, one topbar, 2px
+  rule under the page header, no horizontal overflow; school brand on the
+  primary button.
+
+## Not yet done - the rest of §8
+
+- **Step 3** - `.n` on every numeric element. Until then figures in carried
+  screens render in the text face, not Anek Bangla.
+- **Step 5 (markup)** - the component CSS is in; any markup changes 14
+  Components calls for are not.
+- **Step 6** - the 52 routes, role by role, against their design pages. The
+  668 carried rules currently render in the NEW palette through the alias
+  layer, which is a coherent interim, not the finished screens.
+- **Step 7** - the five states per screen.
+- **Step 8** - practice, structure forms, offline page.
+- **Attendance, path খ** - the one behaviour change: `markAllPresent()` as the
+  primary action, no `grid.cycle()`, start unset, show names, and the three
+  guards. Not started.

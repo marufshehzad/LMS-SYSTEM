@@ -1,25 +1,22 @@
 /**
- * The Ata Ekta token foundation.  (UI integration plan, P0)
+ * The Ata Ekta token foundation.  (IMPLEMENTATION.md §2–§4)
  *
- * P0 swapped the palette underneath 424 `var(--c-*)` usages by re-pointing a
- * 29-token alias layer, without touching a single view module. That is only
- * safe while three properties hold, and each of these tests exists because
- * breaking one would be invisible in a screenshot until a specific screen in
- * a specific theme was opened by a specific role.
+ * The redesign replaced the stylesheet underneath 668 carried screen rules
+ * by installing tokens/ata-ekta.css and re-pointing every old token name at
+ * the new palette through an alias layer — without touching a view module.
+ * That is only safe while four properties hold, and each test here exists
+ * because breaking one is invisible in a screenshot until a specific screen
+ * is opened by a specific role.
  *
- *   1. Every alias resolves. A `var(--c-thing)` with no definition inherits
- *      its colour silently — text simply takes its parent's colour and looks
- *      *plausible*. Nine rules were doing exactly that before `--c-ink-1` was
- *      given a definition; nobody noticed for weeks.
- *   2. Both themes define the same token set. Dark mode's first failure here
- *      was an inverted neutral ramp with four hand-set status tints left
- *      pale: light-on-light, 1.02:1 on the routine screen — invisible rather
- *      than merely poor. A ramp only carries the tokens that alias it.
- *   3. Contrast obligations are met by the tokens that carry text. The
- *      canonical palette is not automatically accessible: `--color-text-faint`
- *      is 3.03:1 on the Muslin ground and would fail AA the moment any text
- *      token aliased it, which is the same defect `--c-ink-3` was created to
- *      fix in the previous palette.
+ *   1. Every alias resolves. A `var(--thing)` with no definition does not
+ *      error; the declaration is dropped and the element inherits a colour
+ *      that usually looks plausible.
+ *   2. There is ONE theme. The design has no dark mode (§5); a dark block that
+ *      survives is a half-palette waiting for someone to switch it on.
+ *   3. Text tokens meet their contrast obligations — and where the design's
+ *      exact palette does NOT, that is written down by name and ratio rather
+ *      than hidden by loosening the assertion. See "known shortfalls".
+ *   4. The geometry and motion the spec fixes (§4) keep those values.
  *
  * These read the shipped CSS rather than a copy, so they cannot drift from it.
  */
@@ -28,35 +25,40 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { LIGHT_SURFACE } from '../../../packages/ui-core/src/branding.ts';
 
 // fileURLToPath, not URL.pathname: this repo's path contains spaces.
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-import { LIGHT_SURFACE, DARK_SURFACE }
-  from '../../../packages/ui-core/src/branding.ts';
 const CSS_RAW = readFileSync(join(ROOT, 'public', 'app.css'), 'utf8');
 /**
  * Comments stripped before any token scan. This file's comments deliberately
- * NAME tokens that do not exist — "was var(--c-bg), not a defined token" is a
- * record of a fixed bug — and a scanner that reads them reports the very bug
- * the comment says was fixed. Found by this test's own first run.
+ * NAME tokens and colours that are not in effect — a scanner that reads them
+ * reports the very thing the comment says was changed.
  */
 const CSS = CSS_RAW.replace(/\/\*[\s\S]*?\*\//g, '');
 
-/** The `:root { … }` light block. */
-function lightBlock(): string {
-  const i = CSS.indexOf(':root {');
-  return CSS.slice(i, CSS.indexOf('\n}', i));
-}
-/** The `:root[data-theme='dark'] { … }` block. */
-function darkBlock(): string {
-  const i = CSS.indexOf(":root[data-theme='dark'] {");
-  return CSS.slice(i, CSS.indexOf('\n}', i));
-}
 /**
- * Tokens are declared several-per-line in the ramps
- * (`--color-neutral-100: #F7F5EE;  --color-neutral-200: #EFEBE0;`), so an
- * anchored `^\s*--x:` match sees only the first on each line and reports the
- * rest as undefined. Also caught by this test's own first run.
+ * Every `:root { … }` block, LATEST FIRST.
+ *
+ * The sheet has three: the design's tokens, the compatibility aliases, and the
+ * B-108 font override. The browser applies the last definition, and `resolve`
+ * returns the first match — so ordering them latest-first gives `resolve`
+ * exactly the cascade the browser applies.
+ */
+function rootBlocks(): string {
+  const blocks: string[] = [];
+  const re = /:root\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(CSS)) !== null) {
+    blocks.push(CSS.slice(m.index, CSS.indexOf('\n}', m.index)));
+  }
+  return blocks.reverse().join('\n');
+}
+const ROOT_TOKENS = rootBlocks();
+
+/**
+ * Tokens are declared several-per-line in the ramps, so an anchored match
+ * sees only the first on each line. Match every declaration instead.
  */
 function definedIn(block: string): Set<string> {
   return new Set([...block.matchAll(/(--[a-z0-9-]+)\s*:/g)].map((m) => m[1]));
@@ -76,246 +78,230 @@ function contrast(a: string, b: string): number {
   const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
   return (hi + 0.05) / (lo + 0.05);
 }
-/** Resolve a token to its literal hex within one block, following aliases. */
-function resolve(token: string, block: string, depth = 0): string | null {
-  if (depth > 6) return null;
-  const m = new RegExp(`^\\s*${token}\\s*:\\s*([^;]+);`, 'm').exec(block);
+/** Resolve a token to its literal hex, following aliases, latest definition wins. */
+function resolve(token: string, depth = 0): string | null {
+  if (depth > 8) return null;
+  // Several declarations can share a line, so anchor on a boundary, not ^.
+  const m = new RegExp(`(?:^|[;{\\s])${token}\\s*:\\s*([^;]+);`, 'm').exec(ROOT_TOKENS);
   if (!m) return null;
   const v = m[1].trim();
   if (v.startsWith('#')) return v;
   const alias = /^var\((--[a-z0-9-]+)\)$/.exec(v);
-  return alias ? resolve(alias[1], block, depth + 1) : null;
+  return alias ? resolve(alias[1], depth + 1) : null;
 }
-
 
 /**
  * Tokens used with NO fallback and never defined.
  *
- * `var(--x, var(--y))` is safe and deliberate — the fallback is the whole
- * point, and app.css uses it. `var(--x)` alone is the dangerous form: an
- * undefined property drops the declaration and the element silently inherits
- * its parent's colour, which usually looks plausible. Only the second is a
- * bug, and an earlier version of this test conflated them.
+ * `var(--x, var(--y))` is safe and deliberate. `var(--x)` alone is the
+ * dangerous form: an undefined property drops the declaration silently.
  */
 function undefinedWithoutFallback(prefix: string): string[] {
   const defined = definedIn(CSS_RAW);
   const re = new RegExp('var\\(\\s*(' + prefix + '[a-z0-9-]*)\\s*([,)])', 'g');
   const bad = new Set<string>();
   for (const m of CSS.matchAll(re)) {
-    if (m[2] === ')' && !defined.has(m[1])) bad.add(m[1]);   // no fallback given
+    if (m[2] === ')' && !defined.has(m[1])) bad.add(m[1]);
   }
   return [...bad];
 }
 
-describe('P0 — every alias resolves to a real value', () => {
-  test('THE ONE THAT MATTERS — no --c-* token is used but never defined', () => {
-    // An undefined custom property does not error; the declaration is simply
-    // dropped and the element inherits. That is why this is a test and not a
-    // thing anyone would notice by looking.
-    const missing = undefinedWithoutFallback('--c-');
-    assert.deepEqual(missing, [], `used but never defined: ${missing.join(', ')}`);
-  });
-
-  test('no --color-* token is used but never defined', () => {
-    const missing = undefinedWithoutFallback('--color-');
-    assert.deepEqual(missing, [], `used but never defined: ${missing.join(', ')}`);
-  });
-
+describe('every token resolves to a real value', () => {
   test('THE ONE THAT MATTERS — no token of ANY family is used but never defined', () => {
-    // P8. The two tests above check `--c-` and `--color-`. Every other family
-    // — `--lh-`, `--text-`, `--space-`, `--radius-`, `--shadow-`, `--z-` —
-    // was unguarded, and that is exactly where the bug was hiding:
-    //
-    //   four rules read `var(--lh-normal)`          (.perf-q-stem, .perf-reteach,
-    //   and the token was defined NOWHERE            .perf-wide-note, .perf-att-signals li)
-    //
-    // so the browser dropped all four `line-height` declarations and the
-    // elements inherited 1.75 instead of the 1.65 the rule asked for.
-    // Measured in a browser before the fix: `.perf-q-stem` computed
-    // 26.25px on a 15px font — the inherited value, not its own.
-    //
-    // The whole `--lh-*` ramp had zero readers at the same time: it was
-    // authored, and then every rule was written against a name outside it.
-    //
-    // One prefix, so a new family cannot be forgotten the way those were.
+    // One prefix, so a new family cannot be forgotten. P8 found four rules
+    // reading `var(--lh-normal)`, defined nowhere, that silently inherited
+    // 1.75 instead of 1.65. The alias layer exists so the 668 carried screen
+    // rules do not repeat that on every screen at once.
     const missing = undefinedWithoutFallback('--');
     assert.deepEqual(missing, [], `used but never defined: ${missing.join(', ')}`);
   });
 
-  test('the canonical Ata Ekta palette is present, not the pre-P0 one', () => {
-    const light = lightBlock();
-    assert.match(light, /--color-primary:\s*#D23B2E/i, 'the WCAG-corrected red');
-    assert.match(light, /--color-surface:\s*#F1EFE6/i, 'the Muslin page ground');
-    assert.match(light, /--color-text:\s*#53443D/i, 'Clove text');
-    // The palette it replaced, which failed AA at 4.23:1 on white.
-    assert.doesNotMatch(light, /--color-primary:\s*#e53935/i);
+  test('the carried --c-* and --color-* names all resolve through the alias layer', () => {
+    assert.deepEqual(undefinedWithoutFallback('--c-'), []);
+    assert.deepEqual(undefinedWithoutFallback('--color-'), []);
+  });
+
+  test('the Ata Ekta palette is in effect (§3)', () => {
+    assert.equal(resolve('--bg')?.toLowerCase(), '#f3f2f2', 'page ground');
+    assert.equal(resolve('--surface')?.toLowerCase(), '#ffffff', 'cards, tables, sheets');
+    assert.equal(resolve('--inset')?.toLowerCase(), '#eae9e9', 'wells, table heads');
+    assert.equal(resolve('--ink')?.toLowerCase(), '#201e1d', 'primary text');
+    assert.equal(resolve('--accent')?.toLowerCase(), '#ec3013', 'the one accent');
+    assert.equal(resolve('--ok')?.toLowerCase(), '#1c7f4f');
+    assert.equal(resolve('--warn')?.toLowerCase(), '#9a6207');
+    assert.equal(resolve('--danger')?.toLowerCase(), '#ae1800');
+    assert.equal(resolve('--info')?.toLowerCase(), '#1d5fa8');
+  });
+
+  test('a carried old name lands on the NEW palette, not the old one', () => {
+    // The alias layer is only worth having if it re-points: an old screen
+    // reading --c-ink or --color-text must render in Ata Ekta colours.
+    //
+    // Only names a carried rule still USES get an alias — the build writes
+    // one per reference, not one per old token — so these are checked
+    // against names that are actually in the layer.
+    assert.equal(resolve('--c-ink'), resolve('--ink'));
+    assert.equal(resolve('--color-text'), resolve('--ink'));
+    assert.equal(resolve('--c-primary'), resolve('--accent'));
+    assert.equal(resolve('--color-bg'), resolve('--surface'));
+    assert.equal(resolve('--c-surface'), resolve('--inset'));
+    // and the previous palette's signature colours are gone from effect
+    const inEffect = ['--c-ink', '--color-text', '--c-primary', '--color-bg', '--c-surface']
+      .map((t) => resolve(t)?.toUpperCase());
+    for (const old of ['#D23B2E', '#F1EFE6', '#53443D', '#E9E3D4']) {
+      assert.ok(!inEffect.includes(old), `the previous palette's ${old} is still in effect`);
+    }
   });
 });
 
-describe('P0 — both themes carry the same token set', () => {
-  test('THE ONE THAT MATTERS — dark redefines every status tint it needs', () => {
-    // The original dark-mode failure: the neutral ramp inverted so text went
-    // light, while the hand-set status tints stayed pale — every chip and
-    // notice became light-on-light. Inverting a ramp only carries the tokens
-    // that ALIAS it.
-    const dark = darkBlock();
-    for (const t of ['--c-primary-soft', '--c-danger-soft', '--c-warn-soft',
-      '--c-success-soft', '--c-info-soft']) {
-      assert.ok(dark.includes(`${t}:`), `dark theme must redefine ${t}`);
-    }
+describe('§5 — light only, no dark mode', () => {
+  test('THE ONE THAT MATTERS — no dark theme block survives', () => {
+    // A surviving dark block is a half-palette: whoever switches it on gets
+    // the old dark ramp under the new components.
+    assert.doesNotMatch(CSS, /:root\[data-theme=['"]?dark/, 'a :root[data-theme=dark] block remains');
+    assert.doesNotMatch(CSS, /prefers-color-scheme\s*:\s*dark/, 'a prefers-color-scheme: dark block remains');
   });
 
-  test('dark redefines the grounds, the text ramp and the neutral ramp', () => {
-    const dark = definedIn(darkBlock());
-    for (const t of ['--color-bg', '--color-surface', '--color-surface-muted',
-      '--color-text', '--color-text-muted', '--color-border',
-      '--color-neutral-100', '--color-neutral-700', '--color-neutral-900']) {
-      assert.ok(dark.has(t), `dark theme must redefine ${t}`);
-    }
-  });
-
-  test('dark is warm, not the legacy cool near-black', () => {
-    // A warm ground is the whole visual point of the Ata Ekta dark palette:
-    // R = G = B would be neutral grey, and the pre-P0 dark was #1a1817.
-    const bg = resolve('--color-surface', darkBlock());
-    assert.ok(bg, 'dark --color-surface must resolve');
-    let h = bg.replace('#', '');
-    const [r, , b] = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
-    assert.ok(r > b, `dark ground should be warm (R>B), got ${bg}`);
+  test('the theme picker rules are gone with the picker', () => {
+    assert.doesNotMatch(CSS, /\.shell-theme\s*\{/);
+    assert.doesNotMatch(CSS, /\.theme-options?\s*\{/);
   });
 });
 
-describe('P0 — contrast obligations of the text tokens', () => {
-  const light = lightBlock();
-  const WHITE = '#FFFFFF';
+describe('§3 — contrast obligations of the text tokens', () => {
+  const GROUNDS = { bg: '#f3f2f2', surface: '#ffffff', inset: '#eae9e9' } as const;
 
-  test('THE ONE THAT MATTERS — no text token aliases --color-text-faint', () => {
-    // 3.49:1 on white and 3.03:1 on Muslin: it fails AA as body text. It is
-    // canonical and kept for non-text ornament, but a text role must never
-    // resolve to it — that is precisely the bug --c-ink-3 exists to prevent,
-    // and it shipped once already on five screens.
-    for (const t of ['--c-ink', '--c-ink-1', '--c-ink-2', '--c-ink-3']) {
-      const v = resolve(t, light);
-      assert.notEqual(v?.toUpperCase(), '#97867B', `${t} must not be text-faint`);
-    }
-  });
+  /**
+   * Known shortfalls in the design's EXACT palette, measured and pinned.
+   *
+   * IMPLEMENTATION.md was followed to the letter — the owner asked for the
+   * design "100% same" — and these tokens, used exactly as the design uses
+   * them, do not reach WCAG AA (4.5:1) for normal-size text. They are listed
+   * here with their measured ratios instead of being dropped from the test,
+   * because a suite that goes green by forgetting an accessibility failure is
+   * worse than a red one.
+   *
+   * Two rules make this a guard rather than a waiver:
+   *   - a token NOT on this list must still clear 4.5 on every ground, so a
+   *     new failure fails the build;
+   *   - a token ON this list must not get WORSE than recorded.
+   *
+   * Remove an entry the moment its colour is corrected. The primary-button
+   * ratio is the one to read twice: this product's previous palette recorded
+   * its old red at 4.23:1 and was changed specifically to clear AA.
+   */
+  const KNOWN_SHORTFALLS: Record<string, { worst: number; why: string }> = {
+    '--ink-3': { worst: 3.55, why: 'labels, meta and placeholders — small text, needs 4.5' },
+    '--ok': { worst: 4.13, why: 'status text on bg/inset' },
+    '--warn': { worst: 4.20, why: 'status text on inset' },
+  };
 
-  test('the ink ramp clears AA on BOTH grounds', () => {
-    const muslin = resolve('--color-surface', light);
-    assert.ok(muslin);
-    for (const t of ['--c-ink', '--c-ink-1', '--c-ink-2', '--c-ink-3']) {
-      const v = resolve(t, light);
+  test('THE ONE THAT MATTERS — every text token clears AA on every ground, except the pinned ones', () => {
+    const failures: string[] = [];
+    for (const t of ['--ink', '--ink-2', '--ink-3', '--accent-ink', '--ok', '--warn', '--danger', '--info']) {
+      const v = resolve(t);
       assert.ok(v, `${t} must resolve to a literal`);
-      for (const [name, ground] of [['white', WHITE], ['Muslin', muslin]] as const) {
+      for (const [name, ground] of Object.entries(GROUNDS)) {
         const r = contrast(v, ground);
-        assert.ok(r >= 4.5, `${t} (${v}) on ${name} is ${r.toFixed(2)}:1, needs 4.5`);
+        if (r >= 4.5) continue;
+        const known = KNOWN_SHORTFALLS[t];
+        if (!known) {
+          failures.push(`${t} (${v}) on ${name} is ${r.toFixed(2)}:1 — NEW failure`);
+        } else if (r < known.worst - 0.01) {
+          failures.push(`${t} on ${name} is ${r.toFixed(2)}:1 — WORSE than the pinned ${known.worst}`);
+        }
+      }
+    }
+    assert.deepEqual(failures, []);
+  });
+
+  test('the primary text tokens pass outright, with room', () => {
+    for (const t of ['--ink', '--ink-2', '--accent-ink', '--danger', '--info']) {
+      const v = resolve(t)!;
+      for (const [name, ground] of Object.entries(GROUNDS)) {
+        assert.ok(contrast(v, ground) >= 4.5, `${t} on ${name}`);
       }
     }
   });
 
-  test('status text colours clear AA on the Muslin ground they sit on', () => {
-    const muslin = resolve('--color-surface', light);
-    assert.ok(muslin);
-    for (const t of ['--c-warn', '--c-success', '--c-info', '--c-primary-text', '--c-link']) {
-      const v = resolve(t, light);
-      assert.ok(v, `${t} must resolve`);
-      const r = contrast(v, muslin);
-      assert.ok(r >= 4.5, `${t} (${v}) on Muslin is ${r.toFixed(2)}:1, needs 4.5`);
-    }
+  test('status chips: danger and info text pass on their own tints', () => {
+    // ok-on-ok-tint (4.30) and warn-on-warn-tint (4.35) do not — those are the
+    // উপস্থিত and দেরি chips, and are reported with the known shortfalls.
+    assert.ok(contrast(resolve('--danger')!, resolve('--danger-tint')!) >= 4.5);
+    assert.ok(contrast(resolve('--info')!, resolve('--info-tint')!) >= 4.5);
   });
 
-  test('brand text clears AA on the RECESSED ground as well (P4)', () => {
-    // --color-surface is the page. --color-surface-muted is what cards, chips
-    // and the mobile bottom bar are painted with, and --c-primary-text lands
-    // on it every time a bottom-bar tab is active — which is every mobile
-    // screen in the product. That ground was never asserted here, which is
-    // how tenant B's active tab reached 4.42:1 in dark mode and stayed there
-    // until P4's browser sweep measured it. Both themes: the failure was
-    // dark-only, and a light-only check would have said PASS.
-    // The dark block redefines the RAW palette only; the --c-* aliases are
-    // declared once, in :root. Concatenating dark first and light after gives
-    // `resolve` (first match wins) exactly the cascade the browser applies.
-    const DARK = [darkBlock(), lightBlock()].join(String.fromCharCode(10));
-    for (const [theme, block] of [['light', lightBlock()], ['dark', DARK]] as const) {
-      const muted = resolve('--c-surface', block);
-      assert.ok(muted, theme + ': --c-surface must resolve');
-      for (const t of ['--c-primary-text', '--c-link', '--c-ink-3']) {
-        const v = resolve(t, block);
-        assert.ok(v, theme + ': ' + t + ' must resolve');
-        const r = contrast(v, muted);
-        assert.ok(r >= 4.5,
-          theme + ': ' + t + ' (' + v + ') on ' + muted + ' is ' + r.toFixed(2) + ':1');
-      }
-    }
+  test('KNOWN SHORTFALL — white on the design accent is recorded, not ignored', () => {
+    // The primary button. Pinned so a darker accent is a measurable win and a
+    // lighter one is a failure — see the list above.
+    const r = contrast('#ffffff', resolve('--accent')!);
+    assert.ok(r >= 4.19, `white on --accent is ${r.toFixed(2)}:1, worse than the pinned 4.20`);
+    assert.ok(r < 4.5, 'if this now passes, remove the primary-button note from the known shortfalls');
   });
 
-  test("branding.ts's surface literals still match this stylesheet (P4)", () => {
-    // brandingCssVars derives a TENANT's brand text against these two hexes,
-    // so a school with a pale crest gets a readable active tab. That module is
-    // framework-free and cannot read app.css, so the two copies are compared
-    // here rather than trusted to stay in step.
-    for (const [theme, block, literal] of [
-      ['light', lightBlock(), LIGHT_SURFACE],
-      ['dark', [darkBlock(), lightBlock()].join(String.fromCharCode(10)), DARK_SURFACE],
-    ] as const) {
-      const muted = resolve('--c-surface', block);
-      assert.ok(muted, theme + ': --c-surface must resolve');
-      assert.equal(muted.toLowerCase(), literal.toLowerCase(),
-        theme + ': branding.ts says ' + literal + ', app.css says ' + muted);
-    }
-  });
-
-  test('the brand fill carries white label text at AA', () => {
-    const primary = resolve('--c-primary', light);
-    assert.ok(primary);
-    const r = contrast(WHITE, primary);
-    assert.ok(r >= 4.5, `white on --c-primary (${primary}) is ${r.toFixed(2)}:1`);
-    // The correction that motivated the whole palette: the previous red was
-    // 4.23:1 here and shipped anyway.
-    assert.ok(r > 4.23, 'must beat the pre-P0 red it replaced');
+  test("branding.ts's recessed-ground literal still matches this stylesheet", () => {
+    // brandingCssVars derives a SCHOOL's brand text against this hex, so a pale
+    // crest still gets a readable active tab. That module cannot read app.css,
+    // so the two copies are compared here rather than trusted to stay in step.
+    const inset = resolve('--inset');
+    assert.ok(inset);
+    assert.equal(inset.toLowerCase(), LIGHT_SURFACE.toLowerCase(),
+      `branding.ts says ${LIGHT_SURFACE}, app.css --inset is ${inset}`);
+    // and the carried --c-surface resolves to that same ground
+    assert.equal(resolve('--c-surface')?.toLowerCase(), inset.toLowerCase());
   });
 });
 
-describe('P0 — the geometry that was already canonical stays untouched', () => {
-  test('radius, tap target and spacing keep the values Ata Ekta already shared', () => {
-    const light = lightBlock();
-    assert.match(light, /--radius-sm:\s*8px/);
-    assert.match(light, /--radius-md:\s*12px/);
-    assert.match(light, /--radius-lg:\s*16px/);
-    assert.match(light, /--tap-min:\s*48px/);
-    assert.match(light, /--space-4:\s*16px/);
+describe('§4 — geometry and motion', () => {
+  test('corners on the four-step scale', () => {
+    assert.match(ROOT_TOKENS, /--r-sm:\s*8px/);
+    assert.match(ROOT_TOKENS, /--r-md:\s*12px/);
+    assert.match(ROOT_TOKENS, /--r-lg:\s*18px/);
+    assert.match(ROOT_TOKENS, /--r-pill:\s*999px/);
   });
 
-  test('the Bangla type floor survived the semantic mapping', () => {
-    // Ata Ekta's canonical body is 14px. This ladder's is 16px, deliberately:
-    // Bangla conjuncts lose legibility before Latin does at the same optical
-    // size. Adopting the canonical SIZES would have shrunk every screen.
-    const light = lightBlock();
-    assert.match(light, /--text-base:\s*16px/, 'Bangla body floor');
-    assert.match(light, /--text-2xs:\s*13px/, 'Bangla-safe caption floor');
-    assert.match(light, /--text-body:\s*var\(--text-base\)/, 'semantic name maps onto it');
+  test('the tap target and the content cap', () => {
+    assert.match(ROOT_TOKENS, /--tap-min:\s*44px/);
+    assert.match(ROOT_TOKENS, /--content-max:\s*1200px/);
+  });
+
+  test('three durations and the two curves', () => {
+    assert.match(ROOT_TOKENS, /--dur-1:\s*120ms/);
+    assert.match(ROOT_TOKENS, /--dur-2:\s*180ms/);
+    assert.match(ROOT_TOKENS, /--dur-3:\s*280ms/);
+    assert.match(ROOT_TOKENS, /--ease:\s*cubic-bezier\(\.22,\s*\.61,\s*\.36,\s*1\)/);
+    assert.match(ROOT_TOKENS, /--ease-spring:\s*cubic-bezier\(\.34,\s*1\.26,\s*\.64,\s*1\)/);
+  });
+
+  test('reduced motion still collapses every duration — the sheet says do not remove it', () => {
+    assert.match(CSS, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
+  });
+});
+
+describe('§2 — type', () => {
+  test('every number has its own face', () => {
+    assert.match(ROOT_TOKENS, /--font-num:\s*"Anek Bangla"/);
+    assert.match(CSS, /\.n\s*\{[^}]*font-family:\s*var\(--font-num\)/);
+  });
+
+  test('the design body size — mobile body text never below 15px', () => {
+    assert.match(ROOT_TOKENS, /--text-body:\s*15px/);
   });
 });
 
 /**
  * B-108 §16 — Bangla digits do not render in Hind Siliguri.
  *
- * The defect this guards was visible and shipped: Hind Siliguri's ১ is close
- * enough to ৮ at UI sizes that "১০টি" reads as "৮০টি", "১০:৪৫" as "৮০:৪৫" and
- * "১২,৫০০.৭৫" as "৮২,৫০০.৭৫" — a mark, a time and a fee, each wrong by a
- * digit. `--font-bn-num` was written for exactly that, with the reason in a
- * comment beside it, and `var(--font-bn-num)` appeared in this stylesheet
- * ZERO times.
+ * Hind Siliguri's ১ is close enough to ৮ at UI sizes that "১০টি" reads as
+ * "৮০টি", "১০:৪৫" as "৮০:৪৫" and "১২,৫০০.৭৫" as "৮২,৫০০.৭৫" — a mark, a time and
+ * a fee, each wrong by a digit. Digits arrive inside sentences, not as
+ * elements, so the split has to be per character: a `unicode-range` face over
+ * U+09E6–U+09EF only.
  *
- * It could not have been fixed by using the token either: digits arrive
- * inside sentences, not as elements, so the split has to be per character.
- * Hence a `unicode-range` face over U+09E6–U+09EF only.
- *
- * These read the shipped CSS. A font cannot be measured in jsdom, so what is
- * asserted here is that the treatment stays WIRED; the rendering itself was
- * verified in a real browser (PHASE_LOG B-108: digits 186.76 → 218.41 px,
- * letters 101.67 → 101.67 px, so the digits moved face and the letters did
- * not).
+ * The Ata Ekta sheet's `--font-bn` does not name that face, and routes numbers
+ * through `.n` onto Anek Bangla instead. `.n` cannot reach a digit mid-sentence,
+ * so installing the sheet left the face defined and referenced nowhere — the
+ * exact failure B-108 was filed for. app.css names it first again, on purpose.
  */
 describe('B-108 §16 — the Bangla numeral face', () => {
   const face = (() => {
@@ -325,39 +311,46 @@ describe('B-108 §16 — the Bangla numeral face', () => {
 
   test('THE ONE THAT MATTERS — digits are covered, and only digits', () => {
     assert.ok(face, 'the numeral @font-face is gone');
-    // U+09E6–U+09EF is ০ through ৯ and nothing else. Widening it would drag
-    // Bangla letters onto the numeric face and undo half the design.
     assert.match(face, /unicode-range:\s*U\+09E6-09EF/i);
     assert.doesNotMatch(face, /U\+0980-09FF/i, 'that would be the whole script');
   });
 
-  test('it is reachable — named first, in every stack that carries text', () => {
-    // The token it replaces failed by being defined and never referenced.
-    for (const token of ['--font-body', '--font-bn', '--font-heading']) {
-      const line = CSS.split('\n').find((l) => l.trim().startsWith(`${token}:`)) ?? '';
-      assert.match(line, /ShikhonBnNum/, `${token} does not reach the numeral face`);
-      assert.ok(line.indexOf('ShikhonBnNum') < line.indexOf('Hind Siliguri'),
-        `${token} must name it BEFORE Hind Siliguri, or Hind Siliguri keeps the digits`);
+  test('THE ONE THAT MATTERS — it is reachable: the text stack names it BEFORE Hind Siliguri', () => {
+    // The token that preceded this face failed by being defined and never
+    // referenced. Checked against the stack actually in effect.
+    const m = /--font-bn:\s*([^;]+);/.exec(ROOT_TOKENS);
+    assert.ok(m, '--font-bn must be defined');
+    const stack = m[1];
+    assert.match(stack, /ShikhonBnNum/, '--font-bn does not reach the numeral face');
+    assert.ok(stack.indexOf('ShikhonBnNum') < stack.indexOf('Hind Siliguri'),
+      'ShikhonBnNum must come before Hind Siliguri, or Hind Siliguri keeps the digits');
+  });
+
+  test('every carried text stack that is still in use reaches it through --font-bn', () => {
+    // Checked only for the carried families a rule still reads; the alias layer
+    // defines a name only when something references it.
+    const inUse = ['--font-body', '--font-heading']
+      .filter((t) => new RegExp(`var\\(${t}\\)`).test(CSS));
+    assert.ok(inUse.length > 0, 'expected at least one carried text stack to be in use');
+    for (const t of inUse) {
+      const m = new RegExp(`${t}:\\s*([^;]+);`).exec(ROOT_TOKENS);
+      assert.ok(m, `${t} is used by a carried rule but never defined`);
+      assert.match(m[1], /var\(--font-bn\)|ShikhonBnNum/, `${t} does not reach the numeral face`);
     }
   });
 
   test('Bangla letters still belong to Hind Siliguri', () => {
-    const bn = CSS.split('\n').find((l) => l.trim().startsWith('--font-bn:')) ?? '';
-    assert.match(bn, /'Hind Siliguri'/, 'the letter face must remain');
+    const m = /--font-bn:\s*([^;]+);/.exec(ROOT_TOKENS)!;
+    assert.match(m[1], /Hind Siliguri/, 'the letter face must remain');
   });
 
   test('every platform is named, not just the target device', () => {
-    // Measured, not assumed: `local('Noto Sans Bengali')` does not match on
-    // Windows at all — what a Windows browser falls back to is Nirmala UI. A
-    // Noto-only list would have fixed Android and left every desk unfixed.
     for (const family of ['Noto Sans Bengali', 'Nirmala UI', 'Kohinoor Bangla']) {
       assert.ok(face.includes(`local('${family}')`), `${family} is not named`);
     }
   });
 
   test('it downloads nothing', () => {
-    // The header of app.css rules out self-hosted webfonts after one 404'd
-    // and broke the service-worker install outright.
     assert.doesNotMatch(face, /url\(/, 'a numeral face must not fetch anything');
   });
 });
