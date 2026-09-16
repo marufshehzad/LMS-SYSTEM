@@ -329,12 +329,25 @@ describe('audit viewer', () => {
     assert.doesNotMatch(text(), /ops\.guardian\.permissions(?![^<]*option)/);
   });
 
+  test('a code the fixture never used still reads as Bangla', async () => {
+    mount(AUDIT([ENTRY({
+      action: 'ops.staff_attendance.mark', entityType: 'teacher_attendance',
+      before: { status: 'present' }, after: { status: 'absent' },
+    })]));
+    await settle();
+    assert.match(text(), /শিক্ষক হাজিরা/);
+    assert.doesNotMatch(text(), /ops\.staff_attendance\.mark/);
+    assert.doesNotMatch(text(), /teacher_attendance/);
+  });
+
   test('THE ONE THAT MATTERS — the diff shows only what changed', async () => {
     mount(AUDIT([ENTRY()]));
     await settle();
-    root().querySelector('.notice-head')!.dispatchEvent(new dom.window.Event('click'));
+    root().querySelector('.audit-head')!.dispatchEvent(new dom.window.Event('click'));
     await settle();
-    const table = root().querySelector('.data-table')!;
+    // The diff is the shared dataTable now; `.ui-data` is its wrapper, so this
+    // still covers BOTH the table and the phone list it renders.
+    const table = root().querySelector('.audit-diff .ui-data')!;
     assert.match(table.textContent ?? '', /ফি পরিশোধের অনুমতি/);
     assert.match(table.textContent ?? '', /হ্যাঁ → না/);
     // receivesSms and phone are identical on both sides; burying the one
@@ -348,7 +361,7 @@ describe('audit viewer', () => {
       before: null, after: { name: 'G', capacity: 55 },
     })]));
     await settle();
-    root().querySelector('.notice-head')!.dispatchEvent(new dom.window.Event('click'));
+    root().querySelector('.audit-head')!.dispatchEvent(new dom.window.Event('click'));
     await settle();
     assert.match(text(), /নাম/);
     assert.doesNotMatch(text(), /কোনো মান পরিবর্তিত হয়নি/);
@@ -357,11 +370,13 @@ describe('audit viewer', () => {
   test('the filters are built from what this school has done', async () => {
     mount(AUDIT([ENTRY()]));
     await settle();
-    const selects = [...root().querySelectorAll('.card-form select')] as HTMLSelectElement[];
+    const selects = [...root().querySelectorAll('.audit-filters select')] as HTMLSelectElement[];
     assert.equal(selects.length, 3, 'action, entity, actor');
     // "সব" plus the single real value, not a list of every action in the code.
-    assert.equal(selects[0].options.length, 2);
-    assert.match(selects[0].options[1].textContent ?? '', /অভিভাবকের অনুমতি পরিবর্তন/);
+    // Addressed by name: the shared filterBar draws the actor select first.
+    const action = root().querySelector('.audit-filters select[name="action"]') as HTMLSelectElement;
+    assert.equal(action.options.length, 2);
+    assert.match(action.options[1].textContent ?? '', /অভিভাবকের অনুমতি পরিবর্তন/);
   });
 
   test('an empty log explains what would fill it', async () => {
@@ -374,7 +389,7 @@ describe('audit viewer', () => {
     const auth = fakeAuth({ '/api/v1/ops/audit': AUDIT([]) });
     new AuditView({ root: root(), doc: doc(), auth: auth as never });
     await settle();
-    const sel = root().querySelector('.card-form select') as HTMLSelectElement;
+    const sel = root().querySelector('.audit-filters select[name="action"]') as HTMLSelectElement;
     sel.value = 'ops.guardian.permissions';
     fire(sel, 'change');
     await settle(); await settle();
@@ -392,7 +407,7 @@ describe('audit viewer', () => {
     assert.match(text(), new RegExp(permissionMessage('কার্যবিবরণী')));
     assert.match(text(), /প্রধান শিক্ষক, প্রতিষ্ঠান মালিক ও আইটি অ্যাডমিন/);
     assert.doesNotMatch(text(), /এখনো কোনো পরিবর্তন রেকর্ড হয়নি/);
-    assert.equal(root().querySelectorAll('.card-form').length, 0,
+    assert.equal(root().querySelectorAll('.audit-filters').length, 0,
       'filters for a list you may not see are noise');
   });
 
@@ -410,7 +425,7 @@ describe('audit viewer', () => {
       before: { phone: '•••11' }, after: { phone: '•••47' },
     })]));
     await settle();
-    root().querySelector('.notice-head')!.dispatchEvent(new dom.window.Event('click'));
+    root().querySelector('.audit-head')!.dispatchEvent(new dom.window.Event('click'));
     await settle();
     // "changed to a number ending 47" is what makes the entry useful.
     assert.match(text(), /•••11 → •••47/);

@@ -265,7 +265,7 @@ describe('relativeDayBn', () => {
     const ago = (d: number) => new Date(now - d * 86_400_000).toISOString();
     assert.equal(relativeDayBn(ago(0), now), 'আজ');
     assert.equal(relativeDayBn(ago(1), now), 'গতকাল');
-    assert.equal(relativeDayBn(ago(3), now), '3 দিন আগে');
+    assert.equal(relativeDayBn(ago(3), now), '৩ দিন আগে');
     assert.doesNotMatch(relativeDayBn(ago(30), now), /দিন আগে/);
   });
 
@@ -359,7 +359,7 @@ describe('composer', () => {
     await settle();
 
     // Emergency turns SMS on by default — that is where the cost matters most.
-    const cat = root().querySelector<HTMLSelectElement>('select.login-input')!;
+    const cat = root().querySelector<HTMLSelectElement>('select[name="category"]')!;
     cat.value = 'emergency';
     cat.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
     await settle();

@@ -158,7 +158,8 @@ describe('B-34 — the audit viewer', () => {
     new AuditView({ root: root(), doc: dom.window.document, auth: auth(ENTRIES) } as never);
     await settle();
     // Open the entry, because the uuid used to live inside the expanded diff.
-    const head = root().querySelector('.notice-head') as HTMLElement | null;
+    const head = root().querySelector('.audit-head') as HTMLElement | null;
+    assert.ok(head, 'the entry must actually open, or this checks a closed row');
     head?.click();
     await settle();
     assert.doesNotMatch(text(), /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-/,
@@ -173,7 +174,7 @@ describe('B-34 — the audit viewer', () => {
     root().textContent = '';
     new AuditView({ root: root(), doc: dom.window.document, auth: auth(ENTRIES) } as never);
     await settle();
-    (root().querySelector('.notice-head') as HTMLElement | null)?.click();
+    (root().querySelector('.audit-head') as HTMLElement | null)?.click();
     await settle();
     assert.match(text(), /ফি পরিশোধের অনুমতি/, 'the field that changed, named in Bangla');
     assert.doesNotMatch(text(), /এসএমএস\s*:/,
@@ -186,7 +187,7 @@ describe('B-34 — the audit viewer', () => {
     await settle();
     assert.match(text(), new RegExp(permissionMessage('কার্যবিবরণী')));
     assert.match(text(), /প্রধান শিক্ষক, প্রতিষ্ঠান মালিক ও আইটি অ্যাডমিন/);
-    assert.equal(root().querySelectorAll('.notice-card').length, 0,
+    assert.equal(root().querySelectorAll('.audit-row').length, 0,
       'an empty list under a refusal claims "there is nothing here", which is untrue');
     assert.doesNotMatch(text(), /আবার চেষ্টা/, 'no retry can help');
   });

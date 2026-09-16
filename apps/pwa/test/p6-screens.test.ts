@@ -61,7 +61,7 @@ function auth(role: string, routes: Record<string, { status: number; body?: unkn
 describe('P6 — every screen has a page header', () => {
   // Three screens had none at all: `more`, `sikhok`, `shikho`. On `more` that
   // is the one screen every role reaches.
-  test('আরও is a header and a card grid, not 36 full-width strips', () => {
+  test('আরও is a header and one row list (01 Shell ঘ), not 36 full-width strips', () => {
     root().textContent = '';
     new MoreView({
       root: root(), doc: dom.window.document,
@@ -70,9 +70,14 @@ describe('P6 — every screen has a page header', () => {
       })),
     });
     assert.ok(root().querySelector('.page-header'), 'it had none');
-    assert.ok(root().querySelector('.ui-card-grid'), 'a grid at desktop, one column on a phone');
-    // Every destination is a real card, and the theme control is its own.
-    assert.equal(root().querySelectorAll('.ui-card-grid .ui-card').length, 6);
+    assert.ok(root().querySelector('ul.ui-list.more-list[aria-label]'),
+              'one named row list, as 01 Shell ঘ draws it');
+    // Every destination is rendered, and every one is a real control.
+    assert.equal(root().querySelectorAll('.more-list .ui-list-item').length, 6);
+    for (const b of root().querySelectorAll('.more-list .ui-list-hit')) {
+      assert.equal(b.localName, 'button', 'every destination is a real control');
+    }
+    assert.equal(root().querySelectorAll('.ui-card').length, 0);
     assert.equal(root().querySelectorAll('.more-item').length, 0);
   });
 

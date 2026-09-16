@@ -484,12 +484,16 @@ async function main() {
 
   function startShell(): Shell {
     const transport = new FetchTransport({ auth });
+    // Set once the shell exists (below): the engine is built first because the
+    // routes need it, and the banner it reports to is built from those routes.
+    let reportQueue: ((st: { pending: number; inflight: number }) => void) | null = null;
     const engine = new SyncEngine({
       deviceId: deviceId('d'),
       tenantId: auth.tenantId || 'demo',
       actorId: auth.userId,
       store,
       transport,
+      onProgress: (st) => reportQueue?.(st),
     });
     navigator.serviceWorker?.addEventListener('message', (e) => {
       if ((e.data as { type?: string })?.type === 'outbox-flush') void engine.flush();
@@ -687,12 +691,12 @@ async function main() {
               { path: 'users', glyph: 'users', titleBn: 'ব্যবহারকারী', subtitleBn: 'শিক্ষক ও কর্মীর অ্যাকাউন্ট, নিষ্ক্রিয়করণ' },
               { path: 'rollover', glyph: 'repeat', titleBn: 'বার্ষিক উন্নয়ন', subtitleBn: 'পরবর্তী শিক্ষাবর্ষে উন্নীতকরণ' },
               { path: 'adminsettings', glyph: 'settings', titleBn: 'সেটিংস', subtitleBn: 'নোটিশ এসএমএসের দৈর্ঘ্য ও খরচ' },
-              { path: 'documents', glyph: 'book', titleBn: 'নথি ও ছাপা', subtitleBn: 'প্রতিষ্ঠানের লোগো, সিল ও স্বাক্ষরসহ ছাপার নথি' },
+              { path: 'documents', glyph: 'book', titleBn: 'নথি ও ছাপা', subtitleBn: 'রসিদ, প্রগতি পত্র, প্রবেশপত্র' },
               { path: 'students', glyph: 'search', titleBn: 'শিক্ষার্থী খুঁজুন', subtitleBn: 'স্থায়ী আইডি বা নাম — বছরওয়ারি পূর্ণ ইতিহাসসহ' },
-              { path: 'calendar', glyph: 'calendar', titleBn: 'শিক্ষাপঞ্জি', subtitleBn: 'ছুটি, পরীক্ষা ও অনুষ্ঠান — সব ভূমিকার জন্য' },
+              { path: 'calendar', glyph: 'calendar', titleBn: 'শিক্ষাপঞ্জি', subtitleBn: 'ছুটি, পরীক্ষা ও অনুষ্ঠান' },
               { path: 'audit', glyph: 'lock', titleBn: 'কার্যবিবরণী', subtitleBn: 'কে কখন কী পরিবর্তন করেছেন — শুধু পড়ার জন্য' },
-              { path: 'export', glyph: 'download', titleBn: 'তথ্য রপ্তানি', subtitleBn: 'শিক্ষার্থীর তালিকা CSV ফাইলে — এক্সেলে খোলে' },
-              { path: 'security', glyph: 'lock', titleBn: 'নিরাপত্তা', subtitleBn: 'আপনার অ্যাকাউন্ট কোন কোন ডিভাইসে খোলা আছে' },
+              { path: 'export', glyph: 'download', titleBn: 'তথ্য রপ্তানি', subtitleBn: 'দশটি তালিকা CSV ফাইলে — এক্সেলে খোলে' },
+              { path: 'security', glyph: 'lock', titleBn: 'নিরাপত্তা', subtitleBn: 'কোন কোন যন্ত্রে খোলা আছে' },
               { path: 'branding', glyph: 'star', titleBn: 'প্রতিষ্ঠানের পরিচয়', subtitleBn: 'নাম, লোগো, রং ও ছাপা কাগজের শীর্ষভাগ' },
               { path: 'system', glyph: 'settings', titleBn: 'সিস্টেম ও ইন্টিগ্রেশন', subtitleBn: 'ওয়ার্কার · কিল-সুইচ · অদৃশ্য গ্যারান্টি' },
             ],
@@ -1245,7 +1249,7 @@ async function main() {
     ];
 
     const brand = cachedBranding(brandingKey);
-    return new Shell({
+    const built = new Shell({
       root,
       doc: document,
       routes,
@@ -1290,6 +1294,14 @@ async function main() {
           }
         : undefined,
     });
+    // IMPLEMENTATION §7: the offline state says how much is waiting. The shell
+    // holds no queue, so the outbox reports its own size — once on boot, and
+    // again on every change the engine emits (a queued op, a drained one).
+    // `pending + inflight` is what has not landed on the server yet; conflicts
+    // and failures are not "waiting", and the outbox screen owns those.
+    reportQueue = (st) => { built.setPending(st.pending + st.inflight); };
+    void engine.state().then(reportQueue).catch(() => { /* no store yet: the figure stays hidden */ });
+    return built;
   }
 
   let shell: Shell | null = null;

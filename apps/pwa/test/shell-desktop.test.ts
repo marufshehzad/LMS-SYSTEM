@@ -400,6 +400,179 @@ describe('P1 — the icon rail', () => {
   });
 });
 
+describe('Ata Ekta — the chrome as 01 Shell draws it', () => {
+  test('the breadcrumb separates section and page with a slash, hidden from readers', () => {
+    mount({ role: 'class_teacher' });
+    dom.window.location.hash = '#/attendance';
+    dom.window.dispatchEvent(new dom.window.HashChangeEvent('hashchange'));
+    const seps = [...root().querySelectorAll('.shell-crumb-sep')];
+    assert.equal(seps.length, 1);
+    assert.equal(seps[0].textContent, '/');
+    assert.equal(seps[0].getAttribute('aria-hidden'), 'true',
+      'a reader hears "দৈনন্দিন, হাজিরা", not "slash"');
+  });
+
+  test('THE ONE THAT MATTERS — the নোটিশ row and the bell show the same unread count', () => {
+    // Two badges for one number. If only one were driven, the sidebar would
+    // say "৩" while the bell said nothing — or the reverse.
+    const shell = mount({ role: 'class_teacher' });
+    const row = root().querySelector('.dnav[data-path="inbox"]') as HTMLElement;
+    const count = row.querySelector('.dnav-count') as HTMLElement;
+    assert.ok(count, 'the নোটিশ row carries a count');
+    assert.equal(count.hidden, true, 'nothing reported yet, nothing shown');
+    assert.ok(count.classList.contains('n'), 'a count is a number (R6)');
+    assert.equal(count.getAttribute('aria-hidden'), 'true');
+
+    shell.setUnread(3);
+    assert.equal(count.hidden, false);
+    assert.equal(count.textContent, '৩');
+    assert.match(row.getAttribute('aria-label') ?? '', /৩টি পড়া হয়নি/,
+      'the row’s name carries the count in Bangla digits, since the badge is hidden from readers');
+
+    shell.setUnread(42);
+    assert.equal(count.textContent, '৯+');
+
+    shell.setUnread(0);
+    assert.equal(count.hidden, true);
+    assert.equal(row.getAttribute('aria-label'), null, 'at zero the row is just "নোটিশ" again');
+    // Only the inbox row carries one.
+    assert.equal(root().querySelectorAll('.dnav-count').length, 1);
+  });
+
+  test('the bell badge is set in the numeral face', () => {
+    mount({ role: 'guardian' });
+    assert.ok(root().querySelector('.shell-bell-badge')?.classList.contains('n'));
+  });
+
+  test('the unlabelled tail group gets a blank label row that readers skip', () => {
+    mount({ role: 'class_teacher' });
+    const groups = [...root().querySelectorAll('.d-nav-group')];
+    const tail = groups[groups.length - 1];
+    assert.equal((tail.querySelector('.dnav') as HTMLElement).dataset.path, 'more');
+    const label = tail.firstElementChild as HTMLElement;
+    assert.ok(label.classList.contains('d-nav-label'));
+    assert.equal(label.textContent?.trim(), '');
+    assert.equal(label.getAttribute('aria-hidden'), 'true');
+    // Named groups keep real, readable labels.
+    for (const g of groups.slice(0, -1)) {
+      const l = g.querySelector('.d-nav-label');
+      assert.ok((l?.textContent ?? '').trim(), 'a named group lost its label');
+      assert.equal(l?.getAttribute('aria-hidden'), null);
+    }
+  });
+
+  test('the sidebar account row ends in a decorative log-out glyph; the phone avatar does not', () => {
+    mount({ role: 'principal' });
+    const glyph = root().querySelector('.d-profile .d-profile-glyph');
+    assert.ok(glyph, 'the §খ foot draws a log-out glyph');
+    assert.equal(glyph.getAttribute('aria-hidden'), 'true');
+    assert.equal(root().querySelector('.shell-avatar .d-profile-glyph'), null);
+    // It still opens the menu rather than signing out on one click.
+    assert.equal(root().querySelector('.d-profile')?.getAttribute('aria-haspopup'), 'menu');
+  });
+
+  test('the offline banner speaks the design copy and states the queue', () => {
+    const shell = mount({ role: 'class_teacher' });
+    const banner = root().querySelector('.offline-banner') as HTMLElement;
+    assert.equal(banner.getAttribute('role'), 'status');
+    assert.match(banner.textContent ?? '', /ইন্টারনেট নেই — কাজ চালিয়ে যান, সব এই যন্ত্রে জমা থাকছে/);
+    const pending = banner.querySelector('.offline-pending') as HTMLElement;
+    assert.equal(pending.hidden, true, 'no count reported, no figure');
+    shell.setPending(3);
+    assert.equal(pending.hidden, false);
+    assert.equal(pending.textContent, '৩টি অপেক্ষমাণ');
+    assert.equal(pending.querySelector('.n')?.textContent, '৩', 'the figure sits in the numeral face');
+    shell.setPending(0);
+    assert.equal(pending.hidden, true);
+  });
+
+  test('a number in a school’s name is set in the numeral face, and the name is unchanged', () => {
+    const shell = mount({ role: 'student' });
+    shell.setInstitution({ name: '১ নং সরকারি প্রাথমিক বিদ্যালয়' });
+    for (const el of root().querySelectorAll('.shell-org-name')) {
+      assert.equal(el.textContent, '১ নং সরকারি প্রাথমিক বিদ্যালয়');
+      assert.equal(el.querySelector('.n')?.textContent, '১');
+    }
+    for (const mark of root().querySelectorAll('.shell-org-mark')) {
+      assert.ok(mark.classList.contains('n'), 'a one-digit monogram is a number too');
+    }
+    shell.setInstitution({ name: 'ঢাকা কলেজ' });
+    for (const mark of root().querySelectorAll('.shell-org-mark')) {
+      assert.ok(!mark.classList.contains('n'), 'a letter monogram keeps the text face');
+    }
+  });
+});
+
+describe('Ata Ekta — on a phone the account menu is a sheet (13 Responsive ০৭)', () => {
+  /** Pretend the viewport is narrower than the one breakpoint. */
+  const atPhoneWidth = (body: () => void) => {
+    const g = globalThis as Record<string, unknown>;
+    const desktop = g.matchMedia;
+    // Only the sheet's own query matches. The rail's forcing query
+    // ((min-width:1024px) and (max-width:1279px)) must still read false, or
+    // this would silently be testing a different layout.
+    g.matchMedia = (q: string) => ({
+      matches: /max-width:\s*1023/.test(q), media: q,
+      addEventListener() {}, removeEventListener() {},
+    });
+    try { body(); } finally { g.matchMedia = desktop; }
+  };
+
+  test('THE ONE THAT MATTERS — the tap that closes the sheet does nothing else', () => {
+    // Below 1024 the menu is a full-width sheet over a dimmed page, and
+    // tapping the dim area is how a sheet is dismissed. The dimming is
+    // painted as a box-shadow, which no finger can land on, so the tap
+    // continues to whatever it covered — a bottom tab, which navigates.
+    // Closing a sheet would move the person to a page they never asked for.
+    atPhoneWidth(() => {
+      const shell = mount({ role: 'class_teacher' });
+      (root().querySelector('.shell-avatar') as HTMLButtonElement).click();
+      assert.ok(root().querySelector('.shell-menu'), 'the sheet should open');
+
+      const tab = root().querySelector('.shell-tab[data-path="roster"]') as HTMLElement;
+      const before = dom.window.location.hash;
+      const tap = new dom.window.MouseEvent('click', { bubbles: true, cancelable: true });
+      tab.dispatchEvent(tap);
+
+      assert.equal(root().querySelector('.shell-menu'), null,
+        'the tap must still dismiss the sheet');
+      assert.equal(tap.defaultPrevented, true, 'and must not also act on the target');
+      assert.equal(dom.window.location.hash, before,
+        'the tab under the scrim must not navigate');
+      shell.destroy();
+    });
+  });
+
+  test('Escape still closes it and still returns focus at phone width', () => {
+    // The dismissal that a keyboard has. Absorbing the tap must not cost it.
+    atPhoneWidth(() => {
+      const shell = mount({ role: 'class_teacher' });
+      const btn = root().querySelector('.shell-avatar') as HTMLButtonElement;
+      btn.click();
+      doc().dispatchEvent(
+        new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      assert.equal(root().querySelector('.shell-menu'), null);
+      assert.equal(doc().activeElement, btn);
+      shell.destroy();
+    });
+  });
+
+  test('on desktop the click outside is NOT swallowed', () => {
+    // The desktop menu is a dropdown with no scrim. It never claimed the rest
+    // of the page, so taking the click away from what was under it would be a
+    // behaviour change of its own.
+    const shell = mount({ role: 'class_teacher' });
+    (root().querySelector('.shell-avatar') as HTMLButtonElement).click();
+    assert.ok(root().querySelector('.shell-menu'));
+    const row = root().querySelector('.dnav[data-path="roster"]') as HTMLElement;
+    const click = new dom.window.MouseEvent('click', { bubbles: true, cancelable: true });
+    row.dispatchEvent(click);
+    assert.equal(root().querySelector('.shell-menu'), null, 'it still closes');
+    assert.equal(click.defaultPrevented, false, 'and the row under it still works');
+    shell.destroy();
+  });
+});
+
 describe('P1 — nothing in the chrome is nameless', () => {
   test('every control has an accessible name', () => {
     // The bottom tabs already needed explicit aria-labels: their child spans
@@ -411,5 +584,20 @@ describe('P1 — nothing in the chrome is nameless', () => {
                         || (el.textContent ?? '').trim() || el.getAttribute('title')))
       .map((el) => el.className);
     assert.deepEqual(nameless, []);
+  });
+});
+
+describe('Ata Ekta §7 — the queue figure has a source, not just a slot', () => {
+  test('app.ts reports the outbox size to the banner, on boot and on change', async () => {
+    // setPending() is presentation. Without a caller it would sit at zero for
+    // ever and the offline banner would say nothing about the work waiting —
+    // which is the one thing §7 asks the offline state to say.
+    const { readFile } = await import('node:fs/promises');
+    const src = await readFile(new URL('../src/app.ts', import.meta.url), 'utf8');
+    assert.match(src, /onProgress: \(st\) => reportQueue\?\.\(st\)/,
+      'the engine emits every change into the reporter');
+    assert.match(src, /reportQueue = \(st\) => \{ built\.setPending\(st\.pending \+ st\.inflight\); \}/,
+      'and the reporter is the shell banner');
+    assert.match(src, /engine\.state\(\)\.then\(reportQueue\)/, 'with the boot value too');
   });
 });

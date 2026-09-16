@@ -378,12 +378,31 @@ describe('P5 — system health speaks in states a person reads', () => {
     assert.equal(root().querySelectorAll('.ui-facts-val').length, 4);
   });
 
-  test('a desktop gets a table', async () => {
+  test('every service is a tile that says its state in words', async () => {
     root().textContent = '';
     new SystemView({ root: root(), doc: dom.window.document, auth: auth('it_admin', {}) } as never);
     await settle();
-    const heads = [...root().querySelectorAll('thead th')].map((h) => h.textContent);
-    assert.deepEqual(heads, ['সেবা', 'কী করে', 'অবস্থা', 'কারিগরি অবস্থান']);
+    // 08 Admin & IT §05 draws a two-column tile grid in place of the old
+    // 4-column table. Every service is still listed, and each one still
+    // carries all four things the columns used to: its name, what it does,
+    // its state AS A WORD beside the colour dot, and where it lives.
+    const tiles = [...root().querySelectorAll('.sys-grid > li.sys-tile')];
+    assert.equal(tiles.length, 12);
+    assert.equal(root().querySelectorAll('table').length, 0);
+    for (const t of tiles) {
+      assert.ok(t.querySelector('.sys-dot[data-tone][aria-hidden="true"]'));
+      assert.ok(t.querySelector('.sys-tile-title')?.textContent);
+      // "<state word> · <what it does>" — colour never carries meaning alone.
+      assert.match(t.querySelector('.sys-tile-detail')?.textContent ?? '',
+                   /^(চালু আছে|সবসময় চালু|ইচ্ছাকৃতভাবে বন্ধ|যাচাই করা যায়নি).* · .+/);
+      assert.ok(t.querySelector('.sys-tile-path')?.textContent);
+    }
+    // The old <caption>'s job: the collection still names itself.
+    assert.equal(root().querySelector('.sys-grid')?.getAttribute('aria-label'),
+                 'সেবা ও ইন্টিগ্রেশনের অবস্থা');
+    // The probes never answer here, so nothing may claim they did.
+    assert.doesNotMatch(text(), /সব স্বাভাবিক/,
+                        'no all-clear over rows that were never probed');
   });
 });
 

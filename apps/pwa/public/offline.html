@@ -3,27 +3,23 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#006A4E">
+  <meta name="theme-color" content="#f3f2f2">
   <!-- R-1: no platform name on a school's screen, and this page has no
        script to fetch branding with — so it stays generic rather than
        naming the wrong institution. -->
   <title>অফলাইন</title>
   <link rel="stylesheet" href="/app.css">
 </head>
-<body>
-  <main id="root" lang="bn" style="padding:24px;text-align:center;padding-top:64px">
-    <svg width="64" height="64" viewBox="0 0 24 24" fill="none" aria-hidden="true"
-         style="margin-bottom:16px;color:var(--c-ink-2)">
-      <path d="M1 1l22 22M16.72 11.06A10.94 10.94 0 0 1 19 12.55M5 12.55a10.94
-               10.94 0 0 1 5.17-2.39M10.71 5.05A16 16 0 0 1 22.56 9M1.42
-               9a15.91 15.91 0 0 1 4.7-2.88M8.53 16.11a6 6 0 0 1 6.95
-               0M12 20h.01" stroke="currentColor" stroke-width="2"
-            stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
-    <h1 style="font-size:20px;margin-bottom:8px">নেটওয়ার্ক নেই</h1>
-    <p style="color:var(--c-ink-2);margin:0">
-      সংযোগ ফিরে এলে হাজিরার তথ্য স্বয়ংক্রিয়ভাবে পাঠানো হবে।
-    </p>
+<body class="offline-page">
+  <main id="root" lang="bn" class="offline-page-main">
+    <!-- wifi-off: the markup of src/icon.ts 'wifi-off', pasted because this
+         page runs no script. Stroke 2, as 14 Components §09 draws it. -->
+    <svg class="offline-page-glyph" width="56" height="56" viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round"
+         aria-hidden="true" focusable="false"><line x1="1" y1="1" x2="23" y2="23"/><path d="M16.72 11.06A11 11 0 0 1 19 12.55"/><path d="M5 12.55a11 11 0 0 1 5.17-2.39"/><path d="M10.71 5.05A16 16 0 0 1 22.58 9"/><path d="M1.42 9a16 16 0 0 1 4.7-2.88"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
+    <h1 class="offline-page-title">নেটওয়ার্ক নেই</h1>
+    <p class="offline-page-text">সংযোগ ফিরে এলে হাজিরার তথ্য স্বয়ংক্রিয়ভাবে পাঠানো হবে।</p>
   </main>
 </body>
 </html>

@@ -34,11 +34,30 @@
  * reading of "do not invent fake health information": nothing here reports a
  * health it did not measure, and `builtIn` says so out loud by never being
  * probed.
+ *
+ * ── Ata Ekta (08 Admin & IT §05) ──────────────────────────────────────────
+ *
+ * The screen is drawn as a status board, not a table: a short title with one
+ * aggregate chip on the right, then a two-column grid of tiles separated by
+ * 1px hairlines. Each tile is a tone dot, the service name, and one line that
+ * starts with the state WORD — so the dot is never the only carrier of the
+ * state (§3). The design's six services and their live figures (sent today,
+ * devices registered, last backup) have no endpoint behind them; the tiles
+ * draw the same twelve rows and four probes this screen has always had.
+ *
+ * The header chip is derived, not fetched, and it is never an all-clear. The
+ * design's "সব স্বাভাবিক" would be a verdict over twelve rows of which eight
+ * are never probed, so it is not drawn. What the chip may say is only what the
+ * probes measured: after the first answer it counts the probed rows whose
+ * state is NOT confirmed — no answer at all, or a 503 whose body did not carry
+ * the kill switch's own error code (a load balancer's "Service Unavailable"
+ * is also a 503). When every probe was confirmed there is no chip.
  */
 import type { Auth } from './auth.ts';
 import {
-  pageHeader, card, dataTable, statusBadge, el, append,
+  pageHeader, card, statusBadge, STATUS, el, append, numText,
 } from './ui/index.ts';
+import { bnNum } from './view-states.ts';
 
 /** @see the header — the model is unchanged from `on/dark/invisible/unknown`. */
 type State = 'running' | 'builtIn' | 'offByDesign' | 'unchecked';
@@ -81,9 +100,41 @@ const STATE_MEANS: Record<State, string> = {
   unchecked: 'এই মুহূর্তে যাচাই করা যায়নি — সংযোগ না থাকলে এমন হয়।',
 };
 
+/**
+ * The rows the probe writes to, by title, in probe order (sikhok, shikho,
+ * scripts, ans-dispatch). Module scope so render() can tell which tiles are
+ * still waiting for their first answer.
+ */
+const PROBE_INDEX: Record<string, number> = {
+  'শিক্ষক সহায়ক AI (SikhokAI)': 0,
+  'শিখো টিউটর (ShikhoAI)': 1,
+  'উত্তরপত্র সংরক্ষণ': 2,
+  'ANS আউটবাউন্ড ডিসপ্যাচার': 3,
+};
+
+/**
+ * A probed row whose state the probe did not confirm. `unchecked` is no answer.
+ * `offByDesign` is confirmed only when the 503 body matched the endpoint's
+ * kill-switch code — probeOne() sets `detailBn` on exactly that branch and
+ * nowhere else; any other 503 reaches `offByDesign` without it. Rows that are
+ * never probed are out of scope: the chip makes no claim about them.
+ */
+function isUnconfirmed(r: FeatureRow): boolean {
+  if (PROBE_INDEX[r.titleBn] === undefined) return false;
+  if (r.state === 'unchecked') return true;
+  return r.state === 'offByDesign' && !r.detailBn;
+}
+
+/** The dot's tone, from the shared STATUS table — never a one-off colour. */
+function toneOf(s: State): string {
+  return STATUS[STATE_BADGE[s]]?.tone ?? 'neutral';
+}
+
 export class SystemView {
   private readonly o: SystemViewOptions;
   private rows: FeatureRow[] = [];
+  /** False until the first probe() answers. Render-only; no fetch reads it. */
+  private probed = false;
 
   constructor(options: SystemViewOptions) {
     this.o = options;
@@ -127,19 +178,14 @@ export class SystemView {
       this.probeOne('POST', '/api/v1/ans/dispatch', undefined),
     ]);
     // Order matches the rows above (sikhok, shikho, scripts, ans-dispatch).
-    const map: Record<string, number> = {
-      'শিক্ষক সহায়ক AI (SikhokAI)': 0,
-      'শিখো টিউটর (ShikhoAI)': 1,
-      'উত্তরপত্র সংরক্ষণ': 2,
-      'ANS আউটবাউন্ড ডিসপ্যাচার': 3,
-    };
     for (const row of this.rows) {
-      const idx = map[row.titleBn];
+      const idx = PROBE_INDEX[row.titleBn];
       if (idx === undefined) continue;
       const [, state, detail] = probes[idx];
       row.state = state;
       if (detail) row.detailBn = detail;
     }
+    this.probed = true;
     this.render();
   }
 
@@ -170,46 +216,87 @@ export class SystemView {
     const root = this.o.root;
     root.textContent = '';
 
-    root.append(pageHeader(d, {
-      title: 'সিস্টেম ও ইন্টিগ্রেশন',
-      subtitle: 'পটভূমিতে যা চলছে — কিল-সুইচ, ওয়ার্কার ও ডাটাবেস স্তরের গ্যারান্টি',
-    }));
+    // The header chip (the design's bar('সিস্টেম', [chip(…)])). Never an
+    // all-clear: most rows are never probed, so "সব স্বাভাবিক" would report a
+    // health this screen did not measure. It only counts probed rows whose
+    // state is not confirmed, and is held back until the first probe answers.
+    let chip: HTMLElement | null = null;
+    if (this.probed) {
+      const unconfirmed = this.rows.filter(isUnconfirmed).length;
+      if (unconfirmed > 0) {
+        chip = statusBadge(d, {
+          state: STATE_BADGE.unchecked, label: `${bnNum(unconfirmed)}টি সেবার অবস্থা নিশ্চিত নয়`,
+        });
+      }
+    }
+    root.append(pageHeader(d, { title: 'সিস্টেম', actions: chip ? [chip] : undefined }));
 
-    root.append(dataTable(d, {
-      caption: 'সেবা ও ইন্টিগ্রেশনের অবস্থা',
-      rows: this.rows,
-      rowKey: (r) => r.titleBn,
-      columns: [
-        { key: 'name', header: 'সেবা', mobile: 'title', cell: (r) => r.titleBn,
-          width: 'minmax(0, 1.6fr)' },
-        { key: 'what', header: 'কী করে', mobile: 'subtitle', cell: (r) => r.descBn,
-          width: 'minmax(0, 2fr)' },
-        { key: 'state', header: 'অবস্থা', mobile: 'status', width: '150px',
-          cell: (r) => statusBadge(d, {
-            state: STATE_BADGE[r.state], label: STATE_LABEL[r.state],
-          }) },
-        // Hidden on a phone: a repo path is for the person who is going to go
-        // and look at it, and that person is at a desk.
-        { key: 'where', header: 'কারিগরি অবস্থান', mobile: 'hidden',
-          cell: (r) => el(d, 'code', {
-            className: 'system-path',
-            text: r.detailBn ? `${r.path} — ${r.detailBn}` : r.path,
-          }),
-          width: 'minmax(0, 2fr)' },
-      ],
-    }));
+    // The tile board. A list, because it is one: twelve services, same shape.
+    // role="list" survives `list-style: none` in the readers that drop it.
+    const grid = el(d, 'ul', {
+      className: 'sys-grid',
+      attrs: { role: 'list', 'aria-label': 'সেবা ও ইন্টিগ্রেশনের অবস্থা' },
+    });
+    for (const r of this.rows) {
+      grid.append(this.tile(r));
+    }
+    root.append(grid);
 
-    // Every state, said in words. Without this the table has four badges and
-    // no way to learn that "ইচ্ছাকৃতভাবে বন্ধ" is not a fault.
+    // Every state, said in words — in the tiles' own dot-and-word vocabulary.
+    // Without this there is no way to learn that "ইচ্ছাকৃতভাবে বন্ধ" is not a
+    // fault.
     const dl = el(d, 'dl', { className: 'ui-facts' });
     for (const state of ['running', 'builtIn', 'offByDesign', 'unchecked'] as State[]) {
       append(dl,
-        el(d, 'dt', { className: 'ui-facts-key' },
-          statusBadge(d, { state: STATE_BADGE[state], label: STATE_LABEL[state] })),
-        el(d, 'dd', { className: 'ui-facts-val', text: STATE_MEANS[state] }));
+        el(d, 'dt', { className: 'ui-facts-key sys-legend-key' },
+          el(d, 'span', {
+            className: 'sys-dot', data: { tone: toneOf(state) }, attrs: { 'aria-hidden': 'true' },
+          }),
+          el(d, 'span', { text: STATE_LABEL[state] })),
+        el(d, 'dd', { className: 'ui-facts-val' }, ...numText(d, STATE_MEANS[state])));
     }
     root.append(card(d, {
-      title: 'অবস্থাগুলোর মানে', glyph: 'lock', headingLevel: 2,
+      title: 'অবস্থাগুলোর মানে', headingLevel: 2, className: 'sys-legend',
     }, dl));
+  }
+
+  /**
+   * One service: dot + name, then "<state word> · <what it does>", then where
+   * it lives. A probed row that has not had its first answer shows a shimmer
+   * in place of the state word — never "যাচাই করা যায়নি" for a check that has
+   * not happened yet.
+   */
+  private tile(r: FeatureRow): HTMLElement {
+    const d = this.o.doc;
+    const loading = !this.probed && PROBE_INDEX[r.titleBn] !== undefined;
+
+    const head = el(d, 'div', { className: 'sys-tile-head' },
+      el(d, 'span', {
+        className: 'sys-dot',
+        data: { tone: loading ? 'neutral' : toneOf(r.state) },
+        attrs: { 'aria-hidden': 'true' },
+      }),
+      el(d, 'p', { className: 'sys-tile-title' }, ...numText(d, r.titleBn)));
+
+    // The state word leads, as drawn ("সচল · …", "বন্ধ — …"). A probe's own
+    // qualifier ("কনফিগ যোগ করলেই চালু হবে") sits beside the word it qualifies.
+    const detail = loading
+      ? el(d, 'p', { className: 'sys-tile-detail' },
+        el(d, 'span', { className: 'skel sys-tile-skel', attrs: { 'aria-hidden': 'true' } }),
+        el(d, 'span', { className: 'ui-sr-only', text: 'লোড হচ্ছে' }),
+        ' · ', ...numText(d, r.descBn))
+      : el(d, 'p', { className: 'sys-tile-detail' }, ...numText(d,
+        `${STATE_LABEL[r.state]}${r.detailBn ? ` — ${r.detailBn}` : ''} · ${r.descBn}`));
+
+    return el(d, 'li', {
+      className: 'sys-tile',
+      data: { state: loading ? 'loading' : r.state },
+      attrs: { 'aria-busy': loading ? 'true' : null },
+    },
+    head,
+    detail,
+    // For the IT admin who has to go and look. Shown at every width (13
+    // Responsive: nothing is dropped on a phone); it wraps, never truncates.
+    el(d, 'code', { className: 'sys-tile-path' }, ...numText(d, r.path)));
   }
 }

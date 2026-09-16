@@ -128,6 +128,44 @@ describe('R-8 §4 — the large-send gate', () => {
     assert.match(label, /৪,?৫০০|৪৫০০/, 'the message count');
   });
 
+  test('the gate says, in words, that the send cannot be undone', async () => {
+    // Ata Ekta §7 / R11: the barrier states what cannot be reversed and asks
+    // for the one sentence — a tick next to nothing is a box people tick.
+    const { root } = await mount(() => estimateFor(900, 5));
+    await compose(root as HTMLElement, dom.window.document, 'ছুটি', 'আগামীকাল বন্ধ।');
+    const gate = root.querySelector('[data-big-send]')!;
+    assert.match(gate.textContent ?? '', /ফেরানো যায় না/);
+    const box = gate.querySelector<HTMLInputElement>('input[type=checkbox]')!;
+    assert.match(box.closest('label')?.textContent ?? '', /আমি বুঝেছি এটি ফেরানো যাবে না/);
+  });
+
+  test('a revoked acknowledgement is shown unticked, with the new numbers', async () => {
+    // The estimate can change without the gate changing (a longer body, a
+    // bigger batch). The flag is revoked; the box and the counts beside it
+    // must say so rather than show last estimate's numbers already ticked.
+    let size = 900;
+    const { root } = await mount(() => estimateFor(size, 5));
+    const doc = dom.window.document;
+    await compose(root as HTMLElement, doc, 'ছুটি', 'আগামীকাল বন্ধ।');
+
+    const ack = root.querySelector<HTMLInputElement>('[data-big-send] input[type=checkbox]')!;
+    ack.checked = true;
+    ack.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    assert.equal(root.querySelector<HTMLButtonElement>('[data-send]')!.disabled, false);
+
+    size = 1000;
+    const body = root.querySelector<HTMLTextAreaElement>('[name="body"]')!;
+    body.value = 'আগামীকাল বন্ধ থাকবে।';
+    body.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 600));
+
+    const gate = root.querySelector('[data-big-send]')!;
+    assert.equal(gate.querySelector<HTMLInputElement>('input[type=checkbox]')!.checked, false,
+      'a revoked acknowledgement still looked ticked');
+    assert.equal(root.querySelector<HTMLButtonElement>('[data-send]')!.disabled, true);
+    assert.match(gate.textContent ?? '', /১,০০০/, 'the checklist kept the old count');
+  });
+
   test('a small send is not gated at all', async () => {
     // The common case must not grow a checkbox. A confirmation that appears
     // for every notice is a confirmation nobody reads.

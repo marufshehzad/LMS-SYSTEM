@@ -12,7 +12,8 @@
  *
  *   ≥1024px   a persistent sidebar (grouped, role-specific, collapsible to a
  *             48px icon rail), a topbar carrying breadcrumb + actions, and a
- *             centred content column that stops growing at 1200px.
+ *             content column that stops growing at 1200px (flush left, not
+ *             centred — Ata Ekta 01 Shell §খ).
  *   <1024px   the mobile shell, kept: compact header with the institution's
  *             identity, a bottom bar of five role-chosen tabs, and sheets
  *             rather than menus.
@@ -35,6 +36,7 @@ import { iconSvg } from './icon.ts';
 import { formatCount } from '../../../packages/ui-core/src/format.ts';
 import { navFor, crumbFor, type RoleNav } from './ui/nav.ts';
 import { roleLabel } from './ui/roles.ts';
+import { append, numClass, numText } from './ui/dom.ts';
 
 export interface ShellRoute {
   path: string;       // hash fragment without '#/', e.g. 'attendance'
@@ -115,6 +117,10 @@ export class Shell {
   private shellEl!: HTMLElement;
   private bellEls: HTMLButtonElement[] = [];
   private bellBadgeEls: HTMLElement[] = [];
+  /** The unread count on the sidebar's নোটিশ row (01 Shell §খ), and its row. */
+  private inboxCounts: { row: HTMLElement; count: HTMLElement; labelBn: string }[] = [];
+  /** The queued-work count inside the offline banner (§7 offline state). */
+  private pendingEl: HTMLElement | null = null;
   private navEls = new Map<string, HTMLElement[]>();
   private crumbEl: HTMLElement | null = null;
   private profileMenu: HTMLElement | null = null;
@@ -163,7 +169,7 @@ export class Shell {
         nameEl.className = 'shell-org-name';
         org.append(nameEl);
       }
-      nameEl.textContent = institution.name;
+      this.setText(nameEl, institution.name);
 
       const existing = org.querySelector<HTMLImageElement>('.shell-org-logo');
       const mark = org.querySelector<HTMLElement>('.shell-org-mark');
@@ -183,7 +189,10 @@ export class Shell {
         // No logo: the monogram takes its place rather than leaving a gap
         // where the identity goes. First letter of the school's own name.
         if (!mark) org.prepend(this.monogram(institution.name));
-        else mark.textContent = firstGrapheme(institution.name);
+        else {
+          mark.textContent = firstGrapheme(institution.name);
+          mark.className = numClass('shell-org-mark', mark.textContent);
+        }
       }
     }
   }
@@ -206,6 +215,31 @@ export class Shell {
       badge.textContent = n > 9 ? '৯+' : formatCount(n, 'bn');
     }
     for (const bell of this.bellEls) bell.setAttribute('aria-label', label);
+    // The sidebar row repeats the count beside "নোটিশ" (01 Shell §খ). Its
+    // badge is aria-hidden, so the row's own name carries the number instead
+    // — the same Bangla sentence the bell reads, never a bare "৩".
+    for (const { row, count, labelBn } of this.inboxCounts) {
+      count.hidden = n === 0;
+      count.textContent = n > 9 ? '৯+' : formatCount(n, 'bn');
+      if (n === 0) row.removeAttribute('aria-label');
+      else row.setAttribute('aria-label', `${labelBn} — ${formatCount(n, 'bn')}টি পড়া হয়নি`);
+    }
+  }
+
+  /**
+   * Set how much work is waiting on this device for a connection.
+   *
+   * The offline banner states the queue (IMPLEMENTATION §7: "count of queued
+   * items"); zero hides the figure and leaves the sentence. The shell holds no
+   * queue of its own, so the caller that owns the outbox reports it here, the
+   * same way it reports unread notices through `setUnread`.
+   */
+  setPending(count: number): void {
+    const n = Math.max(0, Math.floor(count));
+    const el = this.pendingEl;
+    if (!el) return;
+    el.hidden = n === 0;
+    this.setText(el, n === 0 ? '' : `${formatCount(n, 'bn')}টি অপেক্ষমাণ`);
   }
 
   /** Call when the shell itself is being torn down (e.g. on logout). */
@@ -251,11 +285,22 @@ export class Shell {
     return this.o.routes.filter((r) => !r.hidden).slice(0, MAX_TABS);
   }
 
+  /**
+   * Text that may hold a number — a school called "১ নং সরকারি বিদ্যালয়", a
+   * route label — with every figure in the numeral face (R6). `textContent`
+   * stays exactly `text`; the digits just sit in their own `<span class="n">`.
+   */
+  private setText(target: Element, text: string): void {
+    target.textContent = '';
+    append(target, ...numText(this.o.doc, text));
+  }
+
   private monogram(name: string): HTMLElement {
     const el = this.o.doc.createElement('span');
-    el.className = 'shell-org-mark';
-    el.setAttribute('aria-hidden', 'true');
     el.textContent = firstGrapheme(name);
+    // "১ নং …" starts with a digit, and a monogram of one digit is a number.
+    el.className = numClass('shell-org-mark', el.textContent);
+    el.setAttribute('aria-hidden', 'true');
     return el;
   }
 
@@ -332,7 +377,7 @@ export class Shell {
     }
     const brandName = d.createElement('span');
     brandName.className = 'shell-org-name';
-    brandName.textContent = name;
+    this.setText(brandName, name);
     brand.append(brandName);
 
     const rail = d.createElement('button');
@@ -359,10 +404,21 @@ export class Shell {
       if (group.labelBn) {
         const label = d.createElement('p');
         label.className = 'd-nav-label';
-        label.textContent = group.labelBn;
+        this.setText(label, group.labelBn);
         // Hidden from readers when the rail collapses it away; the rows keep
         // their own accessible names either way.
         section.append(label);
+      } else if (this.nav) {
+        // The unlabelled tail group (আরও) is drawn with a BLANK label row
+        // above it (01 Shell §খ renders labelBn '' as a non-breaking space),
+        // which is what separates "everything else" from the last named
+        // group. Same element, same height as a real label, and nothing for a
+        // screen reader to announce. The rail hides it with the other labels.
+        const spacer = d.createElement('p');
+        spacer.className = 'd-nav-label';
+        spacer.setAttribute('aria-hidden', 'true');
+        spacer.textContent = ' ';
+        section.append(spacer);
       }
       for (const item of group.items) {
         if (!this.route(item.path)) continue;   // never render a dead link
@@ -395,8 +451,19 @@ export class Shell {
     g.innerHTML = iconSvg(glyph);
     const l = d.createElement('span');
     l.className = 'dnav-label';
-    l.textContent = labelBn;
+    this.setText(l, labelBn);
     a.append(g, l);
+    if (path === 'inbox') {
+      // 01 Shell §খ draws the unread count on the নোটিশ row as well as on
+      // the bell. Same number, same source: `setUnread` drives both, and it
+      // starts hidden so a count nobody has reported never shows as zero.
+      const count = d.createElement('span');
+      count.className = 'ui-count n dnav-count';
+      count.setAttribute('aria-hidden', 'true');
+      count.hidden = true;
+      a.append(count);
+      this.inboxCounts.push({ row: a, count, labelBn });
+    }
     this.remember(path, a);
     return a;
   }
@@ -430,7 +497,7 @@ export class Shell {
     }
     const orgName = d.createElement('span');
     orgName.className = 'shell-org-name';
-    orgName.textContent = name;
+    this.setText(orgName, name);
     org.append(orgName);
     // An empty name plate looks broken, so it is hidden until there is a name
     // — but it stays in the DOM, which the pre-P1 shell did not do. That shell
@@ -503,7 +570,8 @@ export class Shell {
     glyph.setAttribute('aria-hidden', 'true');
     glyph.innerHTML = iconSvg('bell');
     const badge = d.createElement('span');
-    badge.className = 'shell-bell-badge';
+    // `.n`: the badge only ever holds a count ("৩", "৯+") — R6.
+    badge.className = 'shell-bell-badge n';
     badge.hidden = true;
     bell.append(glyph, badge);
     bell.addEventListener('click', () => this.o.bell?.onOpen());
@@ -548,15 +616,15 @@ export class Shell {
     btn.setAttribute('aria-label', `${this.o.displayName} — অ্যাকাউন্ট মেনু`);
 
     const avatar = d.createElement('span');
-    avatar.className = 'shell-avatar-mark';
-    avatar.setAttribute('aria-hidden', 'true');
     avatar.textContent = firstGrapheme(this.o.displayName);
+    avatar.className = numClass('shell-avatar-mark', avatar.textContent);
+    avatar.setAttribute('aria-hidden', 'true');
 
     const who = d.createElement('span');
     who.className = 'shell-who';
     const nm = d.createElement('span');
     nm.className = 'shell-who-name';
-    nm.textContent = this.o.displayName;
+    this.setText(nm, this.o.displayName);
     who.append(nm);
     if (this.o.role) {
       const rl = d.createElement('span');
@@ -566,6 +634,18 @@ export class Shell {
     }
 
     btn.append(avatar, who);
+    if (className === 'd-profile') {
+      // 01 Shell §খ ends the sidebar's account row with a log-out glyph. The
+      // row still opens the account menu (aria-haspopup) rather than signing
+      // out on one click; the glyph says what that menu is for, and sign-out
+      // is its one action. Decorative, so hidden from readers — the button's
+      // name already says "অ্যাকাউন্ট মেনু".
+      const out = d.createElement('span');
+      out.className = 'd-profile-glyph';
+      out.setAttribute('aria-hidden', 'true');
+      out.innerHTML = iconSvg('log-out');
+      btn.append(out);
+    }
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       this.toggleProfile(btn);
@@ -586,7 +666,7 @@ export class Shell {
     head.className = 'shell-menu-head';
     const nm = d.createElement('p');
     nm.className = 'shell-menu-name';
-    nm.textContent = this.o.displayName;
+    this.setText(nm, this.o.displayName);
     head.append(nm);
     if (this.o.role) {
       const rl = d.createElement('p');
@@ -632,10 +712,39 @@ export class Shell {
   }
 
   /**
+   * Is the account menu currently a bottom sheet rather than a dropdown?
+   *
+   * Below the one breakpoint the menu is drawn as a full-width sheet rising
+   * over a dimmed page (13 Responsive ০৭). The width is the only thing that
+   * decides it, and the media query here is the exact complement of the 1024px
+   * one in the stylesheet, so the two can never disagree about which shape is
+   * on screen. Where `matchMedia` is missing (jsdom, an old engine) the answer
+   * is "no", which leaves the pre-existing dropdown behaviour untouched.
+   */
+  private isSheet(): boolean {
+    if (typeof matchMedia !== 'function') return false;
+    try { return matchMedia(`(max-width: ${DESKTOP_MIN - 0.02}px)`).matches; }
+    catch { return false; }
+  }
+
+  /**
    * Escape and outside-click, once for the whole shell.
    *
    * Capture phase on click: a menu item's own handler runs first and closes
    * the menu itself, so this only ever fires for a click that landed outside.
+   *
+   * On a phone that outside click is also the sheet's primary dismissal
+   * gesture — tap the dimmed area — and the dimming is painted as a box-shadow
+   * on the sheet, which no finger can land on. So without this the one tap
+   * both closes the sheet AND carries on to whatever the dim area was covering:
+   * a bottom tab navigates away, a list row opens a student. A person closing
+   * a sheet ends up on a page they never asked for. The tap that dismisses a
+   * sheet may do nothing else, so it is stopped here — before the target's own
+   * listener runs (capture) and before any default action (a `.dnav` href).
+   *
+   * Only while the sheet is on screen. The desktop menu is a dropdown with no
+   * scrim and no modal promise, and there a click outside has always been
+   * allowed to do its own job as well.
    */
   private wireDismissal(): void {
     const d = this.o.doc;
@@ -644,6 +753,10 @@ export class Shell {
       const t = e.target as Node;
       if (this.profileMenu.contains(t)) return;
       if (this.profileBtns.some((b) => b.contains(t))) return;
+      if (this.isSheet()) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
       this.closeProfile();
     };
     this.onDocKey = (e: KeyboardEvent) => {
@@ -727,7 +840,7 @@ export class Shell {
       glyph.innerHTML = iconSvg(route.glyph);
       const label = d.createElement('span');
       label.className = 'shell-tab-label';
-      label.textContent = route.labelBn;
+      this.setText(label, route.labelBn);
       tab.append(glyph, label);
       tab.addEventListener('click', () => { location.hash = `/${route.path}`; });
       this.remember(route.path, tab);
@@ -749,8 +862,15 @@ export class Shell {
     icon.setAttribute('aria-hidden', 'true');
     icon.innerHTML = iconSvg('wifi-off');
     const text = d.createElement('span');
-    text.textContent = 'অফলাইন — কাজ চালিয়ে যান, সংযোগ পেলে জমা হবে';
-    banner.append(icon, text);
+    // 01 Shell §খ, verbatim.
+    text.textContent = 'ইন্টারনেট নেই — কাজ চালিয়ে যান, সব এই যন্ত্রে জমা থাকছে';
+    // §7: the offline state names how much is waiting. Hidden until the
+    // outbox's owner reports a count through `setPending`.
+    const pending = d.createElement('span');
+    pending.className = 'offline-pending';
+    pending.hidden = true;
+    this.pendingEl = pending;
+    banner.append(icon, text, pending);
     this.onConnectivity = () => { banner.hidden = navigator.onLine; };
     this.onConnectivity();
     addEventListener('online', this.onConnectivity);
@@ -825,12 +945,14 @@ export class Shell {
         const sep = d.createElement('span');
         sep.className = 'shell-crumb-sep';
         sep.setAttribute('aria-hidden', 'true');
-        sep.textContent = '›';
+        // "দৈনন্দিন / হাজিরা" — 01 Shell §খ separates section and page
+        // with a slash.
+        sep.textContent = '/';
         crumb.append(sep);
       }
       const el = d.createElement('span');
       el.className = 'shell-crumb-part';
-      el.textContent = part;
+      this.setText(el, part);
       if (i === clean.length - 1) el.setAttribute('aria-current', 'page');
       crumb.append(el);
     });

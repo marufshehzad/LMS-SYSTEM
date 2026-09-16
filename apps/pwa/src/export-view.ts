@@ -20,11 +20,20 @@
  * so a browser-initiated navigation arrives unauthenticated and the school
  * gets a 401 page instead of their data. Fetching it in the app is what
  * makes the Authorization header travel with the request.
+ *
+ * ── Ata Ekta (07 Finance §05) ───────────────────────────────────────────
+ * The page title alone, one intro line, then a plain stack of file rows:
+ * file glyph, name, a one-line "what columns" sub-line, and a small outline
+ * "নামান". No cards, no section heading, and no accent button anywhere — ten
+ * red buttons on one page is ten "the one thing this page is for", which is
+ * none. Every row is a `listItem` in one `list`, so the markup is the one the
+ * rest of the app's lists use; the only screen classes are `export-intro`
+ * and `export-files` (layout and the phone stacking, 13 Responsive rule ০৮).
  */
 import type { Auth } from './auth.ts';
 import { errorState, successNote } from './view-states.ts';
 import {
-  pageHeader, sectionHeading, card, button, permissionState, el, append,
+  pageHeader, button, list, listItem, permissionState, el, numText,
 } from './ui/index.ts';
 
 export interface ExportViewOptions {
@@ -47,96 +56,99 @@ interface Dataset {
   /** Query value — must match the server's DATASETS set. */
   key: string;
   titleBn: string;
-  /** What is actually in the file, in the words a head teacher would use. */
+  /**
+   * What is actually in the file, as the design's sub-line draws it: the
+   * columns, then ` · ` and the one caveat a head teacher needs before
+   * trusting the file (what is included that they might not expect, or what
+   * is deliberately left out). Short enough to read as one line on a desk.
+   */
   containsBn: string;
   /** The service that owns the data. */
   service: string;
 }
 
 /**
- * The datasets, in the order P11 §30 builds them.
+ * The datasets.
  *
  * Only the ones that EXIST are listed. A row for a dataset whose endpoint is
  * not written yet would be a button that 400s, and a screen that offers a
  * school nine exports and delivers one is worse than a screen that offers
  * one — it is the "backend complete, UI pending" shape D13 exists to stop,
  * pointed the other way round.
+ *
+ * Order: the four 07 Finance §05 draws, in its order (students, attendance,
+ * fees, results — the files a school asks for most), then the other six,
+ * with the offboarding checklist last because it points back at the rest.
  */
 const DATASETS: Dataset[] = [
   {
     key: 'students',
-    titleBn: 'শিক্ষার্থী',
-    containsBn: 'নাম, শিক্ষার্থী আইডি, শ্রেণি, শাখা, রোল, শিক্ষাবর্ষ, '
-      + 'ভর্তির তারিখ, বোর্ড রেজিস্ট্রেশন ও রোল, অভিভাবকের নাম এবং বর্তমান অবস্থা। '
-      + 'ছাড়পত্র নেওয়া ও শাখায় বসানো হয়নি এমন শিক্ষার্থীও এতে থাকবে।',
+    titleBn: 'শিক্ষার্থীর তালিকা',
+    containsBn: 'নাম, আইডি, শ্রেণি, শাখা, রোল, শিক্ষাবর্ষ, ভর্তির তারিখ, '
+      + 'বোর্ড রেজিস্ট্রেশন ও রোল, অভিভাবক, অবস্থা · '
+      + 'ছাড়পত্র নেওয়া ও শাখায় না বসানো শিক্ষার্থীসহ',
+    service: 'academics',
+  },
+  {
+    key: 'attendance',
+    titleBn: 'হাজিরার হিসাব',
+    containsBn: 'দৈনিক প্রকৃত রেকর্ড · তারিখ, পিরিয়ড, বিষয়, '
+      + 'উপস্থিত/অনুপস্থিত/দেরি, দেরির মিনিট, কে হাজিরা নিয়েছেন',
+    service: 'academics',
+  },
+  {
+    key: 'fees',
+    titleBn: 'বেতন ও বকেয়া',
+    containsBn: 'প্রতি ইনভয়েসে এক সারি · খাত, অঙ্ক, জমা, বকেয়া, রসিদ নম্বর, মাধ্যম · '
+      + 'অঙ্ক সংখ্যায় থাকে, এক্সেলে যোগ করা যায়',
+    service: 'finance',
+  },
+  {
+    key: 'results',
+    titleBn: 'পরীক্ষার নম্বর',
+    containsBn: 'বিষয়ভিত্তিক · সৃজনশীল, নৈর্ব্যক্তিক, ব্যবহারিক, ধারাবাহিক, মোট, '
+      + 'গ্রেড, গ্রেড পয়েন্ট · অপ্রকাশিত পরীক্ষাও, অবস্থাসহ',
     service: 'academics',
   },
   {
     key: 'teachers',
     titleBn: 'শিক্ষক ও কর্মী',
     containsBn: 'নাম, কর্মচারী আইডি, পদবি, ভূমিকা, মোবাইল, ইমেইল, যোগদানের তারিখ, '
-      + 'কোন শাখার শ্রেণি শিক্ষক এবং কোন বিষয় পড়ান। '
-      + 'ব্যাংক হিসাব বা কোনো গোপন তথ্য এতে থাকে না।',
+      + 'শ্রেণি শিক্ষকতা, বিষয় · ব্যাংক হিসাব বা কোনো গোপন তথ্য থাকে না',
     service: 'ops',
   },
   {
     key: 'guardians',
     titleBn: 'অভিভাবক',
-    containsBn: 'প্রতিটি অভিভাবক–শিক্ষার্থী সম্পর্কের একটি করে সারি — নাম, মোবাইল, '
-      + 'সম্পর্ক, কে এসএমএস পান, কে ফি দিতে পারেন। '
-      + 'প্রত্যাহার করা সম্পর্কও থাকবে, "প্রত্যাহৃত" লেখা সহ।',
+    containsBn: 'প্রতি অভিভাবক–শিক্ষার্থী সম্পর্কে এক সারি · নাম, মোবাইল, সম্পর্ক, '
+      + 'কে এসএমএস পান, কে ফি দিতে পারেন · প্রত্যাহৃত সম্পর্কসহ',
     service: 'ops',
   },
   {
     key: 'structure',
     titleBn: 'একাডেমিক কাঠামো',
-    containsBn: 'প্রতিটি সেকশনের একটি করে সারি — শিক্ষাবর্ষ, শ্রেণি, শাখা, গ্রুপ, '
-      + 'শিফট, ধারণক্ষমতা, শ্রেণি শিক্ষক ও কক্ষ।',
+    containsBn: 'প্রতি সেকশনে এক সারি · শিক্ষাবর্ষ, শ্রেণি, শাখা, গ্রুপ, শিফট, '
+      + 'ধারণক্ষমতা, শ্রেণি শিক্ষক, কক্ষ',
     service: 'ops',
   },
   {
     key: 'notices',
     titleBn: 'নোটিশ',
-    containsBn: 'শিরোনাম ও পূর্ণ বিবরণ, কারা পেয়েছেন, কবে প্রকাশ হয়েছে। '
-      + 'খসড়া নোটিশও এতে থাকবে।',
+    containsBn: 'শিরোনাম, পূর্ণ বিবরণ, প্রাপক, প্রকাশের তারিখ · খসড়াসহ',
     service: 'ops',
   },
   {
     key: 'audit',
     titleBn: 'কার্যবিবরণী',
-    containsBn: 'কে কখন কী পরিবর্তন করেছেন। ফোন, ইমেইল বা জন্ম তারিখের মতো '
-      + 'সংবেদনশীল তথ্য পর্দার মতোই আড়াল করা থাকবে।',
+    containsBn: 'কে, কখন, কী পরিবর্তন করেছেন · '
+      + 'ফোন, ইমেইল, জন্ম তারিখ পর্দার মতোই আড়াল থাকে',
     service: 'ops',
-  },
-  {
-    key: 'attendance',
-    titleBn: 'হাজিরা',
-    containsBn: 'প্রতিটি শিক্ষার্থীর প্রতিদিনের হাজিরা — তারিখ, পিরিয়ড, বিষয়, '
-      + 'উপস্থিত/অনুপস্থিত/দেরিতে, কত মিনিট দেরি এবং কে হাজিরা নিয়েছেন। '
-      + 'এটি প্রকৃত রেকর্ড, ছাপার ফাঁকা ছক নয়।',
-    service: 'academics',
-  },
-  {
-    key: 'results',
-    titleBn: 'পরীক্ষার ফলাফল',
-    containsBn: 'বিষয়ভিত্তিক নম্বর — সৃজনশীল, নৈর্ব্যক্তিক, ব্যবহারিক, ধারাবাহিক, '
-      + 'মোট, গ্রেড ও গ্রেড পয়েন্ট। অপ্রকাশিত পরীক্ষাও থাকবে, অবস্থা লেখা সহ।',
-    service: 'academics',
-  },
-  {
-    key: 'fees',
-    titleBn: 'ফি ও পরিশোধ',
-    containsBn: 'প্রতিটি ইনভয়েসের একটি করে সারি — কোন খাতে কত, কত পরিশোধ হয়েছে, '
-      + 'কত বকেয়া, রসিদ নম্বর ও পরিশোধের মাধ্যম। '
-      + 'টাকার অঙ্ক সংখ্যা হিসেবে থাকে, তাই এক্সেলে যোগ করা যায়।',
-    service: 'finance',
   },
   {
     key: 'offboarding',
     titleBn: 'প্রতিষ্ঠান ছেড়ে যাওয়ার তালিকা',
-    containsBn: 'কোন ডেটাসেটে এখন কতটি সারি আছে এবং কোথা থেকে নামাতে হবে — '
-      + 'একটি চেকলিস্ট। এতে কিছু মুছে যায় না এবং প্রতিষ্ঠান বন্ধও হয় না; '
-      + 'এটি শুধু বলে কী কী নেওয়ার আছে।',
+    containsBn: 'কোন ডেটাসেটে কত সারি, কোথা থেকে নামাবেন · '
+      + 'কিছু মোছে না, প্রতিষ্ঠান বন্ধ করে না',
     service: 'ops',
   },
 ];
@@ -158,10 +170,9 @@ export class ExportView {
     const root = this.o.root;
     root.textContent = '';
 
-    root.append(pageHeader(d, {
-      title: 'তথ্য রপ্তানি',
-      subtitle: 'প্রতিষ্ঠানের নিজের তথ্য নিজের কাছে রাখুন',
-    }));
+    // 07 Finance §05 draws the bar with the title alone — the intro line
+    // below carries the explanation a subtitle used to.
+    root.append(pageHeader(d, { title: 'তথ্য রপ্তানি' }));
 
     if (!EXPORT_ROLES.has(this.o.auth.role)) {
       root.append(permissionState(d, {
@@ -174,38 +185,45 @@ export class ExportView {
     if (this.error) root.append(errorState(d, this.error));
     if (this.notice) root.append(successNote(d, this.notice));
 
-    root.append(sectionHeading(d, { title: 'কী রপ্তানি করবেন' }));
+    // The one thing a head teacher should read before pressing anything. The
+    // first two sentences are the design's; the third is the P11 disclosure
+    // that an export is itself recorded, which stays because it is true and
+    // the file holds other people's data.
+    root.append(el(d, 'p', { className: 'export-intro' },
+      ...numText(d, 'CSV ফাইল — এক্সেলে সরাসরি খোলে। '
+        + 'বাংলা লেখা ঠিকভাবে দেখাতে UTF-8 ব্যবহার করা হয়। '
+        + 'কে কখন রপ্তানি করলেন তা কার্যবিবরণীতে লেখা থাকে।')));
 
-    // The one thing a head teacher should read before pressing anything.
-    root.append(card(d, { title: 'ফাইলটি কী', glyph: 'book-open', headingLevel: 3 },
-      el(d, 'p', {
-        className: 'ui-card-note',
-        text: 'প্রতিটি ফাইল CSV — এক্সেল, গুগল শিট বা লিব্রেঅফিসে সরাসরি খোলে। '
-            + 'বাংলা লেখা ঠিকভাবে দেখাবে। ফাইলটি আপনার যন্ত্রে নামবে, কোথাও জমা থাকবে না, '
-            + 'এবং কে কখন রপ্তানি করলেন তা কার্যবিবরণীতে লেখা থাকবে।',
-      })));
-
-    for (const ds of DATASETS) root.append(this.datasetCard(ds));
+    const files = list(d, 'রপ্তানিযোগ্য ফাইল', ...DATASETS.map((ds) => this.datasetRow(ds)));
+    files.classList.add('export-files');
+    root.append(files);
   }
 
-  private datasetCard(ds: Dataset): HTMLElement {
+  private datasetRow(ds: Dataset): HTMLElement {
     const d = this.o.doc;
-    const body = el(d, 'div', { className: 'ui-stack' });
-
-    append(body, el(d, 'p', { className: 'ui-card-note', text: ds.containsBn }));
+    const mine = this.busy === ds.key;
 
     const go = button(d, {
-      label: this.busy === ds.key ? 'ফাইল তৈরি হচ্ছে…' : 'CSV নামান',
-      variant: 'primary',
-      glyph: 'download',
+      label: mine ? 'ফাইল তৈরি হচ্ছে…' : 'নামান',
+      variant: 'secondary',
+      size: 'sm',
+      busy: mine,
+      // Disabled while any request is in flight — a second press would
+      // start a second full query against the same school.
+      disabled: Boolean(this.busy),
+      // Ten visible "নামান" buttons would be ten identical names to a screen
+      // reader. The name starts with the file and ends with the visible word,
+      // so a voice user who says what they see still reaches it.
+      ariaLabel: `${ds.titleBn} — ${mine ? 'ফাইল তৈরি হচ্ছে…' : 'CSV নামান'}`,
       onClick: () => { void this.download(ds); },
     });
-    // Disabled while its own request is in flight — a second press would
-    // start a second full query against the same school.
-    if (this.busy) go.setAttribute('disabled', 'true');
-    append(body, go);
 
-    return card(d, { title: ds.titleBn, glyph: 'check-square', headingLevel: 3 }, body);
+    return listItem(d, {
+      title: ds.titleBn,
+      subtitle: ds.containsBn,
+      glyph: 'file-text',
+      status: go,
+    });
   }
 
   /**
@@ -253,6 +271,8 @@ export class ExportView {
       // in Safari, which reads the blob after the handler returns.
       setTimeout(() => { URL.revokeObjectURL(url); }, 0);
 
+      // successNote sets the date digits of the server's filename
+      // (students-2026-09-16.csv) in the numeral face itself (R6).
       this.notice = `${ds.titleBn} ফাইল নামানো হয়েছে — ${filename}`;
     } catch {
       this.error = 'ফাইল তৈরি করা যায়নি। ইন্টারনেট সংযোগ দেখে আবার চেষ্টা করুন।';

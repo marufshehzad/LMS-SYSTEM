@@ -16226,3 +16226,75 @@ Icons `arrow-up`, `rotate-ccw`, `archive` added for the rollover checklist.
 Browser, component gallery at 1280 and 375: Hind Siliguri and Anek Bangla
 loaded, primary 44px `#ec3013`, stat figures in Anek Bangla, no horizontal
 overflow at 375, `color-scheme` light.
+
+---
+
+# Ata Ekta — wave 2, batch A: the shell and the screens every role reaches (2026-09-17)
+
+Eleven units: `shell`, `login`, `security`, `more`, `notifications`, `inbox`,
+`compose`, the offline page, `system`, `export`, `audit`. One implementer and
+one skeptical reviewer each, reading the real diff against the design page; the
+four with a blocker or major finding went through a repair pass (shell, inbox,
+system, audit).
+
+## What changed on screen
+
+- **Shell.** The crumb separator is `/` as drawn; the offline banner carries
+  the design's sentence and now the QUEUED COUNT — and `app.ts` reports it from
+  the outbox, on boot and on every change, so the figure has a source rather
+  than a slot. The sidebar নোটিশ row carries the unread count; the account row
+  gets the log-out glyph; on a phone the account menu is a bottom sheet.
+- **Login** is one bordered card in the drawn order: mark, school name, step,
+  fields through `field()` with real labels.
+- **Security** became the single drawn panel of device rows, with a device
+  glyph and the design's time vocabulary ('আজ ০৮:১২', 'গতকাল ১৪:৩০').
+- **আরও** is one flush row list, not a card grid, and uses no accent at all.
+- **Inbox, compose, notifications** follow 09 Comms: one bar, one surface, the
+  draft chip in the header slot, the audience chips as a labelled group.
+- **System** is the tile grid of 08 Admin & IT §05 — and does NOT draw the
+  design's "সব স্বাভাবিক" all-clear, because 8 of the 12 rows are never
+  probed; the chip now counts only what was measured.
+- **Audit** rows read as Bangla for all 46 action codes and 17 entity types
+  (they were 12 and 7, so real entries showed dotted codes), and the diff is
+  the shared table.
+- **The offline page** moved onto the design's ground and glyph.
+
+## Merged centrally
+
+187 CSS rules added, 31 carried rules retired, 0 raw hex, 0 undefined tokens,
+0 cross-unit conflicts. Two declarations the merge refused were restored by
+hand: `.shell-role` (the demo role SELECT) back to the 44px floor, and a
+z-index on `.shell-topbar` — not a look at all, but a stacking fix, because
+the phone account sheet was painting under the fixed tab bar.
+
+Three device glyphs added (smartphone, tablet, monitor). Four More-list
+subtitles aligned with the drawn copy.
+
+## Shared tests (R13)
+
+Fourteen changes applied centrally, all selector or copy updates that keep the
+guarantee: `.notice-head` → `.audit-head`, `.card-form` → `.audit-filters`
+addressed by name, `.data-table` → the shared table, the system table → the
+tile grid (the replacement test asserts every tile still carries name, state
+AS A WORD, what it does and where it lives — what the four columns carried),
+and `'3 দিন আগে'` → `'৩ দিন আগে'`. One test was added, not changed: an action
+code the fixture never used still reads as Bangla.
+
+## Defects found and recorded, not fixed inside a design change (R4)
+
+- `login-view.ts`: a server error from the OTP request is painted and then
+  wiped by the re-render in `finally` — the person sees nothing.
+- `security-view.ts`: a failed device revoke sets its message, then `load()`
+  clears it before it can be read.
+- `inbox-view.ts`: 'আজ/গতকাল' counts 24-hour windows, not calendar days.
+- `system-view.ts`: two rows are hard-coded 'চালু আছে' and never probed; any
+  503 is reported as a deliberate switch-off even without the kill-switch code.
+- `notice-compose-view.ts`: after a successful big send the acknowledgement is
+  not reset, and local audience errors print in English.
+- `audit-view.ts`: assignment and slot entries still print raw uuids for
+  teacher/subject/room.
+
+## Verified
+
+PWA suite **952 tests**, all passing; typecheck 0 errors; build clean;
+`index.html` byte-identical at `496199bd`.
