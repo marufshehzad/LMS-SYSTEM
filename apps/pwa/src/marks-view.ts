@@ -12,11 +12,25 @@
  *
  * The section comes from shikhon_last_section (set by roster-view.ts) —
  * marks entry always follows "pick your section in the শিক্ষার্থী tab" first.
+ *
+ * ── Ata Ekta (02 Teacher §04, drawn at desktop) ────────────────────────────
+ * One panel under the page header: the inset filter strip, the marks table
+ * (roll · name · one right-aligned field per component · a live total), and a
+ * footer bar that says what is held on this device. Below 1024px the same
+ * table scrolls sideways with roll and name frozen (13 Responsive rule ০৩),
+ * and the one primary moves from the header to the sticky footer (thumb
+ * reach) — both copies are in the DOM, CSS shows one.
  */
 import type { Auth } from './auth.ts';
-import { formatCount } from '../../../packages/ui-core/src/format.ts';
 import {
-  el, append, icon, pageHeader, badge, emptyState, toast, humanError, field, listSkeleton,} from './ui/index.ts';
+  formatCount, formatIdentifier, parseUserNumber, toBanglaDigits,
+} from '../../../packages/ui-core/src/format.ts';
+import { hasIcon } from './icon.ts';
+import {
+  el, append, icon, lang, numClass, numText, pageHeader, badge, statusBadge, button, setBusy,
+  emptyState, errorState, permissionState, permissionMessageWithContact, toast, field,
+  listSkeleton,
+} from './ui/index.ts';
 
 export interface ExamSubjectOption {
   examSubjectId: string;
@@ -84,6 +98,13 @@ class HttpStatus extends Error {
 const EXAMS_CACHE_PREFIX = 'shikhon_exams_cache_';
 const MARKS_CACHE_PREFIX = 'shikhon_marks_cache_';
 
+/** The footer note's glyph as drawn (lucide `save`). Until the set carries
+ *  it, the "on this device" glyph stands in — never the unknown-icon dot. */
+const SAVE_GLYPH = hasIcon('save') ? 'save' : 'smartphone';
+
+const SAVE_LABEL = 'সব সংরক্ষণ';
+const SAVING_LABEL = 'সংরক্ষণ হচ্ছে…';
+
 export class MarksView {
   private readonly o: MarksViewOptions;
   private sectionId: string | null;
@@ -99,6 +120,23 @@ export class MarksView {
   private completeEl: HTMLElement | null = null;
   private activeKeys: MarkKey[] = [];
 
+  /* Display state for the five states (§7) — no request logic reads these. */
+  /** The exam list is on its way and nothing is cached to show meanwhile. */
+  private loadingExams = false;
+  /** The exam list could not be fetched and there is no cached copy. */
+  private examsFailed = false;
+  /** The chosen sheet could not be fetched and there is no cached copy. */
+  private sheetFailed = false;
+  /** Rows the last save put in the outbox, and whether it was offline. */
+  private savedRows = 0;
+  private savedOffline = false;
+  /** Both copies of "সব সংরক্ষণ" (header ≥1024px, footer below). */
+  private saveButtons: HTMLButtonElement[] = [];
+  /** The footer note: pending changes, rows held on this device, or saved. */
+  private noteEl: HTMLElement | null = null;
+  /** The live "মোট" cell per student. */
+  private totalEls = new Map<string, HTMLElement>();
+
   constructor(options: MarksViewOptions) {
     this.o = options;
     this.sectionId = localStorage.getItem('shikhon_last_section');
@@ -112,6 +150,10 @@ export class MarksView {
     }
     const cached = this.cacheGet<ExamSummary[]>(EXAMS_CACHE_PREFIX + this.sectionId);
     if (cached) this.exams = cached;
+    // Set before the first paint, so an empty cache draws the skeleton rather
+    // than flashing "no exams" for the length of the request.
+    this.loadingExams = true;
+    this.examsFailed = false;
     this.render();
     try {
       const res = await this.o.auth.authedFetch(
@@ -131,6 +173,9 @@ export class MarksView {
       this.denied = status === 403;
       if (this.denied) { this.exams = []; this.sheet = null; }
       this.offline = !this.denied && this.exams.length > 0;
+      this.examsFailed = !this.denied && this.exams.length === 0;
+    } finally {
+      this.loadingExams = false;
     }
     this.render();
   }
@@ -154,6 +199,7 @@ export class MarksView {
 
   private async loadSheet(examSubjectId: string): Promise<void> {
     this.loading = true;
+    this.sheetFailed = false;
     this.dirty.clear();
     const cached = this.cacheGet<MarksResponse>(MARKS_CACHE_PREFIX + examSubjectId);
     if (cached) this.sheet = cached;
@@ -172,6 +218,7 @@ export class MarksView {
       this.denied = status === 403;
       if (this.denied) this.sheet = null;
       this.offline = !this.denied && this.sheet !== null;
+      this.sheetFailed = !this.denied && this.sheet === null;
     }
     this.loading = false;
     this.render();
@@ -202,6 +249,7 @@ export class MarksView {
     this.saving = true;
     this.paintSaveBar();
     try {
+    let queued = 0;
     for (const [studentId, change] of this.dirty) {
       const row = sheet.marks.find((m) => m.studentId === studentId);
       if (!row) continue;
@@ -221,16 +269,20 @@ export class MarksView {
         },
       });
       Object.assign(row, change);
+      queued++;
     }
     this.dirty.clear();
     this.savedAt = Date.now();
+    // What the footer note reports: "৪ সারি এই যন্ত্রে জমা — ইন্টারনেট এলে যাবে".
+    this.savedRows = queued;
+    this.savedOffline = !navigator.onLine;
     this.cacheSet(MARKS_CACHE_PREFIX + sel.subject.examSubjectId, sheet);
     // Fire-and-forget: offline failure is the normal case, not an error.
     void Promise.resolve(this.o.outbox.flush()).catch(() => {});
     toast(this.o.doc, {
-      message: navigator.onLine
-        ? 'নম্বর সংরক্ষিত — জমা হচ্ছে'
-        : 'নম্বর এই যন্ত্রে সংরক্ষিত — সংযোগ পেলে নিজেই জমা হবে',
+      message: this.savedOffline
+        ? 'নম্বর এই যন্ত্রে সংরক্ষিত — সংযোগ পেলে নিজেই জমা হবে'
+        : 'নম্বর সংরক্ষিত — জমা হচ্ছে',
       tone: 'success',
     });
     } catch (err) {
@@ -271,8 +323,8 @@ export class MarksView {
    *  ceiling and says plainly that nothing was saved, so the number the
    *  teacher still sees in the box is not mistaken for a stored mark. */
   private fieldError(input: HTMLInputElement, max: number | null): void {
-    const label = input.parentElement;
-    const existing = label?.querySelector<HTMLElement>('.marks-error') ?? null;
+    const cell = input.parentElement;
+    const existing = cell?.querySelector<HTMLElement>('.marks-error') ?? null;
     if (max === null) {
       input.removeAttribute('aria-invalid');
       existing?.remove();
@@ -282,86 +334,123 @@ export class MarksView {
     const err = existing ?? this.o.doc.createElement('span');
     err.className = 'marks-error';
     err.setAttribute('role', 'alert');
-    err.textContent = `সর্বোচ্চ ${formatCount(max, 'bn')} — সংরক্ষণ হয়নি`;
-    if (!existing) label?.append(err);
+    err.textContent = '';
+    append(err, ...numText(this.o.doc, `সর্বোচ্চ ${formatCount(max, 'bn')} — সংরক্ষণ হয়নি`));
+    if (!existing) cell?.append(err);
   }
 
   /** "am I done?" — how many students are accounted for (a mark in any active
    *  component, or marked absent), out of the section total. Reflects unsaved
-   *  edits so the count moves as the teacher types. */
+   *  edits so the count moves as the teacher types.
+   *
+   *  The same pass paints each row's "মোট": the sum of the active components
+   *  as they stand now, "—" for an absent student or an empty row. A rejected
+   *  over-max value is not in `dirty`, so it is not summed — the same rule the
+   *  counter keeps. Display only; nothing here is stored or sent. */
   private paintComplete(): void {
-    const el = this.completeEl;
     const sheet = this.sheet;
-    if (!el || !sheet) return;
+    if (!sheet) return;
+    const d = this.o.doc;
     const total = sheet.marks.length;
     let done = 0;
     for (const row of sheet.marks) {
       const m = { ...row, ...this.dirty.get(row.studentId) };
-      if (m.isAbsent || this.activeKeys.some((k) => m[k] !== null && m[k] !== undefined)) done++;
+      const given = this.activeKeys.filter((k) => m[k] !== null && m[k] !== undefined);
+      if (m.isAbsent || given.length > 0) done++;
+      const cell = this.totalEls.get(row.studentId);
+      if (cell) {
+        const sum = given.reduce((s, k) => s + Number(m[k]), 0);
+        const text = m.isAbsent || given.length === 0
+          ? '—'
+          : formatCount(Math.round(sum * 100) / 100, 'bn');
+        cell.textContent = text;
+        cell.className = numClass('marks-total', text);
+      }
     }
-    el.textContent = `নম্বর দেওয়া হয়েছে ${formatCount(done, 'bn')} / ${formatCount(total, 'bn')}`;
-    el.dataset.done = String(done === total);
+    const counter = this.completeEl;
+    if (!counter) return;
+    counter.textContent = '';
+    append(counter, ...numText(d,
+      `নম্বর দেওয়া হয়েছে ${formatCount(done, 'bn')} / ${formatCount(total, 'bn')}`));
+    counter.dataset.done = String(done === total);
   }
 
-  private saveBarEl: HTMLElement | null = null;
-
+  /** Both save buttons, and the footer note, from the current state. */
   private paintSaveBar(): void {
-    if (!this.saveBarEl) return;
-    const btn = this.saveBarEl.querySelector('button');
-    if (btn) btn.disabled = this.dirty.size === 0;
-    const chip = this.saveBarEl.querySelector<HTMLElement>('.marks-chip');
-    if (chip) {
-      chip.textContent = this.dirty.size > 0
-        ? `${formatCount(this.dirty.size, 'bn')}টি পরিবর্তন`
-        : this.savedAt ? 'সংরক্ষিত ✓' : '';
+    const d = this.o.doc;
+    for (const btn of this.saveButtons) {
+      setBusy(btn, this.saving);
+      const label = btn.querySelector('.btn-label');
+      if (label) label.textContent = this.saving ? SAVING_LABEL : SAVE_LABEL;
+      if (!this.saving) btn.disabled = this.dirty.size === 0;
     }
+    const note = this.noteEl;
+    if (!note) return;
+    let glyph = SAVE_GLYPH;
+    let text: string;
+    if (this.dirty.size > 0) {
+      text = `${formatCount(this.dirty.size, 'bn')}টি পরিবর্তন`;
+    } else if (this.savedAt && this.savedOffline) {
+      text = `${formatCount(this.savedRows, 'bn')} সারি এই যন্ত্রে জমা — ইন্টারনেট এলে যাবে`;
+    } else if (this.savedAt) {
+      glyph = 'check';
+      text = 'সংরক্ষিত';
+    } else {
+      // The picker's helper line, moved here: the drawn footer is where this
+      // screen says what happens to marks when there is no connection.
+      text = 'নম্বর দেওয়া অফলাইনেও কাজ করে — সংযোগ পেলে নিজেই জমা হবে।';
+    }
+    note.textContent = '';
+    append(note, icon(d, glyph), el(d, 'span', { className: 'marks-note-text' }, ...numText(d, text)));
+  }
+
+  /** "সব সংরক্ষণ". Small in the desktop header as drawn; a full-width
+   *  bottom bar button on a phone. */
+  private saveButton(className: string, bottom: boolean): HTMLButtonElement {
+    const btn = button(this.o.doc, {
+      label: this.saving ? SAVING_LABEL : SAVE_LABEL,
+      variant: 'primary',
+      size: bottom ? 'md' : 'sm',
+      block: bottom,
+      className,
+      disabled: this.dirty.size === 0,
+      busy: this.saving,
+      onClick: () => { void this.save(); },
+    });
+    this.saveButtons.push(btn);
+    return btn;
   }
 
   private render(): void {
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';
+    this.saveButtons = [];
+    this.totalEls.clear();
+    this.noteEl = null;
+    this.completeEl = null;
 
-    // Once a sheet is chosen, name what is being marked — the wireframe's
-    // "১ম সাময়িক · নবম–ক · পদার্থবিজ্ঞান". Answers "which paper am I in?"
-    // without scrolling back to the picker.
+    // The header bar (02 Teacher §04): title, then the sheet's state chip and
+    // the small primary. The chip is "খসড়া" while marks can still change, and
+    // the lock badge once the exam is published or locked.
+    const sheetShown = !!(this.selected && this.sheet && !this.denied);
+    const editable = sheetShown && !this.readOnly && (this.sheet?.marks.length ?? 0) > 0;
+    const chip = !sheetShown
+      ? undefined
+      : this.readOnly
+        ? badge(d, { label: 'প্রকাশিত — পরিবর্তন করা যাবে না', tone: 'info', glyph: 'lock' })
+        : statusBadge(d, { state: 'draft', label: 'খসড়া' });
     append(root, pageHeader(d, {
       title: 'নম্বর এন্ট্রি',
-      subtitle: this.selected
-        ? `${this.selected.exam.nameBn} · ${this.selected.subject.subject.bn}`
-        : 'পরীক্ষা ও বিষয় বেছে নিয়ে নম্বর দিন — অফলাইনেও কাজ করে।',
-      badge: this.readOnly
-        ? badge(d, { label: 'প্রকাশিত — পরিবর্তন করা যাবে না', tone: 'info', glyph: 'lock' })
-        : undefined,
+      actions: chip ? [chip] : undefined,
+      primary: editable ? this.saveButton('marks-save-top', false) : undefined,
     }));
 
-    // §"published marks immutability". The gate existed; nothing said WHY the
-    // inputs were dead, so a teacher trying to fix a typo met a form that
-    // simply would not accept keystrokes.
-    if (this.readOnly) {
-      append(root, el(d, 'p', { className: 'att-offline-note' },
-        icon(d, 'lock', 'att-offline-glyph'),
-        el(d, 'span', {
-          text: 'এই পরীক্ষার ফলাফল প্রকাশিত হয়ে গেছে, তাই নম্বর আর পরিবর্তন করা যাবে না। '
-            + 'সংশোধন প্রয়োজন হলে প্রধান শিক্ষকের সাথে যোগাযোগ করুন।',
-        })));
-    }
-
-    // §5 of the closure pass: ONE permission sentence across the product,
-    // from humanError(), rather than each screen inventing "could not fetch".
+    // §5 of the closure pass: ONE permission sentence across the product.
+    // The same two sentences as before, now on the shared denied card.
     if (this.denied) {
-      append(root, emptyState(d, {
-        message: humanError('forbidden')
-          + ' প্রয়োজন হলে প্রধান শিক্ষকের সাথে যোগাযোগ করুন।',
-      }));
+      append(root, permissionState(d, { message: permissionMessageWithContact() }));
       return;
-    }
-
-    if (this.offline) {
-      append(root, el(d, 'p', { className: 'att-offline-note' },
-        el(d, 'span', {
-          text: 'অফলাইন — সর্বশেষ সংরক্ষিত নম্বর দেখানো হচ্ছে। নতুন নম্বর এই যন্ত্রে জমা থাকবে।',
-        })));
     }
 
     if (!this.sectionId) {
@@ -372,9 +461,27 @@ export class MarksView {
       return;
     }
 
+    // One panel: strips stacked on the table, states inside it (as dataTable
+    // draws them) so the picker stays where the teacher left it.
+    const panel = el(d, 'div', { className: 'card marks-sheet' });
+    append(root, panel);
+
+    // Offline is a statement about the data on screen, not a failure.
+    if (this.offline) {
+      append(panel, el(d, 'p', { className: 'offline-banner marks-offline' },
+        icon(d, 'wifi-off', 'offline-icon'),
+        el(d, 'span', {
+          text: 'অফলাইন — সর্বশেষ সংরক্ষিত নম্বর দেখানো হচ্ছে। নতুন নম্বর এই যন্ত্রে জমা থাকবে।',
+        })));
+    }
+
     // One option per (exam, subject) pair, on the P2 field — so the control
     // carries a VISIBLE label. It had an `aria-label` only, which told a
     // screen reader what it was and a teacher nothing until they opened it.
+    // The drawn strip shows the select unlabelled; R8 keeps the label, set
+    // inline beside the select in the strip. Only the helper is visually
+    // hidden: it still describes the select, and the same sentence is drawn
+    // as the footer note's resting text and in the nothing-picked empty state.
     const options = this.exams.flatMap((exam) =>
       exam.subjects.map((subject) => ({
         value: subject.examSubjectId,
@@ -384,6 +491,7 @@ export class MarksView {
       label: 'পরীক্ষা ও বিষয়',
       name: 'examSubject',
       kind: 'select',
+      className: 'marks-filter',
       value: this.selected?.subject.examSubjectId ?? '',
       helper: 'নম্বর দেওয়া অফলাইনেও কাজ করে — সংযোগ পেলে নিজেই জমা হবে।',
       options: [
@@ -401,79 +509,134 @@ export class MarksView {
         }
       },
     });
-    root.append(picker.root);
+    picker.root.querySelector('.ui-field-help')?.classList.add('ui-sr-only');
+    const filters = el(d, 'div', { className: 'marks-filters' }, picker.root);
+    append(panel, filters);
 
+    if (this.examsFailed && this.exams.length === 0) {
+      append(panel, errorState(d,
+        'পরীক্ষার তালিকা আনা গেল না। ইন্টারনেট নেই বা সার্ভার সাড়া দিচ্ছে না।',
+        () => { void this.init(); }));
+      return;
+    }
+    if (this.loadingExams && this.exams.length === 0) {
+      append(panel, listSkeleton(d, 5));
+      return;
+    }
     if (this.exams.length === 0 && !this.loading) {
-      root.append(emptyState(d, {
+      append(panel, emptyState(d, {
         glyph: 'award',
         message: 'এই সেকশনের জন্য কোনো পরীক্ষা পাওয়া যায়নি। পরীক্ষা তৈরি হলে '
           + 'এখানে নম্বর দেওয়া যাবে।',
       }));
       return;
     }
-    if (!this.selected) return;
+    const sel = this.selected;
+    if (!sel) {
+      append(panel, emptyState(d, {
+        glyph: 'edit',
+        message: 'পরীক্ষা ও বিষয় বেছে নিয়ে নম্বর দিন — অফলাইনেও কাজ করে।',
+      }));
+      return;
+    }
     if (this.loading && !this.sheet) {
-      root.append(listSkeleton(d, 5));
+      append(panel, listSkeleton(d, 5));
       return;
     }
     const sheet = this.sheet;
-    if (!sheet) return;
+    if (!sheet) {
+      if (this.sheetFailed) {
+        append(panel, errorState(d,
+          'নম্বরের তালিকা আনা গেল না। ইন্টারনেট নেই বা সার্ভার সাড়া দিচ্ছে না।',
+          () => { void this.loadSheet(sel.subject.examSubjectId); }));
+      }
+      return;
+    }
 
+    // §"published marks immutability". The gate existed; nothing said WHY the
+    // inputs were dead, so a teacher trying to fix a typo met a form that
+    // simply would not accept keystrokes.
     if (this.readOnly) {
-      const notice = d.createElement('p');
-      notice.className = 'offline-banner';
-      notice.textContent = 'ফলাফল প্রকাশিত/লকড — নম্বর এখন শুধু দেখা যাবে।';
-      root.append(notice);
+      append(panel, el(d, 'p', { className: 'marks-lock' },
+        icon(d, 'lock'),
+        el(d, 'span', {
+          text: 'এই পরীক্ষার ফলাফল প্রকাশিত হয়ে গেছে, তাই নম্বর আর পরিবর্তন করা যাবে না। '
+            + 'সংশোধন প্রয়োজন হলে প্রধান শিক্ষকের সাথে যোগাযোগ করুন।',
+        })));
+    }
+
+    if (sheet.marks.length === 0) {
+      append(panel, emptyState(d, {
+        glyph: 'users',
+        message: 'এই পরীক্ষার তালিকায় কোনো শিক্ষার্থী নেই। শিক্ষার্থী তালিকায় সেকশনটি দেখে নিন।',
+        action: { label: 'শিক্ষার্থী তালিকা', onClick: () => { location.hash = '/roster'; } },
+      }));
+      return;
     }
 
     const components = ([
-      { key: 'cqMarks', label: 'সৃজনশীল', max: sheet.maxima.cq },
-      { key: 'mcqMarks', label: 'MCQ', max: sheet.maxima.mcq },
-      { key: 'practicalMarks', label: 'ব্যবহারিক', max: sheet.maxima.practical },
-      { key: 'caMarks', label: 'ধারাবাহিক', max: sheet.maxima.ca },
-    ] as { key: MarkKey; label: string; max: number }[]).filter((c) => c.max > 0);
+      { key: 'cqMarks', label: 'CQ', en: true, max: sheet.maxima.cq },
+      { key: 'mcqMarks', label: 'MCQ', en: true, max: sheet.maxima.mcq },
+      { key: 'practicalMarks', label: 'ব্যবহারিক', en: false, max: sheet.maxima.practical },
+      { key: 'caMarks', label: 'ধারাবাহিক', en: false, max: sheet.maxima.ca },
+    ] as { key: MarkKey; label: string; en: boolean; max: number }[]).filter((c) => c.max > 0);
     this.activeKeys = components.map((c) => c.key);
 
     // Completeness counter, always visible: the teacher's answer to "have I
-    // marked everyone?" (§7.2). Sits above the list so it does not scroll away.
-    this.completeEl = d.createElement('p');
-    this.completeEl.className = 'marks-complete';
-    this.completeEl.setAttribute('aria-live', 'polite');
-    root.append(this.completeEl);
+    // marked everyone?" (§7.2). At the end of the strip, above the rows.
+    this.completeEl = el(d, 'p', {
+      className: 'marks-complete', attrs: { 'aria-live': 'polite' },
+    });
+    append(filters, this.completeEl);
 
-    const list = d.createElement('ul');
-    list.className = 'marks-list';
+    const table = el(d, 'table', { className: 'ui-table marks-table' });
+    append(table, el(d, 'caption', {
+      className: 'ui-sr-only',
+      text: `${sel.exam.nameBn} · ${sel.subject.subject.bn} — নম্বর`,
+    }));
+
+    const hrow = el(d, 'tr', {},
+      el(d, 'th', { className: 'marks-col-roll', text: 'রোল', attrs: { scope: 'col' } }),
+      el(d, 'th', { className: 'marks-col-name', text: 'নাম', attrs: { scope: 'col' } }));
+    for (const comp of components) {
+      // "CQ · ৫০" — the ceiling is in the header, so no field has to say it.
+      append(hrow, el(d, 'th', { attrs: { scope: 'col' }, data: { numeric: 'true' } },
+        comp.en ? lang(d, 'en', comp.label) : comp.label,
+        ' · ',
+        el(d, 'span', { className: 'n', text: formatCount(comp.max, 'bn') })));
+    }
+    append(hrow,
+      el(d, 'th', { text: 'মোট', attrs: { scope: 'col' }, data: { numeric: 'true' } }),
+      el(d, 'th', { className: 'marks-col-absent', text: 'অনুপস্থিত', attrs: { scope: 'col' } }));
+    append(table, el(d, 'thead', {}, hrow));
+
+    const tbody = el(d, 'tbody');
     for (const row of sheet.marks) {
-      const li = d.createElement('li');
-      li.className = 'marks-row';
+      const name = row.fullName.bn || row.fullName.en || '—';
+      // A roll number is an identifier: Latin, padded as the register is.
+      const roll = formatIdentifier(String(row.rollNo).padStart(2, '0'));
+      const tr = el(d, 'tr', { data: { key: row.studentId } },
+        el(d, 'td', { className: numClass('marks-roll', roll), text: roll }),
+        // The row header is the student: "আনিকা, CQ" rather than a bare value.
+        el(d, 'th', { className: 'marks-name', attrs: { scope: 'row' } }, ...numText(d, name)));
 
-      const who = d.createElement('div');
-      who.className = 'marks-who';
-      const roll = d.createElement('span');
-      roll.className = 'roster-roll';
-      roll.textContent = formatCount(row.rollNo, 'bn');
-      const name = d.createElement('span');
-      name.className = 'roster-name';
-      name.textContent = row.fullName.bn || row.fullName.en || '—';
-      who.append(roll, name);
-      li.append(who);
-
-      const inputs = d.createElement('div');
-      inputs.className = 'marks-inputs';
+      const rowInputs: HTMLInputElement[] = [];
       for (const comp of components) {
-        const label = d.createElement('label');
-        label.className = 'marks-label';
-        label.textContent = comp.label;
-        const input = d.createElement('input');
-        input.type = 'number';
-        input.className = 'marks-input';
-        input.min = '0';
-        input.max = String(comp.max);
-        input.step = '0.5';
-        input.inputMode = 'decimal';
-        input.disabled = this.readOnly || row.isAbsent;
         const v = row[comp.key];
-        input.value = v === null || v === undefined ? '' : String(v);
+        // type="text" + inputmode: the value is shown in Bangla digits, and
+        // parseUserNumber reads either system back (type="number" can hold
+        // neither ৪২ nor a mis-keyed value — it silently empties).
+        const input = el(d, 'input', {
+          className: 'marks-input n',
+          attrs: {
+            type: 'text',
+            inputmode: 'decimal',
+            autocomplete: 'off',
+            'aria-label': `${name} — ${comp.label}, সর্বোচ্চ ${formatCount(comp.max, 'bn')}`,
+          },
+        });
+        input.value = v === null || v === undefined ? '' : toBanglaDigits(v);
+        input.disabled = this.readOnly || row.isAbsent;
         input.addEventListener('input', () => {
           const raw = input.value.trim();
           if (raw === '') {
@@ -482,13 +645,13 @@ export class MarksView {
             this.paintComplete();
             return;
           }
-          const n = Number(raw);
+          const n = parseUserNumber(raw);
           // F-709: a mark over the paper's ceiling (or negative / not a
           // number) is REJECTED inline and persists nothing. The old code
           // silently clamped 75 to 70 — so a teacher who typed 75 saved 70
           // and never knew. Now the field flags it and the value is not
           // recorded until it is corrected.
-          if (!Number.isFinite(n) || n < 0 || n > comp.max) {
+          if (n === null || n < 0 || n > comp.max) {
             this.fieldError(input, comp.max);
             this.clearDirtyField(row.studentId, comp.key);
             this.paintComplete();
@@ -498,45 +661,40 @@ export class MarksView {
           this.markDirty(row.studentId, { [comp.key]: n } as Partial<MarkRow>);
           this.paintComplete();
         });
-        label.append(input);
-        inputs.append(label);
+        rowInputs.push(input);
+        append(tr, el(d, 'td', { className: 'marks-cell', data: { numeric: 'true' } }, input));
       }
 
-      const absent = d.createElement('label');
-      absent.className = 'marks-label marks-absent';
-      const cb = d.createElement('input');
-      cb.type = 'checkbox';
+      const totalCell = el(d, 'td', { className: 'marks-total', data: { numeric: 'true' } });
+      this.totalEls.set(row.studentId, totalCell);
+      append(tr, totalCell);
+
+      const cb = el(d, 'input', {
+        attrs: { type: 'checkbox', 'aria-label': `${name} — অনুপস্থিত` },
+      });
       cb.checked = row.isAbsent;
       cb.disabled = this.readOnly;
       cb.addEventListener('change', () => {
         this.markDirty(row.studentId, { isAbsent: cb.checked });
-        for (const inp of inputs.querySelectorAll('input')) inp.disabled = cb.checked || this.readOnly;
+        for (const inp of rowInputs) inp.disabled = cb.checked || this.readOnly;
+        this.paintComplete();
       });
-      absent.append(cb, d.createTextNode('অনুপস্থিত'));
-      li.append(inputs, absent);
+      append(tr, el(d, 'td', { className: 'marks-absent-cell' },
+        el(d, 'label', { className: 'marks-absent' }, cb)));
 
-      list.append(li);
+      append(tbody, tr);
     }
-    root.append(list);
+    append(table, tbody);
+    append(panel, el(d, 'div', { className: 'ui-table-scroll' }, table));
 
     if (!this.readOnly) {
-      const bar = d.createElement('div');
-      bar.className = 'marks-savebar';
-      const chip = d.createElement('span');
-      chip.className = 'marks-chip';
-      const save = d.createElement('button');
-      save.type = 'button';
-      save.className = 'btn-primary';
-      save.textContent = this.saving ? 'সংরক্ষণ হচ্ছে…' : 'সংরক্ষণ করুন';
-      save.disabled = this.dirty.size === 0 || this.saving;
-      if (this.saving) save.setAttribute('aria-busy', 'true');
-      save.addEventListener('click', () => { void this.save(); });
-      bar.append(chip, save);
-      root.append(bar);
-      this.saveBarEl = bar;
-      this.paintSaveBar();
+      this.noteEl = el(d, 'p', { className: 'marks-note' });
+      append(panel, el(d, 'div', { className: 'marks-savebar' },
+        this.noteEl,
+        this.saveButton('marks-save-bottom', true)));
     }
 
+    this.paintSaveBar();
     this.paintComplete();
   }
 }

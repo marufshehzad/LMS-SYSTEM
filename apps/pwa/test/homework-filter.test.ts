@@ -174,7 +174,9 @@ describe('homework inbox filter', () => {
     await new Promise((r) => setTimeout(r, 0));
     const active = root.querySelector('.ui-tab[aria-selected="true"]');
     assert.ok(active, 'one bucket is selected on open');
-    assert.ok((active!.textContent ?? '').startsWith('বাকি'), 'and it is the pending one');
+    // Ata Ekta 03 Student §03 names the pending bucket "জমা দিতে হবে".
+    assert.ok((active!.textContent ?? '').startsWith('জমা দিতে হবে'), 'and it is the pending one');
+    assert.equal(active!.getAttribute('data-id'), 'pending', 'by its id, not only its words');
   });
 
   test('selection is announced, not just coloured', async () => {
@@ -203,5 +205,90 @@ describe('homework inbox filter', () => {
     assert.ok(glyph!.querySelector('svg'), 'a drawn icon, not a stray character');
     assert.notEqual(glyph!.textContent, '·', 'and not the placeholder dot');
     assert.match(root.querySelector('.ui-state-empty .ui-state-title')?.textContent ?? '', /বাকি নেই/);
+  });
+});
+
+/**
+ * Ata Ekta §7 — the states that are not the happy path.
+ *
+ * Two of these were wrong before the redesign, and both looked plausible on
+ * screen: a first load that failed with nothing cached said "no homework"
+ * (a claim about data never seen), and a detail read that failed left the
+ * skeleton up forever.
+ */
+describe('homework states (Ata Ekta §7)', () => {
+  /** Mounts with a caller-supplied fetch, so each test can fail where it needs to. */
+  function mountWith(role: string, fetcher: (url: string) => Promise<unknown>) {
+    const root = dom.window.document.getElementById('root')!;
+    root.textContent = '';
+    const auth = { role, userId: 's-1', authedFetch: fetcher } as never;
+    return { root, view: new AssignmentsView({ root, doc: dom.window.document, auth, outbox: null as never }) };
+  }
+  const okList = (list: unknown[]) => ({ ok: true, status: 200, json: async () => ({ assignments: list }) });
+  const buttonNamed = (root: HTMLElement, text: string) =>
+    [...root.querySelectorAll('button')].find((b) => b.textContent === text) as HTMLButtonElement | undefined;
+
+  test('a failed first load with nothing cached is an error with a retry — never "no homework"', async () => {
+    localStorage.clear();
+    let calls = 0;
+    const { root } = mountWith('student', async () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError('Failed to fetch');
+      return okList([assignment('a', null)]);
+    });
+    await settle();
+    assert.ok(root.querySelector('.ui-state-error [role="alert"]'), 'the failure is announced');
+    assert.equal(root.querySelector('.ui-state-empty'), null, 'and is not dressed as an empty list');
+
+    const retry = buttonNamed(root, 'আবার চেষ্টা করুন');
+    assert.ok(retry, 'a way to try again');
+    retry!.click();
+    await settle();
+    assert.equal(root.querySelector('.ui-state-error'), null);
+    assert.equal(root.querySelectorAll('.ui-tab').length, 3, 'the retry loads the list');
+  });
+
+  test('a failed detail read says so, instead of a skeleton that never ends', async () => {
+    localStorage.clear();
+    const { root } = mountWith('student', async (url) => {
+      if (url.includes('assignmentId=')) throw new TypeError('Failed to fetch');
+      return okList([assignment('d-1', null)]);
+    });
+    await settle();
+    (root.querySelector('table.ui-table tbody .ui-row-open') as HTMLElement).click();
+    await settle();
+    assert.equal(root.querySelector('.is-skeleton'), null, 'not still loading');
+    assert.ok(root.querySelector('.ui-state-error'), 'an error the reader can act on');
+    assert.ok(buttonNamed(root, 'আবার চেষ্টা করুন'));
+    assert.equal(root.querySelectorAll('h1').length, 1, 'the screen still names itself');
+  });
+
+  test('a refused detail read is the permission state, and offers no retry', async () => {
+    localStorage.clear();
+    const { root } = mountWith('student', async (url) => {
+      if (url.includes('assignmentId=')) {
+        return { ok: false, status: 403, json: async () => ({ error: 'forbidden' }) };
+      }
+      return okList([assignment('d-2', null)]);
+    });
+    await settle();
+    (root.querySelector('table.ui-table tbody .ui-row-open') as HTMLElement).click();
+    await settle();
+    assert.ok(root.querySelector('.ui-state-denied'), 'a refusal, not an outage');
+    assert.equal(root.querySelector('.ui-state-error'), null);
+    assert.equal(buttonNamed(root, 'আবার চেষ্টা করুন'), undefined, 'retrying a refusal is futile');
+  });
+
+  test('a teacher opens on the review queue, and each row says its marking progress in words', async () => {
+    localStorage.clear();
+    const row = { ...assignment('t-1', null), submissionCount: 24, ungradedCount: 6 };
+    const { root } = mountWith('teacher', async () => okList([row]));
+    await settle();
+    const active = root.querySelector('.ui-tab[aria-selected="true"]');
+    assert.equal(active?.getAttribute('data-id'), 'pending', 'unmarked work is the default bucket');
+    assert.ok((active?.textContent ?? '').startsWith('জমা দেখা বাকি'));
+    const count = root.querySelector('.assign-count');
+    assert.equal(count?.textContent, '২৪ জমা · ৬ দেখা বাকি', 'colour is never the only carrier');
+    assert.ok(count?.querySelector('.n'), 'and its numbers are in the numeral face');
   });
 });

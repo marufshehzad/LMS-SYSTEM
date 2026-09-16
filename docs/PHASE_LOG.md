@@ -16298,3 +16298,78 @@ code the fixture never used still reads as Bangla.
 
 PWA suite **952 tests**, all passing; typecheck 0 errors; build clean;
 `index.html` byte-identical at `496199bd`.
+
+---
+
+# Ata Ekta — wave 2, batch B: teacher, student and shared academic screens (2026-09-17)
+
+Thirteen units: teacher home, roster, marks, assignments, scripts, substitute,
+class performance, calendar, documents, learn, my attendance, results,
+routine. Eight needed a repair pass after review (marks, scripts, substitute,
+classperf, calendar, documents, learn, routine).
+
+The first two launches of this batch did no work: both ended inside two
+minutes on the account's usage limits, with every agent failing before its
+first edit. The tree was checked clean before relaunching.
+
+## What changed on screen (highlights)
+
+- **Teacher home** is the three drawn blocks: the "এখন চলছে" card with the
+  page's single primary (হাজিরা নিন), a three-figure strip in one row, and the
+  task list. The day list and the quick tiles are gone, as drawn.
+- **Marks** accepts a mark typed in Bangla digits (it was `type=number`), shows
+  a live total that never counts a rejected mark, and keeps its save button in
+  step in both places it is drawn.
+- **Calendar** is Saturday-first as a Bangladeshi school reads a month, with
+  icon arrows named by their target month, and a fixed four-colour key in
+  words.
+- **Results** paints the GPA hero in Bangla digits.
+- **Learn** opens on the subject the student tapped (F-802): `app.ts` dropped
+  the id between আমার বিষয় and the learn route — the same shape as the guardian
+  results defect in wave 1 — and now carries it in the route.
+- Class performance, my attendance, routine, substitute, documents, scripts
+  and roster follow their design pages; rolls stay Latin identifiers.
+
+## Merged centrally
+
+405 CSS rules added, 142 carried rules retired, no raw hex, no undefined
+token, no conflict. Two new guards ran before the merge, because a batch of
+thirteen screens is where one screen's cleanup starts to cost another:
+
+- a **removal guard**: a carried rule is retired only if no OTHER screen's
+  file still emits its classes. It refused three (`.seg-bar`, used by
+  assignments and the exam routine; `.progress-fill[data-low]`, used by
+  subjects; `.data-table sup`, used by four admin screens).
+- a **cross-wave guard**: a new rule may not silently change a property an
+  earlier wave already set for the same selector. None did.
+
+Six icons added: chevron-left, save, credit-card, receipt, printer,
+trending-down.
+
+## Tests (R13)
+
+Owned test files were extended rather than rewritten — 660 lines added, 37
+removed. The removed lines are old visual details: the Friday-first weekend
+order (now Saturday-first), `৪ ·` roll prefixes (rolls are Latin identifiers),
+the button copy `নতুন এন্ট্রি` (drawn as `নতুন ঘটনা`), and consequence text now
+read from the overlay in `document.body`. The calendar key moved from "only
+the states this month uses" to the drawn fixed key of four, and gained a test
+that the school's weekend is keyed only when there is one.
+
+One shared change: the permission test's results secret became
+`[5৫][.][0০][0০]`. With the GPA painted in Bangla digits, a pattern that knew
+only `5.00` would have passed a leak of the figure a refused reader must not
+see.
+
+## Defects found, recorded not fixed (R4) — BACKLOG AE-11
+
+The heaviest: **answer-script photos would never reach storage.** The client
+posts only the metadata row; the server's contract expects the image on a
+presigned PUT that neither side implements. Latent today, because
+`SCRIPT_STORAGE_ENABLED` is hard-coded false and every upload is refused with
+503 — but switching storage on would record pages whose images do not exist.
+
+## Verified
+
+PWA suite **993 tests**, all passing; typecheck 0 errors; build clean;
+`index.html` byte-identical at `496199bd`.

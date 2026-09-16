@@ -32,13 +32,31 @@
  * documents, each with its own letterhead and a page break before it. The
  * office presses print once. Forty requests and forty print dialogues is not
  * a bulk feature.
+ *
+ * ── Ata Ekta (04 Guardian §05 · 05 Principal §07) ──────────────────────
+ * Both designs draw only the first step, the choice of document, and they
+ * draw it at two widths from the same parts: a glyph, the document's name
+ * over one line saying when it is given, and a trailing mark. So the picker
+ * is ONE `list()` of `listItem()` rows and CSS decides the shape — below
+ * 1024px the guardian's flat 62px rows with a download arrow, at 1024px and
+ * up the principal's two-column hairline grid with a printer. No cards, no
+ * badges, no chevrons: neither drawing has one.
+ *
+ * The record pickers, the preview and the print step are not drawn anywhere.
+ * They are built from 14 Components parts (sectionHeading, field, list,
+ * button, the states) rather than the legacy system-row / roster-row markup.
  */
-import { formatBdt } from '../../../packages/ui-core/src/format.ts';
+import { formatBdt, formatIdentifier } from '../../../packages/ui-core/src/format.ts';
 import type { Auth } from './auth.ts';
+import { hasIcon } from './icon.ts';
 import {
-  skeleton, errorState, emptyState, successNote, bnNum, bnDate,
+  errorState, emptyState, successNote, bnNum, bnDate,
 } from './view-states.ts';
-import { permissionMessage, pageHeader, card, statusBadge,} from './ui/index.ts';
+import {
+  permissionMessage, permissionState, pageHeader, sectionHeading, list, listItem,
+  field, button, buttonRow, badge, el, icon, uid, numText, hasDigit, numClass,
+  listSkeleton, announce,
+} from './ui/index.ts';
 
 export type DocKind =
   | 'fee_receipt' | 'report_card' | 'admit_card'
@@ -51,23 +69,53 @@ interface DocSpec {
   /** What has to be chosen before this can be produced. */
   needs: 'receipt' | 'exam+students' | 'students' | 'student' | 'section';
   bulk: boolean;
+  /** The glyph the design draws beside it — see `drawn()`. */
+  glyph: string;
 }
 
-/** The six the master plan names, in its order of daily-habit frequency. */
+/**
+ * The design's glyph when the icon set carries it, else the nearest one it
+ * does. `credit-card`, `receipt` and `printer` are drawn but not yet in
+ * icon.ts; until they are, a row shows the stand-in rather than the
+ * unknown-icon dot, and switches to the drawn glyph the moment the set gains
+ * it. `undefined` as the stand-in means no glyph at all.
+ */
+function drawn(name: string, standIn?: string): string | undefined {
+  return hasIcon(name) ? name : standIn;
+}
+
+/**
+ * The six the designs name, in 05 Principal §07's order, with its glyphs and
+ * its condition lines — except where the drawn line says something the
+ * server does not do. The admit card prints no photo (the photo box is the ID
+ * card's), a transfer certificate is issued whatever is owed (it prints
+ * whether dues are cleared), and no count of report cards exists before a
+ * section is chosen, so those three keep true words. প্রত্যয়নপত্র (05 §07)
+ * has no document kind or endpoint and is not offered; পরিচয়পত্র, which the
+ * code has and the design does not draw, takes its place.
+ */
 const DOCS: DocSpec[] = [
-  { kind: 'fee_receipt', labelBn: 'ফি রসিদ',
-    descBn: 'পরিশোধের প্রমাণ — অভিভাবককে দেওয়ার জন্য', needs: 'receipt', bulk: false },
-  { kind: 'report_card', labelBn: 'প্রগতি পত্র',
-    descBn: 'প্রকাশিত ফলাফলের মার্কশিট', needs: 'exam+students', bulk: true },
-  { kind: 'admit_card', labelBn: 'প্রবেশপত্র',
-    descBn: 'পরীক্ষার সূচি, হল ও আসনসহ', needs: 'exam+students', bulk: true },
-  { kind: 'id_card', labelBn: 'পরিচয়পত্র',
-    descBn: 'শিক্ষার্থীর আইডি কার্ড', needs: 'students', bulk: true },
-  { kind: 'transfer_certificate', labelBn: 'ছাড়পত্র',
-    descBn: 'প্রতিষ্ঠান ত্যাগের প্রত্যয়নপত্র', needs: 'student', bulk: false },
-  { kind: 'attendance_sheet', labelBn: 'হাজিরা শিট',
-    descBn: 'খালি ছক — নেটওয়ার্ক ছাড়া খাতায় হাজিরা নেওয়ার জন্য', needs: 'section', bulk: false },
+  { kind: 'report_card', labelBn: 'প্রগতি পত্র', descBn: 'লোগো ও স্বাক্ষরসহ',
+    glyph: 'file-text', needs: 'exam+students', bulk: true },
+  { kind: 'admit_card', labelBn: 'প্রবেশপত্র', descBn: 'পরীক্ষার সূচি ও আসন নম্বর',
+    glyph: drawn('credit-card', 'clipboard')!, needs: 'exam+students', bulk: true },
+  { kind: 'fee_receipt', labelBn: 'বেতনের রসিদ', descBn: 'পরিশোধিত ইনভয়েসের বিপরীতে',
+    glyph: drawn('receipt', 'wallet')!, needs: 'receipt', bulk: false },
+  { kind: 'id_card', labelBn: 'পরিচয়পত্র', descBn: 'শিক্ষার্থীর আইডি কার্ড',
+    glyph: 'user', needs: 'students', bulk: true },
+  { kind: 'transfer_certificate', labelBn: 'ছাড়পত্র', descBn: 'প্রতিষ্ঠান ত্যাগের প্রত্যয়নপত্র',
+    glyph: 'log-out', needs: 'student', bulk: false },
+  { kind: 'attendance_sheet', labelBn: 'হাজিরা খাতা', descBn: 'মাসভিত্তিক — ছাপার জন্য',
+    glyph: 'check-square', needs: 'section', bulk: false },
 ];
+
+/**
+ * 04 Guardian §05 draws a family's three in its own order — the mark sheet,
+ * then the receipt, then the admit card — where the principal's grid puts the
+ * receipt third. Same rows, re-arranged for the roles that page is drawn for.
+ */
+const FAMILY_ORDER: DocKind[] = ['report_card', 'fee_receipt', 'admit_card'];
+const FAMILY_ROLES = new Set(['guardian', 'student']);
 
 interface TreeSection {
   id: string; name: string; studentCount: number;
@@ -115,6 +163,8 @@ export class DocumentsView {
   private generating = false;
   private error = '';
   private notice = '';
+  /** The refusal last read out, so a re-render does not say it twice. */
+  private announcedRefusal = '';
 
   constructor(options: DocumentsViewOptions) {
     this.o = options;
@@ -271,6 +321,12 @@ export class DocumentsView {
 
   // ── render ────────────────────────────────────────────────────────────
 
+  /** Back to the choice of document — the first crumb's reset, reused. */
+  private back(): void {
+    this.kind = null; this.previewHtml = ''; this.error = ''; this.notice = '';
+    this.render();
+  }
+
   private render(): void {
     const d = this.o.doc;
     const root = this.o.root;
@@ -278,35 +334,57 @@ export class DocumentsView {
 
     root.append(pageHeader(d, {
       title: 'নথি ও ছাপা',
-      subtitle: this.kind
-        ? this.spec()!.descBn
-        : 'প্রতিষ্ঠানের নিজস্ব লোগো, সিল ও স্বাক্ষরসহ',
+      // 05 Principal §07's bar is the title alone. Once a document is chosen
+      // the line under it says what that document is.
+      subtitle: this.kind ? this.spec()!.descBn : undefined,
       // The chosen document as a real crumb, so the way back is a control and
       // not a sentence.
       crumbs: this.kind
         ? [
-            { label: 'নথি ও ছাপা', onClick: () => {
-                this.kind = null; this.previewHtml = ''; this.error = ''; this.notice = '';
-                this.render();
-              } },
+            { label: 'নথি ও ছাপা', onClick: () => this.back() },
             { label: this.spec()!.labelBn },
           ]
         : undefined,
     }));
 
     if (this.notice) root.append(successNote(d, this.notice));
+    const refused = this.error.includes('অনুমতি');
+    if (!refused) this.announcedRefusal = '';
     if (this.error) {
-      root.append(errorState(d, this.error,
-        this.error.includes('অনুমতি') ? undefined : () => {
-          this.error = '';
-          if (this.kind) void this.pick(this.kind); else this.render();
-        }));
-      if (this.error.includes('অনুমতি')) { root.append(this.typePicker()); return; }
+      if (refused) {
+        // A refusal is a lock, never a red alarm with a retry: retrying a
+        // permission failure is the definition of futile. The sentence stays
+        // the canonical one the fetch already chose (B-30).
+        //
+        // No "who to ask" line. This screen keeps only the status, not the
+        // server's error code, so it cannot tell a refused ROLE from a school
+        // whose plan lacks the module (403 service_unavailable / tenant_blocked)
+        // — and sending a guardian to the head teacher about the second is the
+        // B-84 defect deniedContact() exists to prevent. Reported as a bug;
+        // once the code is kept, pass `contact: deniedContact({ code })`.
+        const denied = permissionState(d, { message: this.error });
+        denied.classList.add('doc-state');
+        root.append(denied, this.typePicker());
+        // permissionState is a calm role="note", not a live region, and the
+        // root was just rebuilt under the person's focus. errorState's
+        // role="alert" used to read the refusal out; this keeps that.
+        if (this.announcedRefusal !== this.error) {
+          announce(d, this.error, true);
+          this.announcedRefusal = this.error;
+        }
+        return;
+      }
+      const failed = errorState(d, this.error, () => {
+        this.error = '';
+        if (this.kind) void this.pick(this.kind); else this.render();
+      });
+      failed.classList.add('doc-state');
+      root.append(failed);
     }
 
     if (!this.kind) { root.append(this.typePicker()); return; }
 
-    if (this.loading) { root.append(skeleton(d, 3)); return; }
+    if (this.loading) { root.append(listSkeleton(d, 3)); return; }
 
     root.append(this.selectors());
     root.append(this.actions());
@@ -314,57 +392,72 @@ export class DocumentsView {
   }
 
   /**
-   * Whether a section-wide request resolves to more than this reader.
+   * The choice of document. One DOM for both drawings:
    *
-   * The endpoint decides for real: `app.can_see_student` returns the caller's
-   * own record for a student and their wards for a guardian, whatever section
-   * id is asked for. This only decides whether to SAY "একসাথে সবার".
+   *   ul.ui-list.doc-kinds > li.ui-list-item.doc-kind > button.ui-list-hit
+   *     span.ui-list-glyph · div.ui-list-main (title, meta) ·
+   *     span.ui-list-status > span.doc-go (download ‖ printer) · chevron
+   *
+   * Below 1024px CSS shows the download arrow (04 §05); at 1024px and up the
+   * list becomes a two-column grid and shows the printer (05 §07). Both
+   * trailing glyphs are decoration — the row's name is its title.
    */
-  private canBulk(): boolean {
-    return !['student', 'guardian'].includes(this.o.auth.role);
-  }
-
   private typePicker(): HTMLElement {
     const d = this.o.doc;
-    const wrap = d.createElement('div');
 
     const offered = DOCS.filter((s) => this.o.allowed.includes(s.kind));
     if (offered.length === 0) {
-      wrap.append(emptyState(d, {
+      // Not "nothing here yet": nothing will ever be here for this role, so
+      // it is the refusal state, not the empty one.
+      const denied = permissionState(d, {
         message: 'আপনার ভূমিকার জন্য কোনো নথি তৈরির অনুমতি নেই।',
-      }));
-      return wrap;
+      });
+      denied.classList.add('doc-state');
+      return denied;
+    }
+    if (FAMILY_ROLES.has(this.o.auth.role)) {
+      const at = (k: DocKind) => {
+        const i = FAMILY_ORDER.indexOf(k);
+        return i < 0 ? FAMILY_ORDER.length : i;
+      };
+      offered.sort((a, b) => at(a.kind) - at(b.kind));
     }
 
-    // Cards, not a table. These are a CHOICE of what to print, each with a
-    // sentence explaining when to use it — and a sentence does not belong in
-    // a table cell. The grid gives a desktop three across instead of six
-    // full-width strips down a 1120px column.
-    const grid = d.createElement('div');
-    grid.className = 'ui-card-grid';
-    for (const spec of offered) {
-      grid.append(card(d, {
+    const printGlyph = drawn('printer', 'download')!;
+    const rows = offered.map((spec) => {
+      const li = listItem(d, {
         title: spec.labelBn,
-        subtitle: spec.descBn,
-        glyph: 'book',
-        variant: 'interactive',
+        meta: spec.descBn,
+        glyph: spec.glyph,
+        className: 'doc-kind',
         onClick: () => void this.pick(spec.kind),
-        // Only where "everyone" is more than one person. `DOCS_FOR` rightly
-        // lets a family print its own mark sheet, and the endpoint narrows a
-        // student's section request to their own row via `app.can_see_student`
-        // — so the badge was promising a child a capability they do not have.
-        action: spec.bulk && this.canBulk()
-          ? statusBadge(d, { state: 'invited', label: 'একসাথে সবার' })
-          : undefined,
-      }));
-    }
-    wrap.append(grid);
-    return wrap;
+        status: el(d, 'span', { className: 'doc-go' },
+          icon(d, 'download', 'ui-icon doc-go-m'),
+          icon(d, printGlyph, 'ui-icon doc-go-d')),
+      });
+      // Named by its title and described by its condition line, as the
+      // interactive card was — not both run together as one long name.
+      const hit = li.querySelector<HTMLElement>('.ui-list-hit');
+      const title = li.querySelector<HTMLElement>('.ui-list-title');
+      const meta = li.querySelector<HTMLElement>('.ui-list-meta');
+      if (hit && title) {
+        title.id = uid('doc');
+        hit.setAttribute('aria-labelledby', title.id);
+        if (meta) {
+          meta.id = uid('doc');
+          hit.setAttribute('aria-describedby', meta.id);
+        }
+      }
+      return li;
+    });
+    const kinds = list(d, 'নথির ধরন', ...rows);
+    kinds.classList.add('doc-kinds');
+    return kinds;
   }
 
   private selectors(): HTMLElement {
     const d = this.o.doc;
-    const wrap = d.createElement('div');
+    const wrap = el(d, 'div', { className: 'doc-steps' });
     const need = this.spec()!.needs;
 
     if (need === 'receipt') { wrap.append(this.receiptPicker()); return wrap; }
@@ -377,92 +470,90 @@ export class DocumentsView {
 
   private receiptPicker(): HTMLElement {
     const d = this.o.doc;
-    const wrap = d.createElement('div');
-    const h = d.createElement('h2');
-    h.className = 'section-heading';
-    h.textContent = 'রসিদ বেছে নিন';
-    wrap.append(h);
+    const wrap = el(d, 'div');
+    wrap.append(sectionHeading(d, { title: 'রসিদ বেছে নিন' }));
 
     if (this.receipts.length === 0) {
-      wrap.append(emptyState(d, {
+      wrap.append(this.stepEmpty({
+        glyph: 'wallet',
         message: 'এখনো কোনো পরিশোধের রসিদ নেই। ফি জমা হলে এখানে রসিদ দেখা যাবে।',
+        action: { label: 'অন্য নথি বেছে নিন', onClick: () => this.back() },
       }));
       return wrap;
     }
 
-    const list = d.createElement('div');
-    list.className = 'system-list';
-    for (const r of this.receipts) {
-      const row = d.createElement('button');
-      row.type = 'button';
-      row.className = 'system-row';
-      if (r.id === this.receiptId) row.setAttribute('aria-current', 'true');
-      const t = d.createElement('span');
-      t.className = 'system-title';
-      t.textContent = r.receiptNo;
-      const desc = d.createElement('span');
-      desc.className = 'system-desc';
-      desc.textContent = `${bnDate(r.issuedAt)} · ${formatBdt(r.amount)}`
-        + (r.studentNameBn ? ` · ${r.studentNameBn}` : '');
-      row.append(t, desc);
-      row.addEventListener('click', () => {
-        this.receiptId = r.id; this.previewHtml = ''; this.error = ''; this.render();
+    const rows = this.receipts.map((r) => {
+      const chosen = r.id === this.receiptId;
+      // listItem sets every number in the numeral face where it stands — the
+      // receipt number, the date, the amount — so the words beside them keep
+      // the text face.
+      const li = listItem(d, {
+        title: r.receiptNo,
+        meta: `${bnDate(r.issuedAt)} · ${formatBdt(r.amount)}`
+          + (r.studentNameBn ? ` · ${r.studentNameBn}` : ''),
+        // The chosen row says so in a word, not only in its shade.
+        status: chosen ? badge(d, { label: 'বাছাই করা', tone: 'neutral' }) : undefined,
+        onClick: () => {
+          this.receiptId = r.id; this.previewHtml = ''; this.error = ''; this.render();
+        },
       });
-      list.append(row);
-    }
-    wrap.append(list);
+      if (chosen) li.querySelector('.ui-list-hit')?.setAttribute('aria-current', 'true');
+      return li;
+    });
+    const receipts = list(d, 'রসিদ', ...rows);
+    receipts.classList.add('doc-receipts');
+    wrap.append(receipts);
     return wrap;
+  }
+
+  /** An empty step, spaced like the steps around it. */
+  private stepEmpty(o: Parameters<typeof emptyState>[1]): HTMLElement {
+    const node = emptyState(this.o.doc, o);
+    node.classList.add('doc-state');
+    return node;
   }
 
   private examPicker(): HTMLElement {
     const d = this.o.doc;
-    const wrap = d.createElement('div');
-    const field = d.createElement('label');
-    field.className = 'field';
-    field.style.padding = '0 var(--s-4)';
-    field.textContent = 'পরীক্ষা';
+    const wrap = el(d, 'div');
 
     if (this.exams.length === 0) {
-      wrap.append(emptyState(d, {
+      wrap.append(this.stepEmpty({
+        glyph: 'clipboard',
         message: this.kind === 'report_card'
           ? 'প্রকাশিত ফলাফলসহ কোনো পরীক্ষা পাওয়া যায়নি। ফলাফল প্রকাশের পর প্রগতি পত্র তৈরি করা যাবে।'
           : 'কোনো পরীক্ষা পাওয়া যায়নি।',
+        action: { label: 'অন্য নথি বেছে নিন', onClick: () => this.back() },
       }));
       return wrap;
     }
 
-    const select = d.createElement('select');
-    select.className = 'field-input';
-    const blank = d.createElement('option');
-    blank.value = ''; blank.textContent = 'বেছে নিন…';
-    select.append(blank);
     // A report card is only meaningful for a published exam; the endpoint
     // refuses otherwise, so the picker does not offer it.
     const usable = this.kind === 'report_card'
       ? this.exams.filter((e) => e.status === 'published')
       : this.exams;
-    for (const e of usable) {
-      const opt = d.createElement('option');
-      opt.value = e.examId;
-      opt.textContent = e.examNameBn;
-      opt.selected = e.examId === this.examId;
-      select.append(opt);
-    }
-    select.addEventListener('change', () => {
-      this.examId = select.value; this.previewHtml = ''; this.render();
+    const f = field(d, {
+      label: 'পরীক্ষা',
+      name: 'examId',
+      kind: 'select',
+      value: this.examId,
+      options: [
+        { value: '', label: 'বেছে নিন…' },
+        ...usable.map((e) => ({ value: e.examId, label: e.examNameBn })),
+      ],
+      onChange: (v) => { this.examId = v; this.previewHtml = ''; this.render(); },
     });
-    field.append(select);
-    wrap.append(field);
+    // An <option> cannot hold a span, so the control carries `n` when any
+    // exam name has a year in it.
+    if (usable.some((e) => hasDigit(e.examNameBn))) f.input.classList.add('n');
+    wrap.append(f.root);
     return wrap;
   }
 
   private sectionPicker(): HTMLElement {
     const d = this.o.doc;
-    const wrap = d.createElement('div');
-    const field = d.createElement('label');
-    field.className = 'field';
-    field.style.padding = 'var(--s-2) var(--s-4) 0';
-    field.textContent = 'শ্রেণি ও শাখা';
+    const wrap = el(d, 'div');
 
     const options: { id: string; label: string; n: number }[] = [];
     for (const lvl of this.tree?.classes ?? []) {
@@ -478,76 +569,72 @@ export class DocumentsView {
     }
 
     if (options.length === 0) {
-      wrap.append(emptyState(d, {
+      wrap.append(this.stepEmpty({
+        glyph: 'layers',
         message: 'কোনো শাখা তৈরি হয়নি। একাডেমিক কাঠামোতে শাখা তৈরি করুন।',
+        action: { label: 'অন্য নথি বেছে নিন', onClick: () => this.back() },
       }));
       return wrap;
     }
 
-    const select = d.createElement('select');
-    select.className = 'field-input';
-    const blank = d.createElement('option');
-    blank.value = ''; blank.textContent = 'বেছে নিন…';
-    select.append(blank);
-    for (const o of options) {
-      const opt = d.createElement('option');
-      opt.value = o.id;
-      opt.textContent = `${o.label} (${bnNum(o.n)} জন)`;
-      opt.selected = o.id === this.sectionId;
-      select.append(opt);
-    }
-    select.addEventListener('change', () => {
-      if (select.value) void this.loadRoster(select.value);
+    const f = field(d, {
+      label: 'শ্রেণি ও শাখা',
+      name: 'sectionId',
+      kind: 'select',
+      value: this.sectionId,
+      options: [
+        { value: '', label: 'বেছে নিন…' },
+        ...options.map((o) => ({ value: o.id, label: `${o.label} (${bnNum(o.n)} জন)` })),
+      ],
+      onChange: (v) => { if (v) void this.loadRoster(v); },
     });
-    field.append(select);
-    wrap.append(field);
+    // Every option carries a head count; an <option> cannot hold a span.
+    f.input.classList.add('n');
+    wrap.append(f.root);
     return wrap;
   }
 
   private studentPicker(): HTMLElement {
     const d = this.o.doc;
-    const wrap = d.createElement('div');
+    const wrap = el(d, 'div');
     if (!this.sectionId) return wrap;
 
     const single = this.spec()!.needs === 'student';
-    const h = d.createElement('h2');
-    h.className = 'section-heading';
-    h.textContent = single ? 'শিক্ষার্থী' : `শিক্ষার্থী · ${bnNum(this.selected.size)} নির্বাচিত`;
-    wrap.append(h);
+
+    let selectAll: HTMLElement | undefined;
+    if (!single && this.roster.length) {
+      const everyone = this.selected.size === this.roster.length;
+      selectAll = button(d, {
+        label: everyone ? 'সবার নির্বাচন বাতিল' : 'সবাইকে নির্বাচন করুন',
+        variant: 'ghost',
+        size: 'sm',
+        onClick: () => {
+          if (everyone) this.selected.clear();
+          else for (const s of this.roster) this.selected.add(s.studentId);
+          this.previewHtml = ''; this.render();
+        },
+      });
+    }
+    wrap.append(sectionHeading(d, {
+      title: single ? 'শিক্ষার্থী' : `শিক্ষার্থী · ${bnNum(this.selected.size)} নির্বাচিত`,
+      action: selectAll,
+    }));
 
     if (this.roster.length === 0) {
-      wrap.append(emptyState(d, { message: 'এই শাখায় কোনো শিক্ষার্থী নেই।' }));
+      // No action: the section field just above is the next thing to do.
+      wrap.append(this.stepEmpty({ glyph: 'users', message: 'এই শাখায় কোনো শিক্ষার্থী নেই।' }));
       return wrap;
     }
 
-    if (!single) {
-      const bar = d.createElement('div');
-      bar.className = 'action-row';
-      bar.style.padding = '0 var(--s-4) var(--s-2)';
-      const all = d.createElement('button');
-      all.type = 'button';
-      all.className = 'btn-ghost btn-small';
-      const everyone = this.selected.size === this.roster.length;
-      all.textContent = everyone ? 'সবার নির্বাচন বাতিল' : 'সবাইকে নির্বাচন করুন';
-      all.addEventListener('click', () => {
-        if (everyone) this.selected.clear();
-        else for (const s of this.roster) this.selected.add(s.studentId);
-        this.previewHtml = ''; this.render();
+    const rows = this.roster.map((s) => {
+      const box = el(d, 'input', {
+        attrs: {
+          type: single ? 'radio' : 'checkbox',
+          name: single ? 'doc-student' : null,
+          'aria-label': s.nameBn,
+        },
       });
-      bar.append(all);
-      wrap.append(bar);
-    }
-
-    const list = d.createElement('ul');
-    list.className = 'roster-list';
-    for (const s of this.roster) {
-      const li = d.createElement('li');
-      li.className = 'roster-row';
-      const box = d.createElement('input');
-      box.type = single ? 'radio' : 'checkbox';
-      if (single) box.name = 'doc-student';
       box.checked = this.selected.has(s.studentId);
-      box.setAttribute('aria-label', s.nameBn);
       box.addEventListener('change', () => {
         if (single) { this.selected.clear(); if (box.checked) this.selected.add(s.studentId); }
         else if (box.checked) this.selected.add(s.studentId);
@@ -555,76 +642,76 @@ export class DocumentsView {
         this.previewHtml = '';
         this.render();
       });
-      const roll = d.createElement('span');
-      roll.className = 'roster-roll';
-      roll.textContent = bnNum(s.rollNo);
-      const name = d.createElement('span');
-      name.className = 'roster-name';
-      name.textContent = s.nameBn;
-      li.append(box, roll, name);
-      list.append(li);
-    }
-    wrap.append(list);
+      // The whole row is the box's label, so the tap target is the row and
+      // not an 18px square. The roll is an identifier and stays Latin, the
+      // way the paper register prints it.
+      const roll = formatIdentifier(s.rollNo);
+      return el(d, 'li', { className: 'ui-list-item' },
+        el(d, 'label', { className: 'ui-list-hit doc-pick' },
+          box,
+          el(d, 'span', { className: numClass('ui-list-glyph doc-roll', roll), text: roll }),
+          el(d, 'div', { className: 'ui-list-main' },
+            el(d, 'span', { className: 'ui-list-title' }, ...numText(d, s.nameBn)))));
+    });
+    const students = list(d, 'শিক্ষার্থী', ...rows);
+    students.classList.add('doc-students');
+    wrap.append(students);
     return wrap;
   }
 
   private actions(): HTMLElement {
     const d = this.o.doc;
-    const wrap = d.createElement('div');
-    wrap.className = 'action-row';
-    wrap.style.padding = 'var(--s-3) var(--s-4)';
+    const row = buttonRow(d);
+    row.classList.add('doc-actions');
 
     const n = this.count();
     if (this.spec()!.bulk && this.selected.size > 0) {
       // The count the brief asks for, said before the button rather than
       // discovered from a print dialogue with forty pages in it.
-      const note = d.createElement('p');
-      note.className = 'att-sub';
-      note.style.marginInlineEnd = 'auto';
-      note.textContent = `${bnNum(n)} জন নির্বাচিত · ${bnNum(n)} টি নথি তৈরি হবে`;
-      wrap.append(note);
+      row.append(el(d, 'p', { className: 'doc-count' },
+        ...numText(d, `${bnNum(n)} জন নির্বাচিত · ${bnNum(n)} টি নথি তৈরি হবে`)));
     }
 
-    const go = d.createElement('button');
-    go.type = 'button';
-    go.className = 'btn-primary';
-    go.disabled = this.generating;
-    go.textContent = this.generating
-      ? (n > 1 ? `${bnNum(n)} টি তৈরি হচ্ছে…` : 'তৈরি হচ্ছে…')
-      : (this.previewHtml ? 'আবার তৈরি করুন' : 'পূর্বরূপ দেখুন');
-    go.addEventListener('click', () => void this.generate());
-    wrap.append(go);
+    // One accent button at a time, and it is the one this step exists for:
+    // before a preview, making one; after it, printing it. DOM order is
+    // priority order, so the row ends on the primary.
+    row.append(button(d, {
+      label: this.generating
+        ? (n > 1 ? `${bnNum(n)} টি তৈরি হচ্ছে…` : 'তৈরি হচ্ছে…')
+        : (this.previewHtml ? 'আবার তৈরি করুন' : 'পূর্বরূপ দেখুন'),
+      variant: this.previewHtml ? 'secondary' : 'primary',
+      busy: this.generating,
+      onClick: () => void this.generate(),
+    }));
 
     if (this.previewHtml) {
-      const print = d.createElement('button');
-      print.type = 'button';
-      print.className = 'btn-secondary';
-      print.textContent = 'ছাপুন';
-      print.addEventListener('click', () => this.print());
-      wrap.append(print);
+      row.append(button(d, {
+        label: 'ছাপুন',
+        variant: 'primary',
+        glyph: drawn('printer'),
+        onClick: () => this.print(),
+      }));
     }
-    return wrap;
+    return row;
   }
 
   private preview(): HTMLElement {
     const d = this.o.doc;
-    const wrap = d.createElement('section');
-    const h = d.createElement('h2');
-    h.className = 'section-heading';
-    h.textContent = 'পূর্বরূপ';
-    wrap.append(h);
+    const wrap = el(d, 'section', { className: 'doc-preview-wrap' });
+    wrap.append(sectionHeading(d, { title: 'পূর্বরূপ' }));
 
-    const note = d.createElement('p');
-    note.className = 'att-sub';
-    note.style.padding = '0 var(--s-4) var(--s-2)';
     // Say where the PDF comes from: this product has no PDF renderer and no
     // bucket, and a school looking for a "Download PDF" button should be
     // told where the file actually comes from rather than left hunting.
-    note.textContent = 'ছাপার সময় "Save as PDF" বেছে নিলে পিডিএফ ফাইল সংরক্ষণ করা যাবে।';
-    wrap.append(note);
+    wrap.append(el(d, 'p', {
+      className: 'doc-preview-note',
+      text: 'ছাপার সময় "Save as PDF" বেছে নিলে পিডিএফ ফাইল সংরক্ষণ করা যাবে।',
+    }));
 
     const frame = d.createElement('iframe');
-    frame.className = 'doc-preview';
+    // `doc-frame` scopes this view's frame rules, so the carried
+    // `.doc-preview` the timetable's print preview still uses is untouched.
+    frame.className = 'doc-preview doc-frame';
     frame.title = `${this.spec()?.labelBn ?? 'নথি'} — পূর্বরূপ`;
     // Sandboxed, and `allow-scripts` is deliberately absent: the document is
     // server-generated markup in which every interpolated value is escaped,

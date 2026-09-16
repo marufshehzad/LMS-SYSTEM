@@ -581,7 +581,12 @@ async function main() {
         mount: (container) => {
           new SubjectsView({
             root: container, doc: document, auth,
-            onOpenSubject: () => { location.hash = '#/learn'; },
+            // F-802: the subject tapped travels with the link, the same way a
+            // guardian's child id reaches the results route. It only picks
+            // the chapter strip's starting subject; nothing extra is fetched.
+            onOpenSubject: (subjectId) => {
+              location.hash = `#/learn?subjectId=${encodeURIComponent(subjectId)}`;
+            },
           });
         },
       },
@@ -590,7 +595,9 @@ async function main() {
         labelBn: 'পড়াশোনা',
         glyph: 'book-open',
         mount: (container) => {
-          new LearnView({ root: container, doc: document, auth, outbox: engine });
+          const subjectId = new URLSearchParams(
+            (location.hash.split('?')[1] ?? '')).get('subjectId') ?? undefined;
+          new LearnView({ root: container, doc: document, auth, outbox: engine, subjectId });
         },
       },
       {

@@ -1,15 +1,19 @@
 /**
- * My results — F-805, wireframe §6.5
+ * My results — F-805, wireframe §6.5 · Ata Ekta 03 Student §04, 04 Guardian §03
  *
- * Rebuilt from an accordion of exams to the layout the wireframe specifies:
- * an exam selector, one summary card, a component-breakdown table, the
- * optional-subject footnote, and a trend across terms.
+ * The drawn screen: one panel, the GPA large on an --ok ground (the student's
+ * first question), the change since the last exam in an info strip, then one
+ * row per subject — name, total, grade. Around it, the pieces §6.5 makes
+ * load-bearing and the drawing leaves out: the exam selector (in the page
+ * header), the publication date (in the hero), the component breakdown, the
+ * optional-subject footnote and the trend across terms.
  *
  * Three rules from §6.5, each load-bearing:
  *
  *   The component breakdown (CQ / MCQ / practical / CA) is ALWAYS visible.
  *   It is the board's own structure. A single total hides which half of the
- *   paper went wrong, which is the only actionable thing on the screen.
+ *   paper went wrong, which is the only actionable thing on the screen. On a
+ *   phone it is each row's meta line; on a desktop, its own columns.
  *
  *   The optional-subject footnote is MANDATORY — "the rule most commonly
  *   misunderstood, and showing it prevents a support call." A student
@@ -21,10 +25,15 @@
  *   this view could not show an unpublished result if it tried.
  */
 import type { Auth } from './auth.ts';
-import { iconSvg } from './icon.ts';
-import { formatCount, formatIdentifier } from '../../../packages/ui-core/src/format.ts';
+import { hasIcon } from './icon.ts';
+import { formatCount, toBanglaDigits, ordinalBn } from '../../../packages/ui-core/src/format.ts';
 import { refuseUnlessOk, isDenied } from './http-status.ts';
-import { permissionState, permissionMessage, deniedMessage, deniedContact, pageHeader, field, statusBadge,} from './ui/index.ts';
+import { bnDate } from './view-states.ts';
+import {
+  permissionState, deniedMessage, deniedContact, pageHeader, field, statusBadge,
+  listSkeleton, emptyState, errorState, dataTable, sectionHeading,
+  el, icon, uid, numText, numClass, type Column,
+} from './ui/index.ts';
 
 interface SubjectRow {
   subjectBn: string;
@@ -65,6 +74,31 @@ const bn = (n: number | string | null | undefined): string =>
 const mark = (s: string | null): string =>
   s === null || s === '' ? '—' : formatCount(Number(Number(s).toFixed(Number(s) % 1 ? 2 : 0)), 'bn');
 
+/**
+ * A GPA as the design draws it: two places, Bangla digits ("৪.৬৭"). It is a
+ * figure read beside Bangla marks and a Bangla rank, not an identifier.
+ */
+const gpaBn = (gpa: string | null): string =>
+  gpa ? toBanglaDigits(Number(gpa).toFixed(2)) : '—';
+
+/** "৪র্থ"; past the named ordinals, "১৩তম" rather than a bare "১৩". */
+const rankBn = (n: number): string => (n <= 12 ? ordinalBn(n) : `${toBanglaDigits(n)}তম`);
+
+/**
+ * What a subject's grade letter means, for its colour (03 Student §04: A+/A
+ * on --ok, A- on --warn). The letter itself is the word; a component failure
+ * is also stated in the মন্তব্য column, never by the colour alone (F-812).
+ */
+function gradeMeaning(s: SubjectRow): 'ok' | 'warn' | 'danger' | 'none' {
+  if (s.isAbsent) return 'none';
+  if (s.componentFailed) return 'danger';
+  if (s.gradePoint === null || s.gradePoint === '') return 'none';
+  const gp = Number(s.gradePoint);
+  if (!Number.isFinite(gp)) return 'none';
+  if (gp >= 4) return 'ok';
+  return gp > 0 ? 'warn' : 'danger';
+}
+
 export interface ResultsViewOptions {
   root: HTMLElement;
   doc: Document;
@@ -85,6 +119,12 @@ export class ResultsView {
   private selected: string | null = null;
   private loading = true;
   private offline = false;
+  /**
+   * The read failed and there is nothing cached to fall back on. Without
+   * this an outage fell through to the EMPTY state and told a family that
+   * nothing had been published — a false statement about their child.
+   */
+  private failed = false;
   /**
    * The server refused this read (403). Distinct from `offline`, and the
    * distinction is the point: an outage is temporary and a refusal is not,
@@ -126,6 +166,7 @@ export class ResultsView {
         ? this.selected
         : this.results[0]?.examId ?? null;
       this.offline = false;
+      this.failed = false;
       try { localStorage.setItem(this.cacheKey, JSON.stringify(this.results)); } catch { /* quota */ }
     } catch (err) {
       if (isDenied(err)) {
@@ -135,10 +176,19 @@ export class ResultsView {
         return;
       }
       if (this.results.length > 0) this.offline = true;
+      else this.failed = true;
     } finally {
       this.loading = false;
       this.render();
     }
+  }
+
+  /** The error state's "আবার চেষ্টা করুন": the same read, run again. */
+  private retry(): void {
+    this.failed = false;
+    this.loading = true;
+    this.render();
+    void this.load();
   }
 
   private render(): void {
@@ -167,9 +217,6 @@ export class ResultsView {
     root.append(pageHeader(d, {
       title: 'ফলাফল',
       subtitle: 'প্রকাশিত পরীক্ষার ফলাফল ও মার্কশিট',
-      badge: this.offline
-        ? statusBadge(d, { state: 'pending', label: 'অফলাইন — সংরক্ষিত ফলাফল' })
-        : undefined,
       actions: picker ? [picker.root] : undefined,
     }));
 
@@ -184,163 +231,202 @@ export class ResultsView {
       return;
     }
 
-    if (this.loading && this.results.length === 0) { this.skeleton(root); return; }
-    if (this.results.length === 0) { this.empty(root); return; }
+    // Foundations §04: three grey rows, never a spinner.
+    if (this.loading && this.results.length === 0) { root.append(listSkeleton(d, 3)); return; }
+
+    if (this.failed && this.results.length === 0) {
+      root.append(errorState(d,
+        'ফলাফল আনা গেল না। ইন্টারনেট নেই বা সার্ভার সাড়া দিচ্ছে না।',
+        () => this.retry()));
+      return;
+    }
+
+    if (this.results.length === 0) {
+      // Honest about WHY it is empty: a result exists but is not published
+      // yet, and the family cannot see it until the school says so.
+      root.append(emptyState(d, {
+        glyph: 'award',
+        message: 'এখনো কোনো ফলাফল প্রকাশিত হয়নি। স্কুল প্রকাশ করলে এখানে দেখা যাবে।',
+      }));
+      return;
+    }
 
     const r = this.results.find((x) => x.examId === this.selected) ?? this.results[0];
-    root.append(this.summary(r));
-    root.append(this.table(r));
+    if (this.offline) {
+      // A --warn-tint banner above the cached sheet (§7), not a grey chip
+      // beside the title. This screen only reads, so nothing is queued and
+      // there is no count to show.
+      root.append(el(d, 'p', { className: 'offline-banner result-offline' },
+        icon(d, 'wifi-off', 'offline-icon'),
+        el(d, 'span', { text: 'অফলাইন — সংরক্ষিত ফলাফল' })));
+    }
+    root.append(this.sheet(r));
     const note = this.optionalFootnote(r);
     if (note) root.append(note);
     if (this.results.length > 1) root.append(this.trend());
   }
 
-  /** GPA, rank, publication date and the mark-sheet download (§6.5). */
-  private summary(r: Result): HTMLElement {
+  /**
+   * Hero, change strip and subject rows as ONE panel (03 §04, 04 §03): the
+   * rounded shell clips the hero's ground, and the rows run straight on
+   * under it. Named by the exam it shows.
+   */
+  private sheet(r: Result): HTMLElement {
     const d = this.o.doc;
-    const card = d.createElement('section');
-    card.className = 'card result-summary';
-
-    const row = d.createElement('div');
-    row.className = 'result-summary-row';
-
-    const gpaBox = d.createElement('div');
-    const gpaLabel = d.createElement('span');
-    gpaLabel.className = 'result-stat-label';
-    gpaLabel.textContent = 'GPA';
-    const gpaVal = d.createElement('span');
-    gpaVal.className = 'result-stat-value';
-    // GPA is an identifier-like figure a guardian cross-checks against a
-    // printed mark sheet, so it stays Latin (ui-core's numeral policy).
-    gpaVal.textContent = r.gpa ? formatIdentifier(Number(r.gpa).toFixed(2)) : '—';
-    gpaBox.append(gpaLabel, gpaVal);
-    row.append(gpaBox);
-
-    if (r.rankInSection) {
-      const rankBox = d.createElement('div');
-      const rl = d.createElement('span');
-      rl.className = 'result-stat-label';
-      rl.textContent = 'মেধাক্রম';
-      const rv = d.createElement('span');
-      rv.className = 'result-stat-value';
-      rv.textContent = bn(r.rankInSection);
-      rankBox.append(rl, rv);
-      row.append(rankBox);
-    }
-
-    const gradeBox = d.createElement('div');
-    const gl = d.createElement('span');
-    gl.className = 'result-stat-label';
-    gl.textContent = 'গ্রেড';
-    const gv = d.createElement('span');
-    gv.className = 'result-stat-value';
-    gv.textContent = r.letterGrade ?? '—';
-    gradeBox.append(gl, gv);
-    row.append(gradeBox);
-    card.append(row);
-
-    if (r.publishedAt) {
-      const pub = d.createElement('p');
-      pub.className = 'result-published';
-      pub.textContent = `প্রকাশিত: ${new Date(r.publishedAt).toLocaleDateString('bn-BD', {
-        day: 'numeric', month: 'long', year: 'numeric',
-      })}`;
-      card.append(pub);
-    }
-
-    if (!r.isPass) {
-      // Failure is stated in words, with a count — never as a red cell the
-      // reader has to interpret (F-812).
-      const chip = d.createElement('span');
-      chip.className = 'status-chip';
-      chip.dataset.state = 'danger';
-      chip.textContent = r.subjectsFailed > 0
-        ? `${bn(r.subjectsFailed)} বিষয়ে অকৃতকার্য`
-        : 'অকৃতকার্য';
-      card.append(chip);
-    }
-    return card;
+    const examId = uid('result-exam');
+    return el(d, 'section', { className: 'result-sheet', attrs: { 'aria-labelledby': examId } },
+      this.summary(r, examId),
+      this.trendNote(r),
+      this.table(r));
   }
 
   /**
-   * The component table. `data-table` from the component vocabulary (§3):
-   * dense, horizontally scrollable, first column frozen — because six
-   * columns of marks do not fit 360px and the subject name is the one you
-   * must keep in view while scrolling the rest.
+   * The hero: exam name, then GPA · grade · rank on one baseline, then the
+   * publication date. A pass sits on --ok; a fail turns the ground --danger
+   * and says so in words, with a count — never as colour the reader has to
+   * interpret (F-812).
+   */
+  private summary(r: Result, examId: string): HTMLElement {
+    const d = this.o.doc;
+    const gpa = gpaBn(r.gpa);
+    const rank = r.rankInSection ? `শ্রেণিতে ${rankBn(r.rankInSection)}` : null;
+    const fail = r.subjectsFailed > 0
+      ? `${bn(r.subjectsFailed)} বিষয়ে অকৃতকার্য`
+      : 'অকৃতকার্য';
+    return el(d, 'div', {
+      className: 'result-hero', data: { outcome: r.isPass ? 'pass' : 'fail' },
+    },
+      el(d, 'p', { className: 'result-hero-exam', attrs: { id: examId } },
+        ...numText(d, r.examNameBn)),
+      el(d, 'div', { className: 'result-hero-row' },
+        // The drawing prints the figures bare; the words a screen reader
+        // needs to know which figure is which stay, visually hidden.
+        el(d, 'span', { className: 'result-hero-gpa' },
+          el(d, 'span', { className: 'ui-sr-only', text: 'GPA ', attrs: { lang: 'en' } }),
+          el(d, 'span', { className: numClass('', gpa), text: gpa })),
+        el(d, 'span', { className: 'result-hero-grade' },
+          el(d, 'span', { className: 'ui-sr-only', text: 'গ্রেড ' }),
+          r.letterGrade ?? '—'),
+        rank ? el(d, 'span', { className: 'result-hero-rank' }, ...numText(d, rank)) : null),
+      r.publishedAt
+        ? el(d, 'p', { className: 'result-hero-date' },
+            ...numText(d, `প্রকাশিত: ${bnDate(r.publishedAt)}`))
+        : null,
+      r.isPass
+        ? null
+        : el(d, 'p', { className: 'result-hero-fail' },
+            icon(d, 'alert-triangle'),
+            el(d, 'span', {}, ...numText(d, fail))));
+  }
+
+  /**
+   * 04 Guardian §03's strip — "গত পরীক্ষার চেয়ে ০.২১ বেড়েছে". Derived from
+   * the previous published exam, which this view already holds (the list is
+   * newest first). Nothing to compare, nothing shown.
+   */
+  private trendNote(r: Result): HTMLElement | null {
+    const d = this.o.doc;
+    const i = this.results.indexOf(r);
+    const prev = i >= 0 ? this.results[i + 1] : undefined;
+    if (!prev || !r.gpa || !prev.gpa) return null;
+    const now = Number(r.gpa);
+    const was = Number(prev.gpa);
+    if (!Number.isFinite(now) || !Number.isFinite(was)) return null;
+    const delta = Math.round((now - was) * 100) / 100;
+    const by = toBanglaDigits(Math.abs(delta).toFixed(2));
+    const text = delta > 0
+      ? `গত পরীক্ষার চেয়ে ${by} বেড়েছে`
+      : delta < 0 ? `গত পরীক্ষার চেয়ে ${by} কমেছে` : 'গত পরীক্ষার সমান';
+    // Drawn only where the set carries the glyph: a fall has no
+    // trending-down in icon.ts yet, and the words carry it meanwhile.
+    const glyph = delta > 0 ? 'trending-up' : delta < 0 ? 'trending-down' : '';
+    return el(d, 'p', { className: 'result-trend-note' },
+      glyph && hasIcon(glyph) ? icon(d, glyph) : null,
+      el(d, 'span', {}, ...numText(d, text)));
+  }
+
+  /**
+   * The subject rows. One declaration, two renderings (13 Responsive ০১):
+   * on a phone each subject is the drawn row — name, total, grade — with the
+   * component marks as its meta line; on a desktop, a table with a column
+   * per component. Absent and component failure are stated in words.
    */
   private table(r: Result): HTMLElement {
     const d = this.o.doc;
-    const wrap = d.createElement('div');
-    wrap.className = 'table-scroll';
-    const t = d.createElement('table');
-    t.className = 'data-table';
-
     const anyPractical = r.subjects.some((s) => s.practicalMarks !== null);
     const anyCa = r.subjects.some((s) => s.caMarks !== null);
-    const cols = ['বিষয়', 'CQ', 'MCQ'];
-    if (anyPractical) cols.push('ব্যা.');
-    if (anyCa) cols.push('ধারা.');
-    cols.push('মোট', 'গ্রেড');
+    const anyNote = r.subjects.some((s) => s.isAbsent || s.componentFailed);
 
-    const thead = d.createElement('thead');
-    const hr = d.createElement('tr');
-    for (const c of cols) {
-      const th = d.createElement('th');
-      th.textContent = c;
-      th.scope = 'col';
-      hr.append(th);
+    const figure = (className: string, text: string) =>
+      el(d, 'span', { className: numClass(className, text), text });
+    // One component mark. The visible label is for the phone's meta line,
+    // where no header row names the figure; it is aria-hidden because the
+    // list already gives a reader the column header, and hidden in the
+    // desktop table, whose header says it.
+    const part = (label: string, pick: (s: SubjectRow) => string | null) => (s: SubjectRow) =>
+      el(d, 'span', { className: 'result-part' },
+        el(d, 'span', {
+          className: 'result-part-label', text: `${label} `, attrs: { 'aria-hidden': 'true' },
+        }),
+        figure('', s.isAbsent ? '—' : mark(pick(s))));
+
+    const columns: Array<Column<SubjectRow>> = [
+      {
+        key: 'subject', header: 'বিষয়', mobile: 'title',
+        // The superscript ⁴ the wireframe ties to the footnote below.
+        cell: (s) => el(d, 'span', {}, s.subjectBn,
+          s.requirementType === 'optional' ? el(d, 'sup', { className: 'n', text: '৪' }) : null),
+      },
+      { key: 'cq', header: 'CQ', numeric: true, mobile: 'meta', cell: part('CQ', (s) => s.cqMarks) },
+      { key: 'mcq', header: 'MCQ', numeric: true, mobile: 'meta', cell: part('MCQ', (s) => s.mcqMarks) },
+    ];
+    if (anyPractical) {
+      columns.push({
+        key: 'practical', header: 'ব্যা.', numeric: true, mobile: 'meta',
+        cell: part('ব্যা.', (s) => s.practicalMarks),
+      });
     }
-    thead.append(hr);
-    t.append(thead);
-
-    const tbody = d.createElement('tbody');
-    for (const s of r.subjects) {
-      const tr = d.createElement('tr');
-      const th = d.createElement('th');
-      th.scope = 'row';
-      th.textContent = s.subjectBn;
-      // The superscript ⁴ the wireframe ties to the footnote below.
-      if (s.requirementType === 'optional') {
-        const sup = d.createElement('sup');
-        sup.textContent = '৪';
-        th.append(sup);
-      }
-      tr.append(th);
-
-      if (s.isAbsent) {
-        const td = d.createElement('td');
-        td.colSpan = cols.length - 1;
-        td.className = 'is-absent';
-        td.textContent = 'অনুপস্থিত';
-        tr.append(td);
-      } else {
-        const vals = [mark(s.cqMarks), mark(s.mcqMarks)];
-        if (anyPractical) vals.push(mark(s.practicalMarks));
-        if (anyCa) vals.push(mark(s.caMarks));
-        vals.push(mark(s.totalMarks));
-        for (const v of vals) {
-          const td = d.createElement('td');
-          td.textContent = v;
-          tr.append(td);
-        }
-        const g = d.createElement('td');
-        g.className = 'cell-grade';
-        g.textContent = s.gradeLetter ?? '—';
-        if (s.componentFailed) {
-          // Component failure is why a good total can still be a fail. It
-          // is stated, not implied by a colour.
-          const note = d.createElement('span');
-          note.className = 'cell-note';
-          note.textContent = ' (উপাদানে অকৃতকার্য)';
-          g.append(note);
-        }
-        tr.append(g);
-      }
-      tbody.append(tr);
+    if (anyCa) {
+      columns.push({
+        key: 'ca', header: 'ধারা.', numeric: true, mobile: 'meta',
+        cell: part('ধারা.', (s) => s.caMarks),
+      });
     }
-    t.append(tbody);
-    wrap.append(t);
-    return wrap;
+    columns.push(
+      {
+        key: 'total', header: 'মোট', numeric: true, mobile: 'status',
+        cell: (s) => figure('result-total', s.isAbsent ? '—' : mark(s.totalMarks)),
+      },
+      {
+        key: 'grade', header: 'গ্রেড', mobile: 'status',
+        cell: (s) => el(d, 'span', {
+          className: 'result-grade',
+          data: { grade: gradeMeaning(s) },
+          text: s.isAbsent ? '—' : (s.gradeLetter ?? '—'),
+        }),
+      },
+    );
+    if (anyNote) {
+      // Component failure is why a good total can still be a fail. It is
+      // stated, not implied by a colour.
+      columns.push({
+        key: 'note', header: 'মন্তব্য', mobile: 'subtitle',
+        cell: (s) => (s.isAbsent
+          ? statusBadge(d, { state: 'absent', label: 'অনুপস্থিত' })
+          : s.componentFailed
+            ? statusBadge(d, { state: 'failed', label: 'উপাদানে অকৃতকার্য' })
+            : null),
+      });
+    }
+
+    return dataTable<SubjectRow>(d, {
+      className: 'result-subjects',
+      columns,
+      rows: r.subjects,
+      rowKey: (s) => s.subjectBn,
+      caption: `${r.examNameBn} — বিষয়ভিত্তিক নম্বর`,
+      empty: { glyph: 'award', message: 'এই পরীক্ষার বিষয়ভিত্তিক নম্বর এখনো আসেনি।' },
+    });
   }
 
   /**
@@ -349,70 +435,29 @@ export class ResultsView {
    */
   private optionalFootnote(r: Result): HTMLElement | null {
     if (!r.subjects.some((s) => s.requirementType === 'optional')) return null;
-    const p = this.o.doc.createElement('p');
-    p.className = 'result-footnote';
-    p.textContent =
-      '৪ চতুর্থ বিষয় — নির্ধারিত সীমার অতিরিক্ত গ্রেড পয়েন্ট মোট GPA-তে যোগ হয়েছে, '
-      + 'এবং এই বিষয়টি বিষয়সংখ্যার হিসাবে ধরা হয়নি।';
-    return p;
+    return el(this.o.doc, 'p', { className: 'result-optional-note' },
+      ...numText(this.o.doc,
+        '৪ চতুর্থ বিষয় — নির্ধারিত সীমার অতিরিক্ত গ্রেড পয়েন্ট মোট GPA-তে যোগ হয়েছে, '
+        + 'এবং এই বিষয়টি বিষয়সংখ্যার হিসাবে ধরা হয়নি।'));
   }
 
   /** Trend across terms — §6.5's প্রবণতা row. Oldest first, so it reads left to right. */
   private trend(): HTMLElement {
     const d = this.o.doc;
-    const box = d.createElement('section');
-    box.className = 'result-trend';
-    const h = d.createElement('h2');
-    h.textContent = 'প্রবণতা';
-    box.append(h);
-
-    const list = d.createElement('ol');
-    list.className = 'trend-list';
-    const ordered = [...this.results].reverse();
-    for (const r of ordered) {
-      const li = d.createElement('li');
-      li.className = 'trend-point';
-      if (r.examId === this.selected) li.dataset.current = 'true';
-      const v = d.createElement('span');
-      v.className = 'trend-gpa';
-      v.textContent = r.gpa ? formatIdentifier(Number(r.gpa).toFixed(2)) : '—';
-      const l = d.createElement('span');
-      l.className = 'trend-label';
-      l.textContent = r.examNameBn;
-      li.append(v, l);
-      list.append(li);
+    const list = el(d, 'ol', { className: 'result-history-list' });
+    for (const r of [...this.results].reverse()) {
+      const current = r.examId === this.selected;
+      const gpa = gpaBn(r.gpa);
+      list.append(el(d, 'li', {
+        className: 'result-history-point',
+        data: { current: current ? 'true' : undefined },
+        attrs: { 'aria-current': current ? 'true' : null },
+      },
+        el(d, 'span', { className: numClass('result-history-gpa', gpa), text: gpa }),
+        el(d, 'span', { className: 'result-history-exam' }, ...numText(d, r.examNameBn))));
     }
-    box.append(list);
-    return box;
-  }
-
-  private skeleton(root: HTMLElement): void {
-    const d = this.o.doc;
-    const card = d.createElement('div');
-    card.className = 'card result-summary is-skeleton';
-    card.setAttribute('aria-busy', 'true');
-    for (const c of ['skel skel-title', 'skel skel-line', 'skel skel-bar']) {
-      const x = d.createElement('div'); x.className = c; card.append(x);
-    }
-    root.append(card);
-  }
-
-  private empty(root: HTMLElement): void {
-    const d = this.o.doc;
-    const box = d.createElement('div');
-    box.className = 'empty-state';
-    const g = d.createElement('div');
-    g.className = 'empty-glyph'; g.setAttribute('aria-hidden', 'true');
-    // P6: a real icon. The stray U+20DD COMBINING ENCLOSING CIRCLE here
-    // was a workaround for `emptyState` ignoring the glyph it was
-    // handed — a combining mark with nothing to combine with renders
-    // as a stray ring, a dotted circle, or nothing at all.
-    g.innerHTML = iconSvg('award');
-    const p = d.createElement('p');
-    // Honest about WHY it is empty: a result exists but is not published
-    // yet, and the family cannot see it until the school says so.
-    p.textContent = 'এখনো কোনো ফলাফল প্রকাশিত হয়নি। স্কুল প্রকাশ করলে এখানে দেখা যাবে।';
-    box.append(g, p);
-    root.append(box);
+    return el(d, 'section', { className: 'result-history' },
+      sectionHeading(d, { title: 'প্রবণতা' }),
+      list);
   }
 }
