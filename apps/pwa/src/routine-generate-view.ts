@@ -12,11 +12,19 @@
  *
  * ── No fabricated progress ─────────────────────────────────────────────────
  * `POST /rms/generate` is one blocking request. There is no stream, no job
- * id, no percentage — so this shows a spinner and an ELAPSED SECOND COUNT,
- * which is true, and says in words that the server is doing the whole job in
- * one go. A progress bar creeping to 90% and sitting there is a lie a person
- * learns to distrust, and once they distrust the waiting they distrust the
- * result. `ui/feedback.ts:progress` is deliberately not imported.
+ * id, no percentage — so this shows an ELAPSED SECOND COUNT, which is true,
+ * and says in words that the server is doing the whole job in one go. A
+ * progress bar creeping to 90% and sitting there is a lie a person learns to
+ * distrust, and once they distrust the waiting they distrust the result.
+ * `ui/feedback.ts:progress` is deliberately not imported.
+ *
+ * Ata Ekta (06 Routine §03) draws the wait as a bar, a big figure and the
+ * rules being kept. The bar is kept as a SWEEP that fills nothing — it says
+ * "working", never "68%" — and hides under reduced motion, where a frozen
+ * sweep would read as a position. The big figure is the elapsed count. The
+ * rules are the ones the solver really applies while placing (services/
+ * rms-svc/src/solve.ts); the weekly cap is only checked afterwards, and the
+ * row says so rather than showing a tick it has not earned.
  *
  * ── A hard conflict outranks everything ────────────────────────────────────
  * The teacher and room exclusion constraints only bind an ACTIVE routine, so
@@ -34,9 +42,10 @@
  * work left, and it is presented that way.
  */
 import {
-  el, pageHeader, card, button, buttonRow, statusBadge, sectionHeading,
-  statRow, statCard, permissionState, deniedMessage, deniedContact,
-  announce, inlineLoader, listSkeleton, openDrawer, successNote, field,
+  el, icon, numText, pageHeader, card, button, buttonRow, statusBadge, badge,
+  statRow, statCard, list, listItem, permissionState, deniedMessage, deniedContact,
+  announce, listSkeleton, errorState, openDrawer, successNote, field,
+  type ButtonVariant,
 } from './ui/index.ts';
 import { refuseUnlessOk, isDenied, HttpStatus } from './http-status.ts';
 import type { Auth } from './auth.ts';
@@ -46,6 +55,24 @@ const bn = (n: number): string => String(n).replace(/\d/g, (d) => BN_DIGITS[Numb
 const SHIFT_BN: Record<string, string> = {
   morning: 'সকাল', day: 'দিবা', evening: 'সান্ধ্য', single: 'একক',
 };
+
+/**
+ * 06 Routine §03 "যা মানা হচ্ছে" — while the request is open.
+ *
+ * Not a verdict per rule: nothing comes back until the run ends, so no row
+ * can say "held" or "broken" with a count. What each row CAN say truthfully
+ * is when the solver applies it. `placing`: teacher and room double-booking
+ * and capability rooms are decided slot by slot as lessons are placed.
+ * `after`: the weekly cap is a soft rule, evaluated on the finished routine
+ * (soft-constraints.ts 'teacher_weekly_cap'). The design's fifth row, "টানা
+ * তিন পিরিয়ডের বেশি নয়", has no rule behind it in the solver and is not shown.
+ */
+const RUN_RULES: ReadonlyArray<{ textBn: string; when: 'placing' | 'after' }> = [
+  { textBn: 'একজন শিক্ষক একসাথে দুই জায়গায় নয়', when: 'placing' },
+  { textBn: 'একটি কক্ষে একসাথে দুই ক্লাস নয়', when: 'placing' },
+  { textBn: 'শিক্ষকের সাপ্তাহিক সীমা', when: 'after' },
+  { textBn: 'ব্যবহারিক ক্লাস ল্যাবে', when: 'placing' },
+];
 
 interface Step {
   id: string; titleBn: string; state: 'ok' | 'warn' | 'blocked';
@@ -149,6 +176,8 @@ export class RoutineGenerateView {
   private startedAt = 0;
   private elapsed = 0;
   private ticker: ReturnType<typeof setInterval> | null = null;
+  /** The running frame's big figure, so a tick changes one text node. */
+  private elapsedEl: HTMLElement | null = null;
 
   /**
    * B-108. What a replacement draft is built FROM, when the school already
@@ -174,6 +203,9 @@ export class RoutineGenerateView {
   destroy(): void { this.stopTicker(); }
 
   private async start(): Promise<void> {
+    // Foundations §04: the skeleton from the first frame. Without this the
+    // view stayed blank for the whole academic-year fetch.
+    this.render();
     if (!this.yearId) {
       try {
         const res = await this.o.auth.authedFetch('/api/v1/academics/hierarchy');
@@ -234,8 +266,20 @@ export class RoutineGenerateView {
     this.elapsed = 0;
     this.ticker = setInterval(() => {
       this.elapsed = Math.floor((this.now() - this.startedAt) / 1000);
-      this.render();
+      // Only the figure changes. Rebuilding the page every second replayed
+      // the shell's entrance animation on every piece of it, restarted the
+      // bar's sweep before it could cross, and re-created the status region
+      // a screen reader was listening to.
+      if (this.elapsedEl?.isConnected) this.elapsedEl.textContent = bn(this.elapsed);
+      else this.render();
     }, 1000);
+  }
+
+  /** The load error's "আবার চেষ্টা করুন": the same two reads, run again. */
+  private retryLoad(): void {
+    this.error = '';
+    this.loading = true;
+    void this.start();
   }
 
   private stopTicker(): void {
@@ -324,13 +368,31 @@ export class RoutineGenerateView {
 
   /* ────────────────────────────── rendering ───────────────────────────── */
 
+  /*
+   * Ata Ekta — 06 Routine §03, and the rest of this route in that file's
+   * vocabulary (§01 checklist rows and a footer with the primary, §04 stat
+   * strip, reason rows and note panel). Each panel is a FRAME: the sheet's
+   * `.card` with a 2px rule under its head, edge-to-edge blocks separated by
+   * 1px lines, and a 2px-ruled footer holding the buttons — least important
+   * first, so the primary ends the row on a desk and the column on a phone.
+   *
+   * The page title is `pageHeader`'s h1 (lead decision 1); a frame's head is
+   * its own h2/h3 and never repeats it. One `btn-primary` at a time — see
+   * `primaryOwner`.
+   */
+
   private render(): void {
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';
+    this.elapsedEl = null;
     root.append(pageHeader(d, {
       title: 'রুটিন তৈরি করুন',
       subtitle: 'পুরো প্রতিষ্ঠানের সাপ্তাহিক ক্লাস রুটিন — এক ধাপে',
+      // §03's bar chip, right-aligned in the header's cluster as drawn.
+      actions: this.running && !this.denied
+        ? [statusBadge(d, { state: 'running', label: 'চলছে', tone: 'info' })]
+        : undefined,
     }));
 
     if (this.denied) {
@@ -341,114 +403,192 @@ export class RoutineGenerateView {
       return;
     }
     if (this.loading && !this.running) { root.append(listSkeleton(d, 3)); return; }
-    if (this.running) { root.append(this.runningCard()); return; }
+    if (this.running) { root.append(this.runningFrame()); return; }
 
-    if (this.error) {
-      root.append(this.problemCard());
-    }
-    root.append(this.actionCard());
-    if (this.result) root.append(...this.resultCards());
-    else if (this.prior.some((r) => r.status !== 'active')) root.append(this.priorCard());
-  }
-
-  /** §3 — generating. Elapsed seconds, and no invented percentage. */
-  private runningCard(): HTMLElement {
-    const d = this.o.doc;
-    const body = el(d, 'div', { className: 'ui-stack' });
-    body.append(inlineLoader(d, 'রুটিন তৈরি হচ্ছে'));
-    body.append(el(d, 'p', {
-      className: 'gen-counter',
-      text: `${bn(this.elapsed)} সেকেন্ড চলছে`,
-    }));
-    // Honest about the shape of the wait, because there is no percentage to
-    // give and a made-up one would be worse than none.
-    body.append(el(d, 'p', {
-      className: 'ui-card-note',
-      text: 'সার্ভার পুরো কাজটি একবারেই করছে, তাই কত শতাংশ হয়েছে তা বলা যাচ্ছে না। '
-          + 'বড় প্রতিষ্ঠানে কয়েক সেকেন্ড লাগতে পারে। পাতা বন্ধ করবেন না।',
-    }));
-    return card(d, { title: 'অপেক্ষা করুন', glyph: 'clock' }, body);
-  }
-
-  /** §3 — validation-failure, server-error, offline, and not-ready. */
-  private problemCard(): HTMLElement {
-    const d = this.o.doc;
-    const body = el(d, 'div', { className: 'ui-stack' });
-    body.append(el(d, 'p', { className: 'ui-card-lead', text: this.error }));
-
-    if (this.failure === 'not_ready') {
-      body.append(el(d, 'p', {
-        className: 'ui-card-note',
-        text: 'নিচের ধাপগুলো শেষ হলে বোতামটি নিজে থেকেই চালু হবে।',
-      }));
-    }
-    if (this.failure === 'server' || this.failure === 'offline') {
-      body.append(buttonRow(d, button(d, {
-        label: 'আবার চেষ্টা করুন', variant: 'primary',
-        onClick: () => void this.generate(),
-      })));
-    }
-    return card(d, {
-      title: this.failure === 'not_ready' ? 'এখনই তৈরি করা যাবে না' : 'সমস্যা হয়েছে',
-      glyph: 'alert-triangle', tone: 'warn',
-    }, body);
-  }
-
-  /** The readiness panel and the one button. */
-  private actionCard(): HTMLElement {
-    const d = this.o.doc;
-    const body = el(d, 'div', { className: 'ui-stack' });
-
-    const blocked = this.steps.filter((s) => s.state === 'blocked');
-    const warned = this.steps.filter((s) => s.state === 'warn');
-
-    if (blocked.length > 0) {
-      body.append(el(d, 'p', {
-        className: 'ui-card-lead',
-        text: `${bn(blocked.length)}টি ধাপ বাকি — সেগুলো ছাড়া রুটিন তৈরি করা যাবে না।`,
-      }));
-      const list = el(d, 'ul', { className: 'gen-trades' });
-      for (const s of blocked) {
-        const li = el(d, 'li');
-        li.append(el(d, 'span', { className: 'gen-trade-what', text: s.titleBn }));
-        li.append(el(d, 'span', { className: 'gen-trade-why', text: s.detailBn }));
-        list.append(li);
-      }
-      body.append(list);
-    } else {
-      body.append(el(d, 'p', {
-        className: 'ui-card-lead', text: 'সব প্রয়োজনীয় তথ্য পাওয়া গেছে।',
-      }));
-      if (warned.length > 0) {
-        body.append(el(d, 'p', {
-          className: 'ui-card-note',
-          text: `${bn(warned.length)}টি ঐচ্ছিক বিষয় বাকি — রুটিন তৈরি হবে, `
-              + 'তবে সেগুলো দিলে ফলাফল আরও ভালো হয়।',
-        }));
-      }
+    // Nothing was read at all. Not the readiness frame: "সব প্রয়োজনীয় তথ্য
+    // পাওয়া গেছে" over a step list that never arrived is a claim about data
+    // this screen has not seen (Foundations §04 error state).
+    if (this.loadFailed() && this.steps.length === 0 && !this.result) {
+      root.append(errorState(d, this.error, () => this.retryLoad()));
+      return;
     }
 
+    if (this.error) root.append(this.problemFrame());
     // B-108 §15. The live routine, said plainly and BEFORE the button, so
     // nobody presses it believing this week's timetable is about to change.
-    if (this.live().length > 0) {
-      body.append(this.liveCard());
-      body.append(this.baselineCard());
+    if (this.live().length > 0) root.append(this.liveFrame(), this.baselineFrame());
+    root.append(this.actionFrame());
+    if (this.result) root.append(...this.resultFrames());
+    else if (this.prior.some((r) => r.status !== 'active')) root.append(this.priorFrame());
+  }
+
+  /** A read failed (as opposed to a run being refused). */
+  private loadFailed(): boolean {
+    return Boolean(this.error) && this.failure === null;
+  }
+
+  /**
+   * The page's ONE primary (§3: the accent appears on one button). The step
+   * the coordinator is on decides which: before a result, making one; with a
+   * result carrying a hard conflict, the editor that fixes it; otherwise the
+   * review before publishing. Every other action on the page is secondary.
+   */
+  private primaryOwner(): 'generate' | 'conflict' | 'publish' {
+    if (!this.result) return 'generate';
+    return this.result.summary.hardConflicts > 0 ? 'conflict' : 'publish';
+  }
+
+  private variantFor(owner: 'generate' | 'conflict' | 'publish'): ButtonVariant {
+    return this.primaryOwner() === owner ? 'primary' : 'secondary';
+  }
+
+  /** A frame: the sheet's card, head ruled off, blocks appended by the caller. */
+  private frame(o: {
+    title?: string; action?: HTMLElement; level?: 2 | 3; className?: string;
+  }): HTMLElement {
+    return card(this.o.doc, {
+      title: o.title, action: o.action, headingLevel: o.level,
+      className: ['rgen-frame', o.className ?? ''].filter(Boolean).join(' '),
+    });
+  }
+
+  private block(...children: Array<HTMLElement | null>): HTMLElement {
+    return el(this.o.doc, 'div', { className: 'rgen-block' }, ...children);
+  }
+
+  private foot(...children: Array<HTMLElement | null>): HTMLElement {
+    return el(this.o.doc, 'div', { className: 'rgen-foot' }, ...children);
+  }
+
+  /** A paragraph of caller text, with its numbers in the numeral face (R6). */
+  private para(className: string, text: string): HTMLElement {
+    return el(this.o.doc, 'p', { className }, ...numText(this.o.doc, text));
+  }
+
+  /** §04's note panel: a tint, a 4px rail, and the words. */
+  private note(tone: 'warn' | 'danger', ...children: HTMLElement[]): HTMLElement {
+    return el(this.o.doc, 'div', { className: 'rgen-note', data: { tone } }, ...children);
+  }
+
+  /**
+   * §03 — generating. The elapsed count, a sweep that claims no position,
+   * and the rules the solver is applying. No percentage, no estimate, no
+   * "বাতিল": the request cannot be cancelled once sent.
+   */
+  private runningFrame(): HTMLElement {
+    const d = this.o.doc;
+    const frame = this.frame({ className: 'rgen-run' });
+
+    const figure = el(d, 'span', { className: 'rgen-run-figure n', text: bn(this.elapsed) });
+    this.elapsedEl = figure;
+    frame.append(el(d, 'div', { className: 'rgen-run-progress' },
+      el(d, 'div', { className: 'rgen-run-track', attrs: { 'aria-hidden': 'true' } },
+        el(d, 'span', { className: 'rgen-run-fill' })),
+      el(d, 'p', { className: 'rgen-run-figures' },
+        figure, ' ',
+        el(d, 'span', { className: 'rgen-run-unit', text: 'সেকেন্ড চলছে' }), ' ',
+        // The announcement. Its words never change while the run lasts, so a
+        // reader hears it once rather than a count every second.
+        el(d, 'span', {
+          className: 'rgen-run-what', text: 'রুটিন তৈরি হচ্ছে', attrs: { role: 'status' },
+        })),
+      // Honest about the shape of the wait, because there is no percentage to
+      // give and a made-up one would be worse than none.
+      el(d, 'p', {
+        className: 'rgen-run-why',
+        text: 'সার্ভার পুরো কাজটি একবারেই করছে, তাই কত শতাংশ হয়েছে তা বলা যাচ্ছে না। '
+            + 'বড় প্রতিষ্ঠানে কয়েক সেকেন্ড লাগতে পারে। পাতা বন্ধ করবেন না।',
+      })));
+
+    frame.append(el(d, 'div', { className: 'rgen-run-rules' },
+      el(d, 'h2', { className: 'label rgen-eyebrow', text: 'যা মানা হচ্ছে' }),
+      el(d, 'ul', { className: 'rgen-rules' }, ...RUN_RULES.map((r) =>
+        el(d, 'li', { className: 'rgen-rule', data: { when: r.when } },
+          icon(d, r.when === 'placing' ? 'check' : 'clock', 'ui-icon rgen-rule-glyph'),
+          el(d, 'span', { className: 'rgen-rule-text', text: r.textBn }),
+          r.when === 'after'
+            ? el(d, 'span', { className: 'rgen-rule-meta', text: 'শেষে যাচাই' })
+            : null)))));
+    return frame;
+  }
+
+  /** §3 — validation-failure, server-error, offline, not-ready, and a failed read. */
+  private problemFrame(): HTMLElement {
+    const d = this.o.doc;
+    const frame = this.frame({
+      title: this.failure === 'not_ready' ? 'এখনই তৈরি করা যাবে না' : 'সমস্যা হয়েছে',
+    });
+    // Offline is a --warn-tint banner (Foundations §04); a step still to do is
+    // work left, not a failure. A refusal or a server fault is the danger one.
+    const tone = this.failure === 'not_ready' || this.failure === 'offline' ? 'warn' : 'danger';
+    const block = this.block(this.note(tone,
+      this.para('rgen-note-text', this.error),
+      ...(this.failure === 'not_ready'
+        ? [el(d, 'p', {
+          className: 'rgen-note-sub',
+          text: 'নিচের ধাপগুলো শেষ হলে বোতামটি নিজে থেকেই চালু হবে।',
+        })]
+        : [])));
+
+    // The error state's way out is a ghost button (lead decision 7). A run
+    // that failed is retried by running it; a read that failed, by reading.
+    const retry = this.failure === 'server' || this.failure === 'offline'
+      ? () => void this.generate()
+      : this.loadFailed() ? () => this.retryLoad() : null;
+    if (retry) {
+      block.append(buttonRow(d, button(d, {
+        label: 'আবার চেষ্টা করুন', variant: 'ghost', onClick: retry,
+      })));
+    }
+    frame.append(block);
+    return frame;
+  }
+
+  /** The readiness frame and the one button (§01's checklist and footer). */
+  private actionFrame(): HTMLElement {
+    const d = this.o.doc;
+    const blocked = this.steps.filter((s) => s.state === 'blocked');
+    const warned = this.steps.filter((s) => s.state === 'warn');
+    const done = this.steps.filter((s) => s.state === 'ok').length;
+
+    const frame = this.frame({
+      title: 'তৈরি করুন',
+      // §01's bar chip: how many steps are complete, as a count with its word.
+      action: this.steps.length > 0
+        ? statusBadge(d, {
+          state: done === this.steps.length ? 'active' : 'partial',
+          label: `${bn(done)} / ${bn(this.steps.length)} ধাপ`,
+        })
+        : undefined,
+    });
+
+    const block = this.block(this.para('rgen-lead', blocked.length > 0
+      ? `${bn(blocked.length)}টি ধাপ বাকি — সেগুলো ছাড়া রুটিন তৈরি করা যাবে না।`
+      : 'সব প্রয়োজনীয় তথ্য পাওয়া গেছে।'));
+    if (blocked.length === 0 && warned.length > 0) {
+      block.append(this.para('rgen-sub',
+        `${bn(warned.length)}টি ঐচ্ছিক বিষয় বাকি — রুটিন তৈরি হবে, `
+        + 'তবে সেগুলো দিলে ফলাফল আরও ভালো হয়।'));
+    }
+    frame.append(block);
+
+    if (blocked.length > 0) {
+      const rows = list(d, 'বাকি ধাপ', ...blocked.map((s) => listItem(d, {
+        title: s.titleBn, subtitle: s.detailBn, glyph: 'alert-circle', className: 'rgen-step',
+      })));
+      rows.classList.add('rgen-list');
+      frame.append(rows);
     }
 
     const go = button(d, {
       label: this.live().length > 0
         ? 'নতুন খসড়া তৈরি করুন'
         : this.prior.length > 0 ? 'আবার তৈরি করুন' : 'রুটিন তৈরি করুন',
-      variant: 'primary',
+      variant: this.variantFor('generate'),
       disabled: !this.canGenerate,
       onClick: () => void this.generate(),
     });
-    const row = buttonRow(d, go, button(d, {
-      label: 'প্রস্তুতি দেখুন', variant: 'ghost',
-      onClick: () => this.o.onNavigate?.('routinesetup'),
-    }));
-    body.append(row);
-
+    const foot = this.foot();
     if (this.prior.length > 0) {
       // Idempotency, said out loud. The commonest fear at this button is
       // that a second press will produce a second timetable.
@@ -457,8 +597,8 @@ export class RoutineGenerateView {
       // pressing does make a new draft, which is the whole point — so the
       // note says which of the two is happening rather than reassuring a
       // coordinator about the wrong one.
-      body.append(el(d, 'p', {
-        className: 'ui-card-note',
+      foot.append(el(d, 'p', {
+        className: 'rgen-foot-note',
         text: this.live().length > 0
           ? 'চালু রুটিনটি অপরিবর্তিত থাকবে। একটি নতুন খসড়া তৈরি হবে, '
             + 'যেটি আপনি দেখে নিয়ে তবেই প্রকাশ করবেন।'
@@ -466,7 +606,12 @@ export class RoutineGenerateView {
             + 'শুধু সেগুলোই বসানোর চেষ্টা হবে।',
       }));
     }
-    return card(d, { title: 'তৈরি করুন', glyph: 'check-square' }, body);
+    foot.append(buttonRow(d, button(d, {
+      label: 'প্রস্তুতি দেখুন', variant: 'secondary',
+      onClick: () => this.o.onNavigate?.('routinesetup'),
+    }), go));
+    frame.append(foot);
+    return frame;
   }
 
   /* ─────────────────────────────── result ─────────────────────────────── */
@@ -480,9 +625,11 @@ export class RoutineGenerateView {
    * the clean report believable — but they sit under a success note rather
    * than under a warning.
    */
-  private findingsCard(items: Explanation[], summary: Summary): HTMLElement {
+  private findingsFrame(items: Explanation[], summary: Summary): HTMLElement {
     const d = this.o.doc;
-    const body = el(d, 'div', { className: 'ui-stack' });
+    const frame = this.frame({ title: 'কী পাওয়া গেল' });
+    const block = this.block();
+    frame.append(block);
     const errors = items.filter((i) => i.severity === 'error');
     const warnings = items.filter((i) => i.severity === 'warning');
     const infos = items.filter((i) => i.severity === 'info');
@@ -495,34 +642,25 @@ export class RoutineGenerateView {
     // wrong. Caught by a P9-3 fixture that predates this field.
     const clean = summary.unplacedPeriods === 0 && summary.hardConflicts === 0;
     if (items.length === 0 && !clean) {
-      body.append(el(d, 'p', {
-        className: 'ui-card-lead',
-        text: 'এই ফলাফলের ব্যাখ্যা পাওয়া যায়নি।',
-      }));
-      body.append(el(d, 'p', {
-        className: 'ui-card-note',
-        text: `উপরের সংখ্যাগুলো অনুযায়ী ${bn(summary.unplacedPeriods)}টি পিরিয়ড বাকি আছে — `
-            + 'কারণ জানতে আবার তৈরি করুন।',
-      }));
-      return card(d, { title: 'কী পাওয়া গেল', glyph: 'alert-triangle' }, body);
+      block.append(
+        this.para('rgen-lead', 'এই ফলাফলের ব্যাখ্যা পাওয়া যায়নি।'),
+        this.para('rgen-sub',
+          `উপরের সংখ্যাগুলো অনুযায়ী ${bn(summary.unplacedPeriods)}টি পিরিয়ড বাকি আছে — `
+          + 'কারণ জানতে আবার তৈরি করুন।'));
+      return frame;
     }
 
     if (errors.length === 0 && warnings.length === 0) {
-      body.append(successNote(d, 'কোনো সমস্যা পাওয়া যায়নি — রুটিনটি ব্যবহারের জন্য প্রস্তুত।'));
+      block.append(successNote(d, 'কোনো সমস্যা পাওয়া যায়নি — রুটিনটি ব্যবহারের জন্য প্রস্তুত।'));
     } else {
-      body.append(el(d, 'p', {
-        className: 'ui-card-lead',
-        text: [
-          errors.length > 0 ? `${bn(errors.length)}টি বিষয় ঠিক করা দরকার` : '',
-          warnings.length > 0 ? `${bn(warnings.length)}টি সতর্কতা` : '',
-        ].filter(Boolean).join(' · '),
-      }));
+      block.append(this.para('rgen-lead', [
+        errors.length > 0 ? `${bn(errors.length)}টি বিষয় ঠিক করা দরকার` : '',
+        warnings.length > 0 ? `${bn(warnings.length)}টি সতর্কতা` : '',
+      ].filter(Boolean).join(' · ')));
       if (errors.length === 0) {
         // The distinction §4 exists for: nothing here blocks anything.
-        body.append(el(d, 'p', {
-          className: 'ui-card-note',
-          text: 'কোনোটিই রুটিন ব্যবহারে বাধা দেয় না — ঠিক করলে ফলাফল আরও ভালো হবে।',
-        }));
+        block.append(this.para('rgen-sub',
+          'কোনোটিই রুটিন ব্যবহারে বাধা দেয় না — ঠিক করলে ফলাফল আরও ভালো হবে।'));
       }
     }
 
@@ -532,40 +670,38 @@ export class RoutineGenerateView {
       ['যা যাচাই করা হয়নি', infos],
     ] as const) {
       if (group.length === 0) continue;
-      body.append(sectionHeading(d, {
-        title: `${heading} — ${bn(group.length)}টি`, level: 3,
-      }));
-      const list = el(d, 'ul', { className: 'gen-findings' });
+      // §04's list eyebrow. Still an h3 under the frame's h2.
+      block.append(el(d, 'h3', { className: 'label rgen-eyebrow' },
+        ...numText(d, `${heading} — ${bn(group.length)}টি`)));
+      const rows = el(d, 'ul', { className: 'gen-findings' });
       // A backstop, not the mechanism. The server groups the repetitive
       // findings already; this exists so that a category nobody has grouped
       // yet cannot put 1,500 interactive rows on a phone — which the
       // 80-section benchmark did before the grouping landed.
-      for (const item of group.slice(0, ROWS_SHOWN)) list.append(this.findingRow(item));
-      body.append(list);
+      for (const item of group.slice(0, ROWS_SHOWN)) rows.append(this.findingRow(item));
+      block.append(rows);
       if (group.length > ROWS_SHOWN) {
-        body.append(el(d, 'p', {
-          className: 'ui-card-note',
-          text: `আরও ${bn(group.length - ROWS_SHOWN)}টি একই ধরনের বিষয় আছে।`,
-        }));
+        block.append(this.para('rgen-sub',
+          `আরও ${bn(group.length - ROWS_SHOWN)}টি একই ধরনের বিষয় আছে।`));
       }
     }
-    return card(d, { title: 'কী পাওয়া গেল', glyph: 'alert-triangle' }, body);
+    return frame;
   }
 
   /** One finding: a severity word, the sentence, and a way into the detail. */
   private findingRow(item: Explanation): HTMLElement {
     const d = this.o.doc;
     const li = el(d, 'li', { className: 'gen-finding', data: { severity: item.severity } });
-    const badge = SEVERITY_TONE[item.severity];
+    const tone = SEVERITY_TONE[item.severity];
     // The button IS the row, so the whole line is one tap target on a phone
     // and one stop for a keyboard.
     const open = el(d, 'button', {
       className: 'gen-finding-open',
       attrs: { type: 'button', 'aria-label': `${SEVERITY_BN[item.severity]}: ${item.titleBn}` },
     });
-    open.append(statusBadge(d, { state: badge.state, label: SEVERITY_BN[item.severity],
-                                 tone: badge.tone }));
-    open.append(el(d, 'span', { className: 'gen-finding-title', text: item.titleBn }));
+    open.append(statusBadge(d, { state: tone.state, label: SEVERITY_BN[item.severity],
+                                 tone: tone.tone }));
+    open.append(el(d, 'span', { className: 'gen-finding-title' }, ...numText(d, item.titleBn)));
     open.append(el(d, 'span', { className: 'gen-finding-more', text: 'কেন?' }));
     open.addEventListener('click', () => this.openExplanation(item));
     li.append(open);
@@ -583,170 +719,157 @@ export class RoutineGenerateView {
    */
   private openExplanation(item: Explanation): void {
     const d = this.o.doc;
-    const body = el(d, 'div', { className: 'ui-stack' });
-    const badge = SEVERITY_TONE[item.severity];
-    body.append(statusBadge(d, { state: badge.state, label: SEVERITY_BN[item.severity],
-                                 tone: badge.tone }));
+    const body = el(d, 'div', { className: 'rgen-explain' });
+    const tone = SEVERITY_TONE[item.severity];
+    body.append(el(d, 'div', {}, statusBadge(d, {
+      state: tone.state, label: SEVERITY_BN[item.severity], tone: tone.tone,
+    })));
 
     const section = (headingBn: string, ...children: HTMLElement[]) => {
-      body.append(sectionHeading(d, { title: headingBn, level: 3 }));
+      body.append(el(d, 'h3', { className: 'label rgen-eyebrow', text: headingBn }));
       for (const c of children) body.append(c);
     };
 
     section('কারণ',
-      el(d, 'p', { className: 'ui-card-lead', text: item.whatBn }),
-      el(d, 'p', { className: 'ui-card-note', text: item.whyBn }));
+      this.para('rgen-lead', item.whatBn),
+      this.para('rgen-sub', item.whyBn));
 
     if (item.affectedBn.length > 0) {
+      // §05's name chips: neutral, because being named is not a verdict.
       const who = el(d, 'ul', { className: 'gen-affected' });
-      for (const a of item.affectedBn) who.append(el(d, 'li', { text: a }));
+      for (const a of item.affectedBn) {
+        who.append(el(d, 'li', {}, badge(d, { label: a, tone: 'neutral' })));
+      }
       section('কারা জড়িত', who);
     }
 
-    section('বর্তমান অবস্থা', el(d, 'p', { className: 'ui-card-note', text: item.currentBn }));
-    section('প্রভাব', el(d, 'p', { className: 'ui-card-note', text: item.impactBn }));
+    section('বর্তমান অবস্থা', this.para('rgen-sub', item.currentBn));
+    section('প্রভাব', this.para('rgen-sub', item.impactBn));
 
     if (item.suggestions.length > 0) {
-      const list = el(d, 'ul', { className: 'gen-trades' });
-      for (const s of item.suggestions) {
-        const li = el(d, 'li');
-        li.append(el(d, 'span', { className: 'gen-trade-what', text: s.textBn }));
-        // Why this is worth trying HERE. Without it a suggestion is advice;
-        // with it, it is an argument.
-        li.append(el(d, 'span', { className: 'gen-trade-why', text: s.evidenceBn }));
-        list.append(li);
-      }
-      section('সম্ভাব্য সমাধান', list);
+      // Why each is worth trying HERE sits under it. Without it a suggestion
+      // is advice; with it, it is an argument.
+      section('সম্ভাব্য সমাধান', list(d, 'সম্ভাব্য সমাধান', ...item.suggestions.map((s) =>
+        listItem(d, { title: s.textBn, subtitle: s.evidenceBn, className: 'rgen-suggestion' }))));
     } else {
       // Saying so beats an empty heading, and beats inventing one.
-      section('সম্ভাব্য সমাধান', el(d, 'p', {
-        className: 'ui-card-note',
-        text: 'এই তথ্য থেকে নিশ্চিত কোনো সমাধান বলা যাচ্ছে না।',
-      }));
+      section('সম্ভাব্য সমাধান', this.para('rgen-sub',
+        'এই তথ্য থেকে নিশ্চিত কোনো সমাধান বলা যাচ্ছে না।'));
     }
 
     openDrawer(d, { title: item.titleBn, body });
   }
 
-
-  private resultCards(): HTMLElement[] {
+  private resultFrames(): HTMLElement[] {
     const d = this.o.doc;
     const r = this.result as GenerateResult;
     const s = r.summary;
     const out: HTMLElement[] = [];
 
-    const head = el(d, 'div', { className: 'ui-stack' });
-    head.append(el(d, 'p', {
-      className: `gen-counter ${s.hardConflicts > 0 || s.unplacedPeriods > 0 ? 'is-warn' : 'is-ok'}`,
-      text: s.verdictBn,
-    }));
-    head.append(statRow(d,
-      statCard(d, {
-        label: 'শাখা', value: bn(r.shifts.length),
-        note: r.shifts.map((x) => SHIFT_BN[x.shift] ?? x.shift).join(' · '),
-        glyph: 'layers',
-      }),
-      statCard(d, {
-        label: 'বসানো পিরিয়ড', value: `${bn(s.placed)} / ${bn(s.totalDemand)}`,
-        note: s.unplacedPeriods === 0 ? 'সবগুলো' : `${bn(s.unplacedPeriods)}টি বাকি`,
-        tone: s.unplacedPeriods === 0 ? 'success' : 'warn', glyph: 'check-square',
-      }),
-      statCard(d, {
-        label: 'কঠিন শর্ত লঙ্ঘন', value: bn(s.hardConflicts),
-        note: s.hardConflicts === 0
-          ? 'একই সময়ে দুই জায়গায় কেউ নেই'
-          : 'এই রুটিন প্রকাশ করা যাবে না',
-        tone: s.hardConflicts === 0 ? 'success' : 'warn', glyph: 'alert-triangle',
-      }),
-      statCard(d, {
-        label: 'নরম শর্তে ছাড়', value: bn(s.softViolations),
-        note: 'ভালো হতে পারত, কিন্তু আটকায়নি', glyph: 'trending-up',
-      }),
-      statCard(d, {
-        label: 'সময় লেগেছে', value: `${bn(Math.round(s.totalSeconds))} সেকেন্ড`,
-        note: `সমাধানে ${bn(Math.round(s.solverSeconds * 10) / 10)} সেকেন্ড`,
-        glyph: 'clock',
-      }),
-    ));
-    out.push(card(d, { title: 'ফলাফল', glyph: 'award' }, head));
+    // §04: the bar says the run finished; the verdict sentence and the stat
+    // strip say how it went, each figure coloured by what it means (lead
+    // decision 6) and never by colour alone.
+    const result = this.frame({
+      title: 'ফলাফল',
+      action: statusBadge(d, { state: 'active', label: 'তৈরি সম্পন্ন', tone: 'success' }),
+    });
+    result.append(
+      this.block(el(d, 'p', {
+        className: 'rgen-verdict',
+        data: { tone: s.hardConflicts > 0 ? 'danger' : s.unplacedPeriods > 0 ? 'warn' : 'success' },
+      }, ...numText(d, s.verdictBn))),
+      this.block(statRow(d,
+        statCard(d, {
+          label: 'সাজানো হয়েছে', value: `${bn(s.placed)} / ${bn(s.totalDemand)}`,
+          note: `${r.shifts.map((x) => SHIFT_BN[x.shift] ?? x.shift).join(' · ')} শিফট`,
+          tone: s.unplacedPeriods === 0 ? 'success' : undefined,
+        }),
+        statCard(d, {
+          label: 'ফাঁকা রয়ে গেছে', value: bn(s.unplacedPeriods),
+          note: s.unplacedPeriods === 0 ? 'সবগুলো বসেছে' : `${bn(s.unplacedDemands)}টি বিষয়ে`,
+          tone: s.unplacedPeriods === 0 ? 'success' : 'warn',
+        }),
+        statCard(d, {
+          label: 'সংঘর্ষ', value: bn(s.hardConflicts),
+          note: s.hardConflicts === 0
+            ? 'একই সময়ে দুই জায়গায় কেউ নেই'
+            : 'এই রুটিন প্রকাশ করা যাবে না',
+          tone: s.hardConflicts === 0 ? 'success' : 'danger',
+        }),
+        statCard(d, {
+          label: 'নরম শর্তে ছাড়', value: bn(s.softViolations),
+          note: 'ভালো হতে পারত, কিন্তু আটকায়নি',
+        }),
+        statCard(d, {
+          label: 'সময় লেগেছে', value: `${bn(Math.round(s.totalSeconds))} সেকেন্ড`,
+          note: `সমাধানে ${bn(Math.round(s.solverSeconds * 10) / 10)} সেকেন্ড`,
+        }))));
+    out.push(result);
 
     // P9-4. ONE list of problems, not three. The unplaced rows, the room
     // shortages, the soft trades and the optional gaps were separate sections
     // saying overlapping things; a coordinator had to read all of them to
     // learn what to do first. `explanations` is that list, already ordered,
     // already worded, already ranked by severity.
-    out.push(this.findingsCard(r.explanations ?? [], s));
+    out.push(this.findingsFrame(r.explanations ?? [], s));
 
     if (s.hardConflicts > 0) {
       // The one finding that also needs a control: the editor is where it
       // gets fixed, and a routine carrying one cannot be published.
-      out.push(card(d, { title: 'সংঘর্ষ রয়ে গেছে', glyph: 'alert-triangle', tone: 'warn' },
-        el(d, 'div', { className: 'ui-stack' },
-          el(d, 'p', {
-            className: 'ui-card-note',
-            text: 'রুটিন সম্পাদনা পাতায় গিয়ে সংঘর্ষগুলো সরালে প্রকাশ করা যাবে।',
-          }),
-          buttonRow(d, button(d, {
-            label: 'রুটিন সম্পাদনা', variant: 'primary',
-            onClick: () => this.o.onNavigate?.('routineeditor'),
-          })))));
+      const conflict = this.frame({ title: 'সংঘর্ষ রয়ে গেছে' });
+      conflict.append(
+        this.block(this.note('danger', el(d, 'p', {
+          className: 'rgen-note-text',
+          text: 'রুটিন সম্পাদনা পাতায় গিয়ে সংঘর্ষগুলো সরালে প্রকাশ করা যাবে।',
+        }))),
+        this.foot(buttonRow(d, button(d, {
+          label: 'রুটিন সম্পাদনা', variant: this.variantFor('conflict'),
+          onClick: () => this.o.onNavigate?.('routineeditor'),
+        }))));
+      out.push(conflict);
     }
 
-    for (const shift of r.shifts) out.push(this.shiftCard(shift));
+    r.shifts.forEach((shift, i) => out.push(this.shiftFrame(shift, i)));
     return out;
   }
 
-  private shiftCard(shift: ShiftResult): HTMLElement {
+  private shiftFrame(shift: ShiftResult, index: number): HTMLElement {
     const d = this.o.doc;
-    const body = el(d, 'div', { className: 'ui-stack' });
     const name = SHIFT_BN[shift.shift] ?? shift.shift;
+    const frame = this.frame({
+      title: `${name} শিফট`, level: 3,
+      action: shift.unplaced.length === 0
+        ? statusBadge(d, { state: 'active', label: 'সম্পূর্ণ', tone: 'success' })
+        : statusBadge(d, { state: 'partial', label: 'আংশিক', tone: 'warn' }),
+    });
+    const block = this.block();
 
     // B-108. Where these lessons came from. Without it a coordinator opens a
     // draft they have never edited and finds five hundred placements in it.
     if (shift.copiedFromVersion != null) {
-      body.append(el(d, 'p', {
-        className: 'ui-card-note',
-        text: `সংস্করণ ${bn(shift.copiedFromVersion)} থেকে `
-            + `${bn(shift.copiedSlots ?? 0)}টি ক্লাস কপি করা হয়েছে — `
-            + 'পিন করা ক্লাসসহ। চালু রুটিনটি অপরিবর্তিত আছে।',
-      }));
+      block.append(this.para('rgen-sub',
+        `সংস্করণ ${bn(shift.copiedFromVersion)} থেকে `
+        + `${bn(shift.copiedSlots ?? 0)}টি ক্লাস কপি করা হয়েছে — `
+        + 'পিন করা ক্লাসসহ। চালু রুটিনটি অপরিবর্তিত আছে।'));
     }
 
-    const line = el(d, 'div', { className: 'ui-cell-line' });
-    line.append(shift.unplaced.length === 0
-      ? statusBadge(d, { state: 'active', label: 'সম্পূর্ণ', tone: 'success' })
-      : statusBadge(d, { state: 'pending', label: 'আংশিক', tone: 'warn' }));
-    line.append(el(d, 'span', {
-      className: 'ui-cell-meta',
-      text: `${bn(shift.placed)} / ${bn(shift.totalDemand)} পিরিয়ড · সংস্করণ ${bn(shift.version)}`,
-    }));
-    body.append(line);
+    block.append(this.para('rgen-meta',
+      `${bn(shift.placed)} / ${bn(shift.totalDemand)} পিরিয়ড · সংস্করণ ${bn(shift.version)}`));
 
     if (shift.unplaced.length > 0) {
       // The rows themselves live in "কী পাওয়া গেল", once, with their
       // reasons and their fixes. Repeating them per shift gave a coordinator
       // the same list twice and no way to tell which copy was the real one.
-      body.append(el(d, 'p', {
-        className: 'ui-card-note',
-        text: `${bn(shift.unplaced.length)}টি বিষয়ে পিরিয়ড বাকি আছে — `
-            + 'কারণ ও সমাধান উপরের তালিকায়।',
-      }));
+      block.append(this.para('rgen-sub',
+        `${bn(shift.unplaced.length)}টি বিষয়ে পিরিয়ড বাকি আছে — `
+        + 'কারণ ও সমাধান উপরের তালিকায়।'));
     }
+    frame.append(block);
 
-    body.append(buttonRow(d,
+    // §04's footer: the other ways out first, the step after this one last.
+    frame.append(this.foot(buttonRow(d,
       button(d, {
-        // P9-7. The step after this one. "দেখুন" rather than "প্রকাশ করুন",
-        // because it opens a review — a routine with a conflict goes there
-        // to be told why it cannot be published, which is a real destination.
-        label: 'প্রকাশের জন্য দেখুন', variant: 'primary',
-        onClick: () => this.o.onNavigate?.('routinepublish'),
-      }),
-      button(d, {
-        label: 'বিস্তারিত ব্যাখ্যা', variant: 'secondary',
-        onClick: () => this.o.onNavigate?.(`generation?routineId=${shift.routineId}`),
-      }),
-      button(d, {
-        label: 'রুটিন সম্পাদনা', variant: 'ghost',
+        label: 'রুটিন সম্পাদনা', variant: 'secondary',
         // P9-5 §16. The first unplaced demand names a section; opening the
         // editor there puts the coordinator in the week they were just
         // reading about rather than in whichever one the picker defaults to.
@@ -754,8 +877,22 @@ export class RoutineGenerateView {
           shift.unplaced[0]?.sectionId
             ? `routineeditor?sectionId=${shift.unplaced[0].sectionId}`
             : 'routineeditor'),
-      })));
-    return card(d, { title: `${name} শিফট`, glyph: 'clock', headingLevel: 3 }, body);
+      }),
+      button(d, {
+        label: 'বিস্তারিত ব্যাখ্যা', variant: 'secondary',
+        onClick: () => this.o.onNavigate?.(`generation?routineId=${shift.routineId}`),
+      }),
+      button(d, {
+        // P9-7. The step after this one. "দেখুন" rather than "প্রকাশ করুন",
+        // because it opens a review — a routine with a conflict goes there
+        // to be told why it cannot be published, which is a real destination.
+        // Every shift's button opens the same review, so only the first one
+        // carries the accent.
+        label: 'প্রকাশের জন্য দেখুন',
+        variant: index === 0 ? this.variantFor('publish') : 'secondary',
+        onClick: () => this.o.onNavigate?.('routinepublish'),
+      }))));
+    return frame;
   }
 
   /** The routines the school is actually running right now. */
@@ -773,94 +910,77 @@ export class RoutineGenerateView {
    * press it at all — and one who believes it does not, when it does, has
    * already broken three thousand people's week.
    */
-  private liveCard(): HTMLElement {
+  private liveFrame(): HTMLElement {
     const d = this.o.doc;
-    const body = el(d, 'div', { className: 'ui-stack' });
-    const list = el(d, 'ul', { className: 'gen-trades' });
-    for (const run of this.live()) {
-      const li = el(d, 'li');
-      li.append(el(d, 'span', {
-        className: 'gen-trade-what',
-        text: `${SHIFT_BN[run.shift] ?? run.shift} শিফট — সংস্করণ ${bn(run.version)}`,
-      }));
-      li.append(el(d, 'span', {
-        className: 'gen-trade-why',
-        text: `${bn(run.slots)}টি পিরিয়ড · শিক্ষক ও শিক্ষার্থীরা এটিই দেখছেন`,
-      }));
-      list.append(li);
-    }
-    body.append(list);
-    body.append(el(d, 'p', {
-      className: 'ui-card-note',
+    const frame = this.frame({ title: 'বর্তমানে চালু রুটিন' });
+    const rows = list(d, 'চালু রুটিন', ...this.live().map((run) => listItem(d, {
+      title: `${SHIFT_BN[run.shift] ?? run.shift} শিফট — সংস্করণ ${bn(run.version)}`,
+      subtitle: `${bn(run.slots)}টি পিরিয়ড · শিক্ষক ও শিক্ষার্থীরা এটিই দেখছেন`,
+      glyph: 'check-circle', className: 'rgen-live',
+    })));
+    rows.classList.add('rgen-list');
+    frame.append(rows, this.block(el(d, 'p', {
+      className: 'rgen-sub',
       text: 'নতুন খসড়া তৈরি করলে এই রুটিনটি বদলাবে না। নতুনটি প্রকাশ করার '
           + 'পরেই কেবল এটি বাতিল হবে।',
-    }));
-    return card(d, {
-      title: 'বর্তমানে চালু রুটিন', glyph: 'check-square', tone: 'success',
-    }, body);
+    })));
+    return frame;
   }
 
   /** B-108 §2/§5 — what the replacement is built from. */
-  private baselineCard(): HTMLElement {
+  private baselineFrame(): HTMLElement {
     const d = this.o.doc;
-    const body = el(d, 'div', { className: 'ui-stack' });
-    body.append(field(d, {
-      label: 'নতুন খসড়া কীভাবে শুরু হবে',
-      name: 'baseline',
-      kind: 'select',
-      value: this.baseline,
-      options: [
-        { value: 'current', label: 'চালু রুটিনটি নকল করে — তারপর যেটুকু দরকার বদলাব' },
-        { value: 'inputs', label: 'একদম নতুন করে — এখনকার শিক্ষক ও বিষয়ের তালিকা থেকে' },
-      ],
-      onChange: (v) => {
-        this.baseline = v === 'inputs' ? 'inputs' : 'current';
-        this.render();
-      },
-    }).root);
-    body.append(el(d, 'p', {
-      className: 'ui-card-note',
-      text: this.baseline === 'current'
-        ? 'চালু রুটিনের সব ক্লাস — পিন করা ক্লাসসহ — নতুন খসড়ায় কপি হবে। '
-          + 'কিছু বাকি থাকলে সেটুকু বসিয়ে দেওয়া হবে।'
-        : 'পিন করা ক্লাসগুলো নতুন খসড়ায় থাকবে না। শিক্ষক বা বিষয়ের তালিকা '
-          + 'বড় রকম বদলালে এটিই বেছে নিন।',
-    }));
-    return card(d, { title: 'কোথা থেকে শুরু', glyph: 'repeat' }, body);
+    const frame = this.frame({ title: 'কোথা থেকে শুরু' });
+    frame.append(this.block(
+      field(d, {
+        label: 'নতুন খসড়া কীভাবে শুরু হবে',
+        name: 'baseline',
+        kind: 'select',
+        value: this.baseline,
+        options: [
+          { value: 'current', label: 'চালু রুটিনটি নকল করে — তারপর যেটুকু দরকার বদলাব' },
+          { value: 'inputs', label: 'একদম নতুন করে — এখনকার শিক্ষক ও বিষয়ের তালিকা থেকে' },
+        ],
+        onChange: (v) => {
+          this.baseline = v === 'inputs' ? 'inputs' : 'current';
+          this.render();
+        },
+      }).root,
+      el(d, 'p', {
+        className: 'rgen-sub',
+        text: this.baseline === 'current'
+          ? 'চালু রুটিনের সব ক্লাস — পিন করা ক্লাসসহ — নতুন খসড়ায় কপি হবে। '
+            + 'কিছু বাকি থাকলে সেটুকু বসিয়ে দেওয়া হবে।'
+          : 'পিন করা ক্লাসগুলো নতুন খসড়ায় থাকবে না। শিক্ষক বা বিষয়ের তালিকা '
+            + 'বড় রকম বদলালে এটিই বেছে নিন।',
+      })));
+    return frame;
   }
 
   /** §13 — a run from before this page was opened. */
-  private priorCard(): HTMLElement {
+  private priorFrame(): HTMLElement {
     const d = this.o.doc;
-    const body = el(d, 'div', { className: 'ui-stack' });
-    body.append(el(d, 'p', {
-      className: 'ui-card-note',
-      text: 'আগে তৈরি করা খসড়া রুটিন পাওয়া গেছে। আবার তৈরি করলে এগুলোই পূরণ হবে।',
-    }));
-    const list = el(d, 'ul', { className: 'gen-trades' });
-    // B-108. The live routine has its own card above and is NOT something
+    // B-108. The live routine has its own frame above and is NOT something
     // "আবার তৈরি করলে পূরণ হবে" — saying that about a published timetable is
     // the exact misunderstanding §15 exists to prevent.
-    for (const run of this.prior.filter((r) => r.status !== 'active')) {
-      const li = el(d, 'li');
-      li.append(el(d, 'span', {
-        className: 'gen-trade-what',
-        text: `${SHIFT_BN[run.shift] ?? run.shift} শিফট — ${bn(run.slots)}টি পিরিয়ড বসানো আছে`,
-      }));
-      li.append(el(d, 'span', {
-        className: 'gen-trade-why',
-        text: `সংস্করণ ${bn(run.version)}`
-            + (run.solverSeconds === null
-              ? '' : ` · ${bn(Math.round(run.solverSeconds * 10) / 10)} সেকেন্ডে তৈরি`),
-      }));
-      list.append(li);
-    }
-    body.append(list);
-    body.append(buttonRow(d, ...this.prior.filter((r) => r.status !== 'active').map((run) => button(d, {
+    const runs = this.prior.filter((r) => r.status !== 'active');
+    const frame = this.frame({ title: 'আগের ফলাফল' });
+    frame.append(this.block(el(d, 'p', {
+      className: 'rgen-sub',
+      text: 'আগে তৈরি করা খসড়া রুটিন পাওয়া গেছে। আবার তৈরি করলে এগুলোই পূরণ হবে।',
+    })));
+    const rows = list(d, 'আগের খসড়া', ...runs.map((run) => listItem(d, {
+      title: `${SHIFT_BN[run.shift] ?? run.shift} শিফট — ${bn(run.slots)}টি পিরিয়ড বসানো আছে`,
+      subtitle: `সংস্করণ ${bn(run.version)}`
+        + (run.solverSeconds === null
+          ? '' : ` · ${bn(Math.round(run.solverSeconds * 10) / 10)} সেকেন্ডে তৈরি`),
+    })));
+    rows.classList.add('rgen-list');
+    frame.append(rows, this.foot(buttonRow(d, ...runs.map((run) => button(d, {
       label: `${SHIFT_BN[run.shift] ?? run.shift} — বিস্তারিত`,
-      variant: 'ghost',
+      variant: 'secondary',
       onClick: () => this.o.onNavigate?.(`generation?routineId=${run.routineId}`),
-    }))));
-    return card(d, { title: 'আগের ফলাফল', glyph: 'clock' }, body);
+    })))));
+    return frame;
   }
 }

@@ -5,11 +5,12 @@
  * 1,200 children. What this suite holds still is that they cannot do it
  * without having been shown what was given up:
  *
- *   • the soft-constraint count is in the header beside the hard count;
+ *   • the conflict count is a figure in the stats band, and the
+ *     soft-constraint count heads its list — both above the accept button;
  *   • the list of trades renders ABOVE the accept button, not behind a
  *     disclosure;
  *   • a truncated list carries the remaining count, never a bare "···";
- *   • rules that could not be checked are named, so "০ লঙ্ঘন" is never
+ *   • rules that could not be checked are named, so "০ সংঘর্ষ" is never
  *     read as a guarantee it is not.
  */
 import { test, describe, before, beforeEach } from 'node:test';
@@ -89,16 +90,25 @@ describe('generation result screen (§8.2)', () => {
   let root: HTMLElement;
   beforeEach(async () => { root = await mount(REPORT); });
 
-  test('both counters are in the header, and they say different things', () => {
-    // P6 made these stat cards: three figures a coordinator DECIDES on —
-    // whether to accept this routine and what it cost — and a decision is
-    // made from a comparison, not from three sentences.
+  test('the stats band and the trade heading give the counts, before accept', () => {
+    // 06 Routine §04: the figures a coordinator DECIDES on — whether to
+    // accept this routine and what it cost — as stat cards, because a
+    // decision is made from a comparison, not from sentences.
     const cards = [...root.querySelectorAll('.ui-stat')].map((c) => c.textContent ?? '');
-    assert.ok(cards.some((c) => c.includes('কঠিন শর্ত লঙ্ঘন') && c.includes('০')), cards.join(' | '));
-    assert.ok(cards.some((c) => c.includes('নরম শর্তে ছাড়') && c.includes('৩')), cards.join(' | '));
-    // Zero hard violations because the database's exclusion constraints make
-    // one unstorable — the card says WHY, so nobody reads it as luck.
-    assert.ok(cards.some((c) => c.includes('ডাটাবেসেই অসম্ভব')));
+    assert.ok(cards.some((c) => c.includes('সংঘর্ষ') && c.includes('০')), cards.join(' | '));
+    assert.ok(cards.some((c) => c.includes('ফাঁকা রয়ে গেছে') && c.includes('২')), cards.join(' | '));
+    assert.ok(cards.some((c) => c.includes('সাজানো হয়েছে') && c.includes('১ / ৩')), cards.join(' | '));
+    // The soft-constraint count heads its own list, and that heading is above
+    // the accept button — nothing given up is accepted unseen.
+    const head = [...root.querySelectorAll('.gen-head')]
+      .find((h) => (h.textContent ?? '').includes('যা ছাড় দিতে হয়েছে'));
+    assert.match(head?.textContent ?? '', /৩টি/);
+    const accept = [...root.querySelectorAll('button')].find((b) => b.textContent === 'গ্রহণ করুন');
+    assert.ok(accept);
+    assert.equal(
+      head!.compareDocumentPosition(accept!) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+      dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+      'the counted heading comes before accept');
   });
 
   test('THE ONE THAT MATTERS — trades render before the accept button', () => {
@@ -219,7 +229,10 @@ describe('accepting and discarding', () => {
     const labels = [...root.querySelectorAll('button')].map((b) => b.textContent);
     assert.ok(!labels.includes('গ্রহণ করুন'));
     assert.ok(!labels.includes('বাতিল'));
-    assert.match(root.querySelector('.action-row .status-chip')?.textContent ?? '', /প্রকাশিত/);
+    assert.ok(!labels.includes('আবার চালান'));
+    // 06 §04: the state chip is in the title bar; the footer is not drawn
+    // once the routine is live.
+    assert.match(root.querySelector('.page-header .ui-status')?.textContent ?? '', /প্রকাশিত/);
   });
 
   test('a clean routine says so rather than showing an empty list', async () => {

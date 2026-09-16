@@ -1,7 +1,7 @@
 /**
  * Bulk import — F-1601, wireframe §10.2 "the pilot blocker"
  *
- *   ①ফাইল ─── ②যাচাই ─── ③পূর্বরূপ ─── ④আমদানি
+ *   ①ফাইল দিন ─── ②যাচাই ─── ③পূর্বরূপ ─── ④সম্পন্ন
  *
  * The screen a head teacher meets on day one, with 784 rows exported from
  * a spreadsheet that has been maintained by hand for six years. Almost all
@@ -52,15 +52,34 @@
  * the one they could reach refused them. The kind is now chosen from the
  * role, and offered as a choice only where the role really allows both.
  *
+ * ── Ata Ekta (05 Principal §04 "আমদানি — ধাপে ধাপে", 13 Responsive ০৫) ──────
+ *
+ * One white panel in three bands, as drawn: the step strip over a 2px rule,
+ * the step's work, and a footer bar under a 2px rule with the way back on the
+ * left and the one primary on the right. The step count moved out of the
+ * subtitle into a chip on the header's right, where the design puts it.
+ * Below 1024px the four names become the current name, "ধাপ N / ৪" and a
+ * four-part bar; the footer stacks with the primary last, under the thumb.
+ *
+ * What the drawing has that this screen does not do, on purpose: a column
+ * mapping step ("মিল করুন"). The server takes fixed column names and the file
+ * is validated the moment it is chosen, so a mapping step would be a new flow,
+ * not a new look. The steps keep the code's four moments under the design's
+ * words where the moment is the same one.
+ *
  * Framework-free manual DOM, same as every other view here.
  */
 import type { Auth } from './auth.ts';
-import { formatCount, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 import {
-  pageHeader, card, button, buttonRow, fileUpload, dataTable, statusBadge,
-  statRow, statCard, permissionState, permissionMessage, el, append, tabs,
+  formatCount, formatAcademicYear, formatIdentifier,
+} from '../../../packages/ui-core/src/format.ts';
+import {
+  pageHeader, button, buttonRow, fileUpload, dataTable, statusBadge, badge,
+  statRow, statCard, permissionState, permissionMessage, el, icon, numText, tabs, uid,
 } from './ui/index.ts';
-import { emptyState, errorState, skeleton, confirmDialog } from './view-states.ts';
+import {
+  emptyState, errorState, skeleton, confirmDialog, successNote,
+} from './view-states.ts';
 import { isDenied } from './http-status.ts';
 
 const bn = (n: number): string => formatCount(n, 'bn');
@@ -99,12 +118,30 @@ export interface ImportViewOptions {
 
 type Step = 1 | 2 | 3 | 4;
 
+/**
+ * The design's words where the moment is the same one: "ফাইল দিন" and
+ * "সম্পন্ন". Steps 2 and 3 keep the code's names — the drawn "মিল করুন"
+ * (column mapping) is a step this import does not have.
+ */
 const STEPS: Array<{ n: Step; labelBn: string }> = [
-  { n: 1, labelBn: 'ফাইল' },
+  { n: 1, labelBn: 'ফাইল দিন' },
   { n: 2, labelBn: 'যাচাই' },
   { n: 3, labelBn: 'পূর্বরূপ' },
-  { n: 4, labelBn: 'আমদানি' },
+  { n: 4, labelBn: 'সম্পন্ন' },
 ];
+
+/**
+ * The heading the panel is named by — the titles the per-step cards carried
+ * before Ata Ekta. The strip names the step for an eye, so the heading is
+ * visually hidden; it stays for a reader moving by headings (R8), who would
+ * otherwise go from the page title straight past the step's work.
+ */
+const STEP_TITLE: Record<Step, string> = {
+  1: 'ফাইল',
+  2: 'ফাইল',
+  3: 'পূর্বরূপ',
+  4: 'আমদানি সম্পন্ন',
+};
 
 /** §10.2 shows a handful and then "···". A wall of 784 is not a report. */
 const ERRORS_SHOWN = 12;
@@ -286,6 +323,10 @@ export class ImportView {
   }
 
   // ── rendering ───────────────────────────────────────────────────────
+  private stepText(): string {
+    return `ধাপ ${bn(this.step)} / ${bn(STEPS.length)}`;
+  }
+
   private render(): void {
     const d = this.o.doc;
     const root = this.o.root;
@@ -296,14 +337,18 @@ export class ImportView {
     // anything else is drawn, and WITHOUT the step count: "ধাপ ১ / ৪" above a
     // refusal implies there is a first step to take.
     const barred = this.kinds.length === 0 || this.denied;
+    const year = this.kind === 'student' && this.yearLabel
+      ? `শিক্ষাবর্ষ ${formatAcademicYear(this.yearLabel)}`
+      : undefined;
 
     root.append(pageHeader(d, {
       title: barred ? 'আমদানি' : `${KIND_BN[this.kind]} আমদানি`,
-      subtitle: barred
-        ? undefined
-        : this.kind === 'student' && this.yearLabel
-          ? `শিক্ষাবর্ষ ${formatAcademicYear(this.yearLabel)} · ধাপ ${bn(this.step)} / ${bn(4)}`
-          : `ধাপ ${bn(this.step)} / ${bn(4)}`,
+      // The year is not drawn, but it decides where 784 students land, so it
+      // stays under the title. The step count is the drawn chip on the right.
+      subtitle: barred ? undefined : year,
+      actions: barred ? undefined : [badge(d, {
+        label: this.stepText(), tone: 'neutral', className: 'import-step-chip',
+      })],
     }));
 
     if (this.kinds.length === 0) {
@@ -327,6 +372,7 @@ export class ImportView {
     if (this.kinds.length > 1) {
       root.append(tabs(d, {
         label: 'কী আমদানি করবেন',
+        className: 'import-kind',
         items: this.kinds.map((k) => ({ id: k, label: KIND_BN[k] })),
         active: this.kind,
         onSelect: (id) => {
@@ -338,19 +384,32 @@ export class ImportView {
       }));
     }
 
-    root.append(this.stepper());
+    // The drawn panel: strip, work, footer. Both step renderings are in the
+    // DOM and the 1024px media query shows one (13 Responsive ০৫).
+    //
+    // A <section> named by an h2, as the per-step card() was: the strip is
+    // what an eye reads, the heading is what a screen reader jumps to.
+    const headingId = uid('import-step');
+    const panel = el(d, 'section', {
+      className: 'import-wizard', attrs: { 'aria-labelledby': headingId },
+    },
+      el(d, 'h2', { className: 'ui-sr-only', attrs: { id: headingId }, text: STEP_TITLE[this.step] }),
+      ...this.stepper());
+    root.append(panel);
 
     if (this.error) {
-      root.append(errorState(d, this.error));
+      // No retry here: the way forward is a file, and the picker is right
+      // under it. Re-sending the held file would be a new action.
+      panel.append(errorState(d, this.error));
     }
 
     // The student import needs a year to exist. Say which thing is missing
     // and where to make it, rather than letting the file be read first and
     // rejected afterwards.
     if (this.kind === 'student') {
-      if (this.yearState === 'loading') { root.append(skeleton(d, 2)); return; }
+      if (this.yearState === 'loading') { panel.append(skeleton(d, 2)); return; }
       if (this.yearState === 'none') {
-        root.append(emptyState(d, {
+        panel.append(emptyState(d, {
           message: 'এই প্রতিষ্ঠানে এখনো কোনো শিক্ষাবর্ষ তৈরি হয়নি। শিক্ষার্থী কোন বছরে ভর্তি হবে ' +
                    'তা ঠিক না থাকলে আমদানি করা যায় না।',
           action: {
@@ -361,61 +420,81 @@ export class ImportView {
         return;
       }
       if (this.yearState === 'failed') {
-        root.append(errorState(d, 'শিক্ষাবর্ষ জানা যায়নি।', () => void this.loadYear()));
+        panel.append(errorState(d, 'শিক্ষাবর্ষ জানা যায়নি।', () => void this.loadYear()));
         return;
       }
     }
 
-    if (this.step === 1 || this.step === 2) root.append(this.filePicker());
-    if (this.step === 3) root.append(this.reviewCard());
-    if (this.step === 4) root.append(this.doneCard());
+    const body = el(d, 'div', { className: 'import-body' });
+    const foot = el(d, 'div', { className: 'import-foot' });
+    if (this.step === 1 || this.step === 2) this.filePicker(body);
+    if (this.step === 3) this.reviewStep(body, foot);
+    if (this.step === 4) this.doneStep(body, foot);
+    panel.append(body);
+    // No empty bar: steps 1–2 have nothing to press — the file is the action.
+    if (foot.childElementCount) panel.append(foot);
   }
 
-  private stepper(): HTMLElement {
+  /**
+   * The step indicator, twice: four named cells for a desktop, and the
+   * current name + "ধাপ N / ৪" + a four-part bar for a phone.
+   */
+  private stepper(): HTMLElement[] {
     const d = this.o.doc;
-    const ol = d.createElement('ol');
-    ol.className = 'stepper';
-    ol.setAttribute('aria-label', 'আমদানির ধাপ');
+    const ol = el(d, 'ol', { className: 'stepper', attrs: { 'aria-label': 'আমদানির ধাপ' } });
     for (const s of STEPS) {
-      const li = d.createElement('li');
-      li.className = 'stepper-step';
       const state = s.n < this.step ? 'done' : s.n === this.step ? 'current' : 'todo';
-      li.dataset.state = state;
-      if (state === 'current') li.setAttribute('aria-current', 'step');
-
-      const num = d.createElement('span');
-      num.className = 'stepper-num';
+      const li = el(d, 'li', {
+        className: 'stepper-step', data: { state },
+        attrs: { 'aria-current': state === 'current' ? 'step' : null },
+      });
       // A tick for done, the number for the rest. Never state by colour
       // alone — this bar is the only thing telling the operator whether
-      // anything has been written yet.
-      num.textContent = state === 'done' ? '✓' : bn(s.n);
-      const label = d.createElement('span');
-      label.className = 'stepper-label';
-      label.textContent = s.labelBn;
-      li.append(num, label);
+      // anything has been written yet. The tick is a drawing, so the word
+      // goes beside it for a reader.
+      const num = state === 'done'
+        ? el(d, 'span', { className: 'stepper-num' },
+            icon(d, 'check'), el(d, 'span', { className: 'ui-sr-only', text: 'সম্পন্ন: ' }))
+        : el(d, 'span', { className: 'stepper-num n', text: `${bn(s.n)}.` });
+      li.append(num, el(d, 'span', { className: 'stepper-label', text: s.labelBn }));
       ol.append(li);
     }
-    return ol;
+
+    const current = STEPS[this.step - 1];
+    // Named like the list it stands in for: below 1024px this is the only
+    // step indicator a reader meets.
+    const compact = el(d, 'div', {
+      className: 'stepper-compact', attrs: { role: 'group', 'aria-label': 'আমদানির ধাপ' },
+    },
+      el(d, 'p', { className: 'stepper-compact-head' },
+        el(d, 'span', { className: 'stepper-compact-name', text: current.labelBn }),
+        el(d, 'span', { className: 'stepper-compact-count' }, ...numText(d, this.stepText()))),
+      el(d, 'div', { className: 'stepper-compact-bar', attrs: { 'aria-hidden': 'true' } },
+        ...STEPS.map((s) => el(d, 'span', {
+          className: 'stepper-compact-seg', data: { on: s.n <= this.step ? 'true' : 'false' },
+        }))));
+
+    return [ol, compact];
   }
 
-  private filePicker(): HTMLElement {
+  private filePicker(body: HTMLElement): void {
     const d = this.o.doc;
     const columnsBn = this.kind === 'student'
       ? 'রোল, নাম, শ্রেণি, শাখা, মোবাইল, চতুর্থ বিষয় (নবম শ্রেণি থেকে আবশ্যক)।'
       : 'নাম, আইডি, মোবাইল, পদবি, ভূমিকা, যোগদানের তারিখ।';
 
-    const body: Array<Node | null> = [
-      el(d, 'p', { className: 'ui-card-note', text: `কলাম: ${columnsBn}` }),
+    body.append(
+      el(d, 'p', { className: 'import-lead', text: `কলাম: ${columnsBn}` }),
       // §10.2: "the file never contains a subject column". Saying so up front
       // saves an operator building one.
       this.kind === 'student'
         ? el(d, 'p', {
-            className: 'ui-card-note',
+            className: 'import-note',
             text: 'বিষয়ের তালিকা ফাইলে দিতে হবে না — আমদানির পর টেমপ্লেট থেকে ' +
                   'স্বয়ংক্রিয়ভাবে নির্ধারিত হবে।',
           })
         : el(d, 'p', {
-            className: 'ui-card-note',
+            className: 'import-note',
             text: 'ভূমিকা খালি থাকলে বিষয় শিক্ষক ধরা হবে। কেউ লগইন করতে পারবেন না ' +
                   'যতক্ষণ না তাঁকে সক্রিয়ন কোড দেওয়া হয়।',
           }),
@@ -429,52 +508,52 @@ export class ImportView {
         helper: this.fileName ? `আগে বেছে নেওয়া: ${this.fileName}` : 'সর্বোচ্চ ১ মেগাবাইট।',
         onFiles: (files) => { if (files[0]) this.accept(files[0]); },
       }).root,
-    ];
+    );
 
     if (this.step === 2 || this.busy) {
-      body.push(el(d, 'p', {
-        className: 'ui-card-note', text: 'যাচাই করা হচ্ছে…',
+      body.append(el(d, 'p', {
+        className: 'import-note', text: 'যাচাই করা হচ্ছে…',
         attrs: { role: 'status' },
       }));
     }
-
-    return card(d, {
-      title: 'ফাইল', glyph: 'upload', className: 'import-card',
-    }, ...body);
   }
 
-  private reviewCard(): HTMLElement {
+  private reviewStep(body: HTMLElement, foot: HTMLElement): void {
     const d = this.o.doc;
     const r = this.result as DryRun;
     const shown = r.errors.slice(0, ERRORS_SHOWN);
 
-    const parts: Array<Node | null> = [
+    body.append(
+      el(d, 'p', { className: 'import-lead', text: 'এখনো কিছু লেখা হয়নি।' }),
       // The three numbers as figures, not a paragraph. A partial import is a
-      // decision, and a decision is made from a comparison.
+      // decision, and a decision is made from a comparison. Tones only where
+      // the figure means something: nothing importable, rows left out, or a
+      // file with no problem at all — each with its words beside it.
       statRow(d,
-        statCard(d, { label: 'পড়া হয়েছে', value: `${bn(r.rowsRead)}টি সারি`, glyph: 'book-open' }),
+        statCard(d, { label: 'পড়া হয়েছে', value: `${bn(r.rowsRead)}টি সারি` }),
         statCard(d, {
-          label: 'আমদানির উপযুক্ত', value: `${bn(r.rowsValid)}টি`, glyph: 'check-square',
-          tone: r.rowsValid > 0 ? 'success' : 'warn',
+          label: 'আমদানির উপযুক্ত', value: `${bn(r.rowsValid)}টি`,
+          tone: r.rowsValid > 0 ? undefined : 'warn',
         }),
         statCard(d, {
-          label: 'বাদ পড়বে', value: `${bn(r.rowsRejected)}টি`, glyph: 'alert-triangle',
+          label: 'বাদ পড়বে', value: `${bn(r.rowsRejected)}টি`,
           tone: r.rowsRejected > 0 ? 'warn' : 'success',
           note: r.rowsRejected > 0 ? 'নিচের কারণগুলো দেখুন' : 'কোনো সারিতে সমস্যা নেই',
         }),
       ),
-    ];
+    );
 
     if (r.rowsRejected > 0) {
-      parts.push(dataTable(d, {
+      body.append(dataTable(d, {
         caption: 'যে সারিগুলো বাদ পড়বে',
         rows: shown,
         rowKey: (e) => `${e.lineNo}-${e.field}`,
         columns: [
           { key: 'line', header: 'সারি', mobile: 'title', numeric: true,
             cell: (e) => `সারি ${bn(e.lineNo)}`, width: '110px' },
+          // An identifier, so Latin like every roll in the app.
           { key: 'who', header: 'রোল / আইডি', mobile: 'meta',
-            cell: (e) => e.rollNo || '—', width: '130px' },
+            cell: (e) => (e.rollNo ? formatIdentifier(e.rollNo) : '—'), width: '130px' },
           { key: 'why', header: 'কারণ', mobile: 'subtitle', cell: (e) => e.messageBn,
             width: 'minmax(0, 3fr)' },
         ],
@@ -482,36 +561,34 @@ export class ImportView {
       if (r.errors.length > ERRORS_SHOWN) {
         // Never "···" alone: the count is what tells the operator whether to
         // keep scrolling or to go and fix the spreadsheet.
-        parts.push(el(d, 'p', {
-          className: 'ui-card-note',
-          text: `আরও ${bn(r.errors.length - ERRORS_SHOWN)}টি সারিতে সমস্যা আছে — ` +
-                'সম্পূর্ণ তালিকা নামিয়ে নিন।',
-        }));
+        body.append(el(d, 'p', { className: 'import-note' }, ...numText(d,
+          `আরও ${bn(r.errors.length - ERRORS_SHOWN)}টি সারিতে সমস্যা আছে — ` +
+          'সম্পূর্ণ তালিকা নামিয়ে নিন।')));
       }
-      parts.push(buttonRow(d,
-        button(d, {
-          label: 'সমস্যার তালিকা নামান', variant: 'secondary', glyph: 'book',
-          disabled: !r.errorCsv,
-          onClick: () => { this.downloadErrors(); },
-        }),
-        button(d, {
-          label: 'ঠিক করে আবার আপলোড', variant: 'ghost',
-          onClick: () => { this.reset(); },
-        }),
-      ));
+      body.append(buttonRow(d, button(d, {
+        label: 'সমস্যার তালিকা নামান', variant: 'secondary', glyph: 'download',
+        disabled: !r.errorCsv,
+        onClick: () => { this.downloadErrors(); },
+      })));
+      // The way back sits where the design draws "পিছনে": the footer's left.
+      foot.append(button(d, {
+        label: 'ঠিক করে আবার আপলোড', variant: 'secondary',
+        onClick: () => { this.reset(); },
+      }));
     }
 
-    const host = card(d, {
-      title: 'পূর্বরূপ', glyph: 'search', className: 'import-card',
-      subtitle: 'এখনো কিছু লেখা হয়নি।',
-    }, ...parts);
-
     if (r.rowsValid === 0) {
-      append(host, el(d, 'p', {
-        className: 'ui-card-note',
-        text: 'কোনো সারি আমদানির উপযুক্ত নয়। ফাইলটি ঠিক করে আবার চেষ্টা করুন।',
-      }));
-      return host;
+      body.append(el(d, 'div', { className: 'import-callout' },
+        el(d, 'p', { text: 'কোনো সারি আমদানির উপযুক্ত নয়। ফাইলটি ঠিক করে আবার চেষ্টা করুন।' })));
+      return;
+    }
+
+    if (r.rowsRejected > 0) {
+      // The drawn warning: what is left out, and that the rest still comes in.
+      body.append(el(d, 'div', { className: 'import-callout' },
+        el(d, 'p', {}, ...numText(d,
+          `${bn(r.rowsRead)}টি সারির মধ্যে ${bn(r.rowsRejected)}টিতে ভুল আছে। ` +
+          'ওই সারিগুলো বাদ দিয়ে বাকিগুলো আনা হবে — পরে আলাদা করে ঠিক করা যাবে।'))));
     }
 
     // §10.2's exact phrasing. Both numbers on the button itself, so the
@@ -520,14 +597,19 @@ export class ImportView {
       ? `${bn(r.rowsValid)}টি ঠিক সারি আমদানি করুন, ${bn(r.rowsRejected)}টি বাদ`
       : `${bn(r.rowsValid)}টি সারি আমদানি করুন`;
 
-    append(host, buttonRow(d, button(d, {
+    const go = button(d, {
       label, variant: 'primary', busy: this.busy, className: 'import-go',
       onClick: () => {
         // This is the write, and it is the first one. Confirmed because the
         // count on the button is a number a person can read past — the
         // dialog restates what is being LEFT OUT, which is the part §10.2
         // says must never be silent.
-        host.append(confirmDialog({
+        //
+        // The confirm carries its own primary, so the button steps aside
+        // while it asks: one primary on screen at a time, and no second
+        // dialog from a second press.
+        go.hidden = true;
+        body.append(confirmDialog({
           doc: d,
           title: 'আমদানি নিশ্চিত করুন',
           body: r.rowsRejected > 0
@@ -536,52 +618,44 @@ export class ImportView {
             : `${bn(r.rowsValid)}টি ${KIND_BN[this.kind]} যোগ হবে।`,
           confirmLabel: 'আমদানি করুন',
           onConfirm: () => void this.send(true),
+          onCancel: () => { go.hidden = false; go.focus(); },
         }));
       },
-    })));
-    return host;
+    });
+    foot.append(go);
   }
 
-  private doneCard(): HTMLElement {
+  private doneStep(body: HTMLElement, foot: HTMLElement): void {
     const d = this.o.doc;
     const r = this.result as DryRun;
 
-    const parts: Array<Node | null> = [
-      el(d, 'p', {
-        className: 'ui-card-lead',
-        text: `${bn(r.rowsImported)}টি ${KIND_BN[this.kind]} আমদানি হয়েছে`,
-        attrs: { role: 'status' },
-      }),
-    ];
+    // aria-live, as the line it replaces was role=status: the result is
+    // announced without interrupting.
+    body.append(successNote(d, `${bn(r.rowsImported)}টি ${KIND_BN[this.kind]} আমদানি হয়েছে`));
 
     if (r.rowsRejected > 0) {
       // Stated after the fact as well as before it. "No silent truncation"
       // means the skipped rows are still on screen once the work is done.
-      parts.push(el(d, 'div', { className: 'ui-row-actions' },
-        statusBadge(d, { state: 'pending', label: `${bn(r.rowsRejected)}টি সারি বাদ দেওয়া হয়েছে` })));
-      if (r.errorCsv) {
-        parts.push(button(d, {
-          label: 'বাদ পড়া সারির তালিকা', variant: 'secondary', glyph: 'book',
-          onClick: () => { this.downloadErrors(); },
-        }));
-      }
+      body.append(buttonRow(d,
+        statusBadge(d, { state: 'pending', label: `${bn(r.rowsRejected)}টি সারি বাদ দেওয়া হয়েছে` }),
+        r.errorCsv
+          ? button(d, {
+              label: 'বাদ পড়া সারির তালিকা', variant: 'secondary', glyph: 'download',
+              onClick: () => { this.downloadErrors(); },
+            })
+          : null));
     }
 
-    parts.push(el(d, 'p', {
-      className: 'ui-card-note',
+    body.append(el(d, 'p', {
+      className: 'import-note',
       text: this.kind === 'student'
         ? 'প্রতিটি শিক্ষার্থীর বিষয় তালিকা টেমপ্লেট থেকে নির্ধারিত হয়েছে।'
         : 'নতুন কেউ এখনো লগইন করতে পারবেন না — ব্যবহারকারী পাতা থেকে সক্রিয়ন কোড দিন।',
     }));
 
-    parts.push(buttonRow(d, button(d, {
+    foot.append(button(d, {
       label: 'আরেকটি ফাইল আমদানি করুন', variant: 'secondary',
       onClick: () => { this.reset(); },
-    })));
-
-    return card(d, {
-      title: 'আমদানি সম্পন্ন', glyph: 'check-square', tone: 'success',
-      className: 'import-card',
-    }, ...parts);
+    }));
   }
 }

@@ -115,7 +115,11 @@ describe('bulk import screen (§10.2)', () => {
     // "Nothing is written until step 4" — there is no button that could.
     const labels = [...r.querySelectorAll('button')].map((b) => b.textContent ?? '');
     assert.ok(!labels.some((l) => l.includes('আমদানি করুন')));
-    assert.match(r.querySelector('.page-sub')?.textContent ?? '', /ধাপ ১/);
+    // Ata Ekta moved the step count out of the subtitle into the header chip
+    // (05 Principal §04), and the phone's compact block says it too. Both
+    // widths must still say which step this is.
+    assert.match(r.querySelector('.import-step-chip')?.textContent ?? '', /ধাপ ১ \/ ৪/);
+    assert.match(r.querySelector('.stepper-compact-count')?.textContent ?? '', /ধাপ ১ \/ ৪/);
   });
 
   describe('with 16 bad rows out of 784', () => {
@@ -221,9 +225,67 @@ describe('bulk import screen (§10.2)', () => {
       const { root: r } = await toReview(CLEAN);
       const done = [...r.querySelectorAll('.stepper-step[data-state=done] .stepper-num')];
       assert.ok(done.length >= 1);
-      assert.ok(done.every((n) => n.textContent === '✓'));
+      // The tick is the drawn check glyph now, not a '✓' character — and a
+      // glyph is aria-hidden, so the WORD rides beside it for a reader.
+      assert.ok(done.every((n) => n.querySelector('svg') !== null), 'a tick is drawn');
+      assert.ok(done.every((n) => (n.textContent ?? '').includes('সম্পন্ন')),
+        'and said in words, not by colour');
       const current = r.querySelector('.stepper-step[data-state=current]');
       assert.equal(current?.getAttribute('aria-current'), 'step');
+    });
+  });
+
+  describe('headings (R8)', () => {
+    /** The panel is a region named by an h2 that says which step's work it holds. */
+    function stepRegion(r: HTMLElement): { name: string; h1s: number } {
+      const panel = r.querySelector('section.import-wizard');
+      assert.ok(panel, 'the step panel is a section');
+      const id = panel.getAttribute('aria-labelledby') ?? '';
+      assert.ok(id, 'the section is labelled');
+      const h2 = r.ownerDocument.getElementById(id);
+      assert.equal(h2?.tagName, 'H2', 'labelled by an h2');
+      assert.ok(panel.contains(h2), 'the heading sits inside the panel it names');
+      return { name: h2?.textContent ?? '', h1s: r.querySelectorAll('h1').length };
+    }
+
+    test('every step names its work with an h2 under the one h1', async () => {
+      const r = dom.window.document.getElementById('root') as HTMLElement;
+      r.textContent = '';
+      new ImportView({
+        root: r, doc: dom.window.document, auth: stubAuth(DIRTY),
+        academicYearId: '7f000000-0000-4000-8000-000000000091',
+      });
+      assert.deepEqual(stepRegion(r), { name: 'ফাইল', h1s: 1 });
+
+      const { root: review } = await toReview(DIRTY);
+      assert.deepEqual(stepRegion(review), { name: 'পূর্বরূপ', h1s: 1 });
+
+      await importAndConfirm(review);
+      assert.deepEqual(stepRegion(review), { name: 'আমদানি সম্পন্ন', h1s: 1 });
+    });
+  });
+
+  describe('one primary at a time', () => {
+    test('the import button steps aside while the confirm asks, and comes back on cancel', async () => {
+      const { root: r } = await toReview(DIRTY);
+      const go = r.querySelector('.import-go') as HTMLButtonElement;
+      go.click();
+      await new Promise((res) => setTimeout(res, 0));
+
+      const visiblePrimaries = [...r.querySelectorAll('.btn-primary')]
+        .filter((b) => !(b as HTMLElement).hidden);
+      assert.equal(visiblePrimaries.length, 1, 'only the confirm button is primary now');
+      assert.ok(r.querySelector('.notice-confirm'));
+
+      // A second press cannot stack a second dialog: the button is not there.
+      assert.equal(go.hidden, true);
+
+      const cancel = [...r.querySelectorAll('.notice-confirm button')]
+        .find((b) => b.textContent === 'বাতিল') as HTMLButtonElement;
+      cancel.click();
+      assert.equal(r.querySelector('.notice-confirm'), null);
+      assert.equal(go.hidden, false, 'cancel gives the import button back');
+      assert.equal(dom.window.document.activeElement, go, 'and focus returns to it');
     });
   });
 });

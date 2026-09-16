@@ -16373,3 +16373,84 @@ presigned PUT that neither side implements. Latent today, because
 
 PWA suite **993 tests**, all passing; typecheck 0 errors; build clean;
 `index.html` byte-identical at `496199bd`.
+
+---
+
+# Ata Ekta — wave 2, batch C: principal, admin and routine screens (2026-09-17)
+
+Twenty-four units: principal home, academic structure, students, users,
+roles, subjects, rooms, teaching assignments, timetable, the routine editor,
+generate, publish and setup, the exam routine, exams, result publishing,
+rollover, import, admin settings, branding, the structure forms, staff
+attendance, generation, and subject choice. Twelve needed a repair pass.
+
+## What changed on screen (highlights)
+
+- **Principal home** is the drawn board: a four-figure band (students, present
+  %, absent, dues) and two panels — what needs attention now, and today's
+  absent students. The review caught the first draft counting attendance
+  SESSIONS against SECTIONS (the dashboard endpoint mixes the two), so that
+  row was removed rather than shown wrong, and the all-clear sentence no
+  longer mentions attendance.
+- **Academic structure** is the 05 Principal §02 tree: শ্রেণি → বিভাগ → সেকশন
+  opens in place, counts at every level, and a section with no class teacher
+  carries a status on its own row.
+- **Result publishing and rollover use the irreversible panel** (§7): the
+  consequence and its real counts are on screen before anything is pressed,
+  and the primary stays disabled until "আমি বুঝেছি এটি ফেরানো যাবে না" is
+  ticked. Rollover keeps its extra guard: while any student is blocked, the
+  checkbox itself is disabled.
+- **Roles** is one matrix of ten roles by five acts — built from what the
+  server enforces, not from the drawing. The drawing showed the academic
+  coordinator without settings access; the server grants it, so the matrix
+  says so. The page also keeps the sentence the drawing dropped: another
+  school's rows are never visible, and that is not a setting.
+- **Users** shows the মোবাইল column only to roles that may manage accounts.
+- **Exams** reads a weight typed in Bangla digits. It used to become NaN,
+  travel as null, and be saved as 0 with no error.
+- **Teaching assignments** is one matrix, sections down and subjects across;
+  the phone card stack that rendered every cell twice is gone, and switching
+  class with unsaved edits asks through the app's own dialog, not
+  `window.confirm()`.
+- The routine screens (setup, generate, publish, editor, timetable, exam
+  routine, generation) follow 06 Routine band by band.
+
+## Merged centrally
+
+699 CSS rules added, 163 carried rules retired, no raw hex, no undefined
+token, no conflict. The removal guard refused four more (`.tab` and its
+states, still used by other screens; `.brand-card`). One keyframes block,
+`rgen-sweep`, was added by hand with a reduced-motion stop, because a
+keyframes rule does not fit the merge script's selector shape. Four icons:
+plus, minus, git-branch, more-vertical.
+
+## Shared tests (R13)
+
+Applied centrally, then each new check was mutation-tested: the screen code
+was broken one change at a time in a throwaway copy, and the new tests caught
+every real break. Notable:
+
+- **Publish** replaced "the confirmation's focus defaults to cancel" with a
+  stronger one: the publish button is disabled before the tick, pressing it
+  anyway sends nothing, and after the tick exactly one POST goes out with the
+  right exam.
+- **Rollover** proves the commit stays blocked while students are blocked even
+  if the checkbox is forced and ticked.
+- **Users** proves a read-only caller sees no phone number anywhere.
+- One old assertion was DELETED on purpose: the generation screen used to say
+  zero conflicts were "ডাটাবেসেই অসম্ভব". That is false for a draft — the
+  exclusion constraints only protect ACTIVE routines, and the service counts
+  real draft conflicts.
+- The test that the roles page promises tenant isolation was left failing
+  rather than rewritten; the sentence was put back on the screen instead.
+
+## Defects found, recorded not fixed (R4) — BACKLOG AE-12
+
+The one to read first: **the users API sends every account's phone number to
+the academic coordinator**, a read-only role. The screen now hides the column
+from that role, but the data still arrives.
+
+## Verified
+
+PWA suite **1,048 tests**, all passing; typecheck 0 errors; build clean;
+`index.html` byte-identical at `496199bd`.

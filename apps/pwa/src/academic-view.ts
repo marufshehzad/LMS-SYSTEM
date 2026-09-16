@@ -1,19 +1,29 @@
 /**
- * একাডেমিক কাঠামো — the drill-down, and everything done from inside it
- * (R-3, Parts C, D, E, L and M)
+ * একাডেমিক কাঠামো — the tree, and everything done from inside it
+ * (R-3, Parts C, D, E, L and M; Ata Ekta 05 Principal §02)
  *
  *     শিক্ষাবর্ষ → শ্রেণি ৯ → বিজ্ঞান → সেকশন F → ৪০ জন শিক্ষার্থী
  *
- * ── One screen, four depths, because they are one thought ──────────────
+ * ── One screen, three depths, because they are one thought ─────────────
  * Assigning a teacher, moving students and reading a student's history are not
  * separate destinations a person navigates to and then re-selects the section
  * in. They are things you do while looking at a section. Splitting them into
  * routes would mean re-choosing Class 9 → Science → F three times to do three
  * things to the same forty children.
  *
+ * ── The tree opens in place ────────────────────────────────────────────
+ * 05 Principal §02: "ভেতরে ঢোকার জন্য পাতা বদলাতে হয় না — একই তালিকায় খোলে
+ * ও বন্ধ হয়, তাই প্রসঙ্গ হারায় না।" শ্রেণি, বিভাগ and সেকশন are one list whose
+ * branches open and close where they are; there is no separate class page to
+ * lose your place on. Which branches are open is remembered across every
+ * repaint, so coming back out of a section finds its branch still open.
+ * 13 Responsive ০৪: on a phone the step is 14px instead of 26px and a row's
+ * actions sit behind one dot button in a sheet — the tree itself never moves
+ * to another page.
+ *
  * ── The tree is fetched once ───────────────────────────────────────────
- * `/hierarchy` returns the whole structure with counts. Drilling in and back
- * out is then instant and works from the service worker's cache — which is the
+ * `/hierarchy` returns the whole structure with counts. Opening a branch is
+ * then instant and works from the service worker's cache — which is the
  * behaviour a head teacher standing in a corridor on 2G actually experiences.
  * Only opening a section costs a request, because only then do names load.
  *
@@ -24,10 +34,12 @@
  * replacements at all, and then the register and the truth diverge quietly.
  */
 import type { Auth } from './auth.ts';
-import { todayLocalIso, toBanglaDigits, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
-import { iconSvg } from './icon.ts';
 import {
-  skeleton, errorState, emptyState, successNote, confirmDialog, bnNum, bnDate,
+  todayLocalIso, toBanglaDigits, formatAcademicYear, formatIdentifier,
+} from '../../../packages/ui-core/src/format.ts';
+import { hasIcon } from './icon.ts';
+import {
+  skeleton, errorState, emptyState, successNote, bnNum, bnDate,
 } from './view-states.ts';
 import {
   structureForm, createdNote, type StructureOptions, type StructureKind,
@@ -35,9 +47,12 @@ import {
 import { openRename } from './structure-edit.ts';
 import { GuardianPanel } from './guardian-panel.ts';
 import {
-  permissionMessage, pageHeader, sectionHeading, buttonRow, button, card,
-  dataTable, statusBadge, field, setFieldError, clearFieldError, el, append,
-  type Field, serverMessage,} from './ui/index.ts';
+  permissionMessage, permissionState, pageHeader, sectionHeading, buttonRow, button,
+  iconButton, badge, card, dataTable, statusBadge, field, setFieldError, clearFieldError,
+  el, append, clear, icon, numText, uid, list, listItem, listSkeleton,
+  openOverlay, confirmOverlay, serverMessage,
+  type Field, type Crumb, type OverlayHandle,
+} from './ui/index.ts';
 
 // ── Shapes returned by /api/v1/academics/hierarchy ──────────────────────
 
@@ -125,9 +140,45 @@ export interface AcademicViewOptions {
 
 type Depth =
   | { at: 'tree' }
-  | { at: 'level'; levelNo: number }
   | { at: 'section'; sectionId: string }
   | { at: 'student'; sectionId: string; studentId: string };
+
+/** One thing a row lets you do: inline on a desktop row, a sheet item on a phone. */
+interface NodeAction {
+  glyph: string;
+  text: string;
+  run: () => void;
+}
+
+/** One row of the tree, and what hangs beneath it. */
+interface NodeSpec {
+  /** `L:<levelNo>`, `G:<classId>` or `S:<sectionId>` — the expansion key. */
+  key: string;
+  depth: 0 | 1 | 2;
+  name: string;
+  meta: string;
+  /** The row's type glyph; `undefined` draws the slot empty. */
+  glyph: string | undefined;
+  /** A branch opens in place; a leaf (a section) opens its own depth. */
+  expandable: boolean;
+  onOpen?: () => void;
+  /** A state beside the name — a section with no class teacher. */
+  flag?: HTMLElement | null;
+  actions: NodeAction[];
+  children?: HTMLElement[];
+}
+
+/**
+ * The design's glyph when the icon set carries it, else a stand-in it does.
+ * 05 Principal §02 and 13 Responsive ০৪ draw `git-branch`, `minus`, `plus` and
+ * `more-vertical`, which icon.ts does not have yet. Until it does, a row shows
+ * the stand-in — or an empty slot of the same width — rather than the
+ * unknown-icon dot, and switches to the drawn glyph the moment the set gains
+ * it. (Same pattern as documents-view.ts.)
+ */
+function drawn(name: string, standIn?: string): string | undefined {
+  return hasIcon(name) ? name : standIn;
+}
 
 export class AcademicView {
   private readonly o: AcademicViewOptions;
@@ -149,6 +200,26 @@ export class AcademicView {
   private busy = false;
   private created: Record<string, unknown> | null = null;
 
+  /**
+   * Which branches are open: `L:<levelNo>` and `G:<classId>`. A field rather
+   * than DOM state because `render()` rebuilds the tree from scratch, and a
+   * principal who opened নবম → বিজ্ঞান, went into section F and came back
+   * must find নবম → বিজ্ঞান still open.
+   */
+  private expanded = new Set<string>();
+  /** The first load opens the first শ্রেণি and its first বিভাগ, as drawn. */
+  private expandedInit = false;
+  /** The hierarchy itself was refused. Its own state, never red error text. */
+  private denied = false;
+  /** The class a row's "নতুন সেকশন" preselects in the section form. */
+  private presetClass: string | undefined;
+  /**
+   * Move focus to the create form on the render that first draws it. The
+   * form sits above the tree, and a "+" pressed on a row further down would
+   * otherwise open it out of sight — a press that seems to do nothing.
+   */
+  private focusForm = false;
+
   constructor(options: AcademicViewOptions) {
     this.o = options;
     this.render();
@@ -158,12 +229,21 @@ export class AcademicView {
   // ── loading ───────────────────────────────────────────────────────────
 
   private async loadTree(): Promise<void> {
-    this.loading = true; this.error = ''; this.render();
+    this.loading = true; this.error = ''; this.denied = false; this.render();
     try {
       const res = await this.o.auth.authedFetch('/api/v1/academics/hierarchy');
-      if (res.status === 403) { this.error = permissionMessage('একাডেমিক কাঠামো'); return; }
+      if (res.status === 403) { this.denied = true; return; }
       if (!res.ok) throw new Error(String(res.status));
       this.tree = (await res.json()) as Tree;
+      if (!this.expandedInit) {
+        const first = this.tree.classes[0];
+        if (first) {
+          this.expanded.add(`L:${first.levelNo}`);
+          const g0 = first.groups[0];
+          if (g0) this.expanded.add(`G:${g0.classId}`);
+        }
+        this.expandedInit = true;
+      }
     } catch {
       this.error = 'কাঠামো আনা যায়নি — সংযোগ পেলে আবার দেখা যাবে।';
     } finally {
@@ -237,11 +317,19 @@ export class AcademicView {
       if (!res.ok) { this.error = serverMessage(body, res.status, 'তৈরি করা যায়নি।'); return; }
       this.created = body;
       this.creating = null;
+      this.presetClass = undefined;
       // The options list is now stale — the new class must be selectable as a
       // section's parent immediately.
       this.structureOptions = null;
       await this.loadTree();
-      if (this.depth.at === 'level') this.render();
+      // Open the branch the new thing sits in, so it is on screen when the
+      // tree comes back rather than folded away under a closed row.
+      if (payload.kind === 'section' && typeof payload.classId === 'string') {
+        this.expandForClass(payload.classId);
+      }
+      if (payload.kind === 'class' && typeof payload.levelNo === 'number') {
+        this.expanded.add(`L:${payload.levelNo}`);
+      }
     } catch {
       this.error = 'সংযোগ নেই — তৈরি করা যায়নি।';
     } finally {
@@ -324,128 +412,220 @@ export class AcademicView {
 
   // ── rendering ─────────────────────────────────────────────────────────
 
+  /**
+   * One way into every create form: the header's primary and secondary, a
+   * row's "নতুন সেকশন", and the empty states. `classId` is the class the
+   * section form preselects — the row the person pressed it on.
+   */
+  private startCreate(kind: StructureKind, classId?: string): void {
+    this.creating = kind;
+    this.presetClass = classId;
+    this.created = null;
+    this.focusForm = true;
+    if (!this.structureOptions) void this.loadStructureOptions(); else this.render();
+  }
+
+  /** Open the শ্রেণি and বিভাগ a class row hangs under. */
+  private expandForClass(classId: string): void {
+    for (const lvl of this.tree?.classes ?? []) {
+      for (const g of lvl.groups) {
+        if (g.classId === classId) {
+          this.expanded.add(`L:${lvl.levelNo}`);
+          this.expanded.add(`G:${classId}`);
+        }
+      }
+    }
+  }
+
+  /** Out of a section or a student, back to the tree with its branch open. */
+  private backToTree(classId: string | undefined): void {
+    this.depth = { at: 'tree' };
+    if (classId) this.expandForClass(classId);
+    this.error = ''; this.notice = '';
+    this.render();
+  }
+
   private render(): void {
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';
 
     root.append(this.header());
+
+    // A refusal is the whole answer. Rendering the empty state underneath it
+    // says 'you may not see this' and then 'there is nothing here', which are
+    // different claims and only one of them is true.
+    if (this.denied) {
+      root.append(permissionState(d, {
+        message: permissionMessage('একাডেমিক কাঠামো'),
+        contact: 'প্রধান শিক্ষক',
+      }));
+      return;
+    }
+
     if (this.notice) root.append(successNote(d, this.notice));
     if (this.created) root.append(createdNote(d, this.created));
     if (this.error) {
-      root.append(errorState(d, this.error,
-        this.error.includes('অনুমতি') ? undefined : () => void this.loadTree()));
-      // A refusal is the whole answer. Rendering the empty state underneath
-      // it says 'you may not see this' and then 'there is nothing here',
-      // which are different claims and only one of them is true.
-      if (this.error.includes('অনুমতি')) return;
+      // A write the server refused (`serverMessage` → the canonical
+      // permission sentence). The same whole answer as above, and no retry:
+      // retrying a refusal is the definition of futile.
+      if (this.error.includes('অনুমতি')) {
+        root.append(permissionState(d, { message: this.error }));
+        return;
+      }
+      root.append(errorState(d, this.error, () => void this.loadTree()));
+      // Nothing was ever loaded, so nothing below can be true: the tree's
+      // empty state would add "no academic year yet" under "could not load".
+      if (this.depth.at === 'tree' && !this.tree && !this.loading) return;
     }
-    if (this.loading) { root.append(skeleton(d, 4)); return; }
+    if (this.loading) {
+      // Row-shaped at the tree, so the placeholder already looks like the
+      // list that is coming.
+      root.append(this.depth.at === 'tree' ? listSkeleton(d, 5) : skeleton(d, 4));
+      return;
+    }
 
-    // The create forms sit above whatever level is on screen, so the office
+    // The create forms sit above whatever depth is on screen, so the office
     // stays where they were when the new thing appears below.
     if (this.creating) {
       if (!this.structureOptions) {
         void this.loadStructureOptions();
         root.append(skeleton(d, 2));
       } else {
-        root.append(structureForm({
+        const form = structureForm({
           doc: d,
           kind: this.creating,
           options: this.structureOptions,
-          // Narrowed into a local first: TS does not carry the discriminant
-          // through the property access inside the object literal.
-          presetClassId: this.presetClassId(),
+          presetClassId: this.presetClass,
           busy: this.busy,
           onSubmit: (payload) => void this.submitStructure(payload),
-          onCancel: () => { this.creating = null; this.render(); },
-        }));
+          onCancel: () => { this.creating = null; this.presetClass = undefined; this.render(); },
+        });
+        root.append(form);
+        if (this.focusForm) {
+          this.focusForm = false;
+          form.scrollIntoView?.({ block: 'start' });
+          form.querySelector<HTMLElement>('input, select, textarea')?.focus({ preventScroll: true });
+        }
       }
     }
 
-    switch (this.depth.at) {
-      case 'tree':    this.renderTree(root); break;
-      case 'level':   this.renderLevel(root, this.depth.levelNo); break;
-      case 'section': this.renderSection(root); break;
-      case 'student': this.renderStudent(root); break;
+    if (this.depth.at === 'tree') {
+      this.renderTree(root);
+      return;
     }
+    // A section and a student are a stack of cards, headings and tables. One
+    // screen-owned container gives them the space between blocks that the
+    // components deliberately do not carry themselves.
+    const detail = el(d, 'div', { className: 'ac-detail' });
+    root.append(detail);
+    if (this.depth.at === 'section') this.renderSection(detail);
+    else this.renderStudent(detail);
   }
 
   /**
-   * The trail, as real crumbs rather than a sentence.
+   * The page header: the title bar the design draws, and the trail below the
+   * tree.
    *
-   * `pageHeader`'s `crumbs` render as links a person can click to jump two
-   * levels back — the old `page-sub` said "শিক্ষাবর্ষ ২০২৬ · নবম শ্রেণি · ..."
-   * as prose, which reads the same and goes nowhere. The back button stays:
-   * on a phone the crumb row is the least reachable thing on the screen.
+   * At the tree (05 Principal §02): the title, then on the right the
+   * শিক্ষাবর্ষ chip and the one small primary, "নতুন শ্রেণি". Creating a
+   * second academic year is not drawn but must stay reachable, so it sits
+   * beside the primary as a secondary.
+   *
+   * Below the tree, `pageHeader`'s `crumbs` render as buttons a person can
+   * click to jump back. 14 Components §01 caps a trail at two steps; a
+   * section is "একাডেমিক কাঠামো / সেকশন F". The class crumb that used to sit
+   * between them went to a class page that no longer exists — the tree opens
+   * that class in place — so it is folded into the first crumb, which reopens
+   * the branch. The back button stays: on a phone the crumb row is the least
+   * reachable thing on the screen.
    */
   private header(): HTMLElement {
     const d = this.o.doc;
-    const crumbs: Array<{ label: string; onClick?: () => void }> = [];
-    const year = this.tree?.year?.label ?? '';
-    if (this.depth.at !== 'tree') {
+    const depth = this.depth;
+    const crumbs: Crumb[] = [];
+
+    if (depth.at !== 'tree') {
       crumbs.push({
-        label: year ? `শিক্ষাবর্ষ ${formatAcademicYear(year)}` : 'একাডেমিক কাঠামো',
-        onClick: () => { this.depth = { at: 'tree' }; this.error = ''; this.notice = ''; this.render(); },
+        label: 'একাডেমিক কাঠামো',
+        onClick: () => this.backToTree(this.findSection(depth.sectionId)?.classId),
       });
     }
-    if (this.depth.at === 'section' && this.detail) {
-      const levelNo = this.detail.section.levelNo;
-      crumbs.push({
-        label: this.detail.section.classNameBn,
-        onClick: () => { this.depth = { at: 'level', levelNo }; this.error = ''; this.render(); },
-      });
-    }
-    if (this.depth.at === 'student') {
+    if (depth.at === 'student') {
       // Resolved from the TREE by the id we drilled through, not from
       // `student.current.section`. Those are the same row in real data and
       // were not in the demo — and a crumb that names a section other than
       // the one the person came from sends them somewhere else when clicked.
-      const sectionId = this.depth.sectionId;
-      const found = this.findSection(sectionId);
+      const found = this.findSection(depth.sectionId);
       if (found) {
         crumbs.push({
-          label: found.classNameBn,
-          onClick: () => { this.depth = { at: 'level', levelNo: found.levelNo }; this.error = ''; this.render(); },
-        });
-        crumbs.push({
           label: `সেকশন ${found.name}`,
-          onClick: () => void this.openSection(sectionId),
+          onClick: () => void this.openSection(depth.sectionId),
         });
       }
     }
-
     // The current depth, as the LAST crumb. `breadcrumb()` renders the final
-    // entry as "you are here" and every earlier one as a link — so without
-    // this the one crumb at level depth was plain text and went nowhere. It
-    // repeats the h1 on purpose: that is what a breadcrumb trail is.
+    // entry as "you are here" and every earlier one as a link. It repeats the
+    // h1 on purpose: that is what a breadcrumb trail is.
     if (crumbs.length) crumbs.push({ label: this.title() });
 
-    const back = this.depth.at === 'tree' ? undefined : button(d, {
-      label: 'ফিরে যান', variant: 'ghost', size: 'sm', glyph: 'arrow-left',
-      onClick: () => {
-        this.notice = '';
-        if (this.depth.at === 'student') void this.openSection(this.depth.sectionId);
-        else if (this.depth.at === 'section') { this.depth = { at: 'tree' }; this.error = ''; this.render(); }
-        else { this.depth = { at: 'tree' }; this.render(); }
-      },
-    });
+    const actions: HTMLElement[] = [];
+    let primary: HTMLElement | undefined;
+
+    if (depth.at === 'tree') {
+      const tree = this.tree;
+      if (tree?.year && !this.denied) {
+        actions.push(badge(d, {
+          label: `শিক্ষাবর্ষ ${formatAcademicYear(tree.year.label)}`, tone: 'neutral',
+        }));
+      }
+      if (tree && !this.denied && !this.loading && this.o.canManage && !this.creating) {
+        if (tree.years.length === 0) {
+          // Nothing can be made before a year exists, so the year is the one
+          // action this screen has.
+          primary = button(d, {
+            label: 'শিক্ষাবর্ষ তৈরি', variant: 'primary', size: 'sm',
+            onClick: () => this.startCreate('year'),
+          });
+        } else {
+          actions.push(button(d, {
+            label: 'শিক্ষাবর্ষ তৈরি', variant: 'secondary', size: 'sm', glyph: 'calendar',
+            onClick: () => this.startCreate('year'),
+          }));
+          primary = button(d, {
+            label: 'নতুন শ্রেণি', variant: 'primary', size: 'sm',
+            onClick: () => this.startCreate('class'),
+          });
+        }
+      }
+    } else {
+      actions.push(button(d, {
+        label: 'ফিরে যান', variant: 'ghost', size: 'sm', glyph: 'arrow-left',
+        onClick: () => {
+          this.notice = '';
+          const now = this.depth;
+          if (now.at === 'student') void this.openSection(now.sectionId);
+          else if (now.at === 'section') this.backToTree(this.findSection(now.sectionId)?.classId);
+        },
+      }));
+    }
 
     return pageHeader(d, {
       title: this.title(),
       subtitle: this.subtitle(),
       crumbs: crumbs.length ? crumbs : undefined,
-      actions: back ? [back] : undefined,
+      actions: actions.length ? actions : undefined,
+      primary,
     });
   }
 
   /** Where a section sits in the tree, by id. Used by the crumbs. */
-  private findSection(sectionId: string): { name: string; classNameBn: string; levelNo: number } | null {
+  private findSection(sectionId: string): { name: string; classId: string; levelNo: number } | null {
     for (const lvl of this.tree?.classes ?? []) {
       for (const g of lvl.groups) {
         for (const sec of g.sections) {
           if (sec.id === sectionId) {
-            return { name: sec.name, classNameBn: `${lvl.nameBn} · ${g.groupBn}`, levelNo: lvl.levelNo };
+            return { name: sec.name, classId: g.classId, levelNo: lvl.levelNo };
           }
         }
       }
@@ -460,66 +640,33 @@ export class AcademicView {
         ? `সেকশন ${this.detail.section.name}`
         : 'সেকশন';
     }
-    if (this.depth.at === 'level') {
-      const levelNo = this.depth.levelNo;
-      return this.tree?.classes.find((c) => c.levelNo === levelNo)?.nameBn ?? 'শ্রেণি';
-    }
     return 'একাডেমিক কাঠামো';
   }
 
   /**
    * The one line of context the crumbs cannot carry: how many people this
-   * depth is about. Renamed from `breadcrumb` because the crumbs are now real.
+   * depth is about. The tree has none — its year is the chip beside the
+   * title, as drawn.
    */
   private subtitle(): string {
-    const year = this.tree?.year?.label ?? '';
     if (this.depth.at === 'section' && this.detail) {
       const s = this.detail.section;
-      return `${year} · ${s.classNameBn} · ${s.groupBn} · ${bnNum(s.studentCount)} জন`;
+      return [formatAcademicYear(s.yearLabel), s.classNameBn, s.groupBn, `${bnNum(s.studentCount)} জন`]
+        .filter(Boolean).join(' · ');
     }
     if (this.depth.at === 'student' && this.student?.current) {
       const c = this.student.current;
-      return `${c.classBn} · ${c.groupBn} · সেকশন ${c.section} · রোল ${bnNum(c.rollNo)}`;
+      return `${c.classBn} · ${c.groupBn} · সেকশন ${c.section} · রোল ${formatIdentifier(c.rollNo)}`;
     }
-    return year ? `শিক্ষাবর্ষ ${formatAcademicYear(year)}` : '';
+    return '';
   }
 
-  /**
-   * When the office opens the section form from inside a class, that class is
-   * pre-selected — they are already looking at the thing that needs a section.
-   */
-  private presetClassId(): string | undefined {
-    if (this.depth.at !== 'level') return undefined;
-    const levelNo = this.depth.levelNo;
-    return this.tree?.classes.find((c) => c.levelNo === levelNo)?.groups[0]?.classId;
-  }
-
-  /** The create bar. Only drawn for the roles that may actually create. */
-  private createBar(kinds: StructureKind[]): HTMLElement | null {
-    if (!this.o.canManage || this.creating) return null;
-    const d = this.o.doc;
-    const labels: Record<StructureKind, string> = {
-      year: 'শিক্ষাবর্ষ তৈরি', class: 'নতুন শ্রেণি', section: 'নতুন সেকশন',
-    };
-    const glyphs: Record<StructureKind, string> = {
-      year: 'calendar', class: 'layers', section: 'users',
-    };
-    return buttonRow(d, ...kinds.map((k) => button(d, {
-      label: labels[k], variant: 'secondary', size: 'sm', glyph: glyphs[k],
-      onClick: () => {
-        this.creating = k; this.created = null;
-        if (!this.structureOptions) void this.loadStructureOptions(); else this.render();
-      },
-    })));
-  }
+  // ── the tree ──────────────────────────────────────────────────────────
 
   private renderTree(root: HTMLElement): void {
     const d = this.o.doc;
     const levels = this.tree?.classes ?? [];
     const noYear = (this.tree?.years.length ?? 0) === 0;
-
-    const bar = this.createBar(noYear ? ['year'] : ['year', 'class', 'section']);
-    if (bar) root.append(bar);
 
     if (levels.length === 0) {
       root.append(emptyState(d, {
@@ -530,138 +677,279 @@ export class AcademicView {
         action: this.o.canManage
           ? {
               label: noYear ? 'শিক্ষাবর্ষ তৈরি করুন' : 'শ্রেণি তৈরি করুন',
-              onClick: () => {
-                this.creating = noYear ? 'year' : 'class';
-                if (!this.structureOptions) void this.loadStructureOptions(); else this.render();
-              },
+              onClick: () => this.startCreate(noYear ? 'year' : 'class'),
             }
           : undefined,
       }));
       return;
     }
-    // The counts the brief asks for, as COLUMNS rather than a sentence: a
-    // head teacher comparing section counts across six classes reads a column
-    // in one pass and a run-on `·` line six times.
-    root.append(dataTable(d, {
-      caption: 'শ্রেণির তালিকা',
-      rows: levels,
-      rowKey: (l) => String(l.levelNo),
-      onRowClick: (l) => { this.depth = { at: 'level', levelNo: l.levelNo }; this.render(); },
-      columns: [
-        { key: 'name', header: 'শ্রেণি', mobile: 'title', cell: (l) => l.nameBn,
-          width: 'minmax(0, 1.4fr)' },
-        { key: 'groups', header: 'বিভাগ', mobile: 'subtitle',
-          cell: (l) => l.groups.map((g) => g.groupBn).join(' · ') || 'বিভাগ নেই',
-          width: 'minmax(0, 2fr)' },
-        { key: 'sections', header: 'সেকশন', mobile: 'meta', numeric: true,
-          cell: (l) => bnNum(l.sectionCount), width: '110px' },
-        { key: 'students', header: 'শিক্ষার্থী', mobile: 'meta', numeric: true,
-          cell: (l) => bnNum(l.studentCount), width: '110px' },
+
+    // The totals under the tree, from the same counts the rows carry.
+    const groups = levels.reduce((n, l) => n + l.groups.length, 0);
+    const sections = levels.reduce((n, l) => n + l.sectionCount, 0);
+    const students = levels.reduce((n, l) => n + l.studentCount, 0);
+
+    root.append(el(d, 'div', { className: 'ac-tree-shell' },
+      el(d, 'p', { className: 'ac-tree-intro' },
+        icon(d, 'info', 'ui-icon ac-tree-intro-glyph'),
+        el(d, 'span', { text: 'শ্রেণি → বিভাগ → সেকশন → শিক্ষার্থী।' })),
+      el(d, 'ul', {
+        className: 'ac-tree', attrs: { 'aria-label': 'শ্রেণি, বিভাগ ও সেকশন' },
+      }, ...levels.map((lvl) => this.levelNode(lvl))),
+      el(d, 'p', { className: 'ac-tree-foot' }, ...numText(d,
+        `মোট ${bnNum(levels.length)} শ্রেণি · ${bnNum(groups)} বিভাগ · ` +
+        `${bnNum(sections)} সেকশন · ${bnNum(students)} শিক্ষার্থী`)),
+    ));
+  }
+
+  /**
+   * A শ্রেণি row.
+   *
+   * B-6: a "level" here is a level NUMBER, and `classes` rows hang off its
+   * groups — নবম বিজ্ঞান and নবম ব্যবসায় are two records, not one. So the
+   * rename and the "new section" are offered on the level row only when it
+   * has exactly one group, where there is no ambiguity about which record
+   * they mean; otherwise they sit on each বিভাগ row.
+   */
+  private levelNode(lvl: TreeLevel): HTMLElement {
+    const only = lvl.groups.length === 1 ? lvl.groups[0] : null;
+    return this.treeNode({
+      key: `L:${lvl.levelNo}`,
+      depth: 0,
+      name: lvl.nameBn,
+      meta: `${bnNum(lvl.groups.length)} বিভাগ · ${bnNum(lvl.sectionCount)} সেকশন · ` +
+            `${bnNum(lvl.studentCount)} জন`,
+      glyph: 'layers',
+      expandable: true,
+      actions: only
+        ? [this.renameClassAction(only.classId, lvl.nameBn, lvl.nameEn, lvl.levelNo),
+           this.newSectionAction(only.classId)]
+        : [],
+      children: lvl.groups.map((g) => this.groupNode(lvl, g)),
+    });
+  }
+
+  /** A বিভাগ row — one `classes` record. */
+  private groupNode(lvl: TreeLevel, g: TreeGroup): HTMLElement {
+    return this.treeNode({
+      key: `G:${g.classId}`,
+      depth: 1,
+      name: g.groupBn,
+      meta: `${bnNum(g.sectionCount)} সেকশন · ${bnNum(g.studentCount)} জন`,
+      glyph: drawn('git-branch'),
+      expandable: true,
+      actions: [
+        this.renameClassAction(g.classId,
+          lvl.groups.length > 1 ? `${lvl.nameBn} — ${g.groupBn}` : lvl.nameBn,
+          lvl.nameEn, lvl.levelNo),
+        this.newSectionAction(g.classId),
       ],
-    }));
+      children: g.sections.length
+        ? g.sections.map((sec) => this.sectionNode(sec))
+        : [this.emptyBranch(lvl, g)],
+    });
+  }
+
+  /**
+   * A সেকশন row. Pressing it opens the section — a leaf of this tree, and the
+   * one depth that costs a request.
+   *
+   * A section with no class teacher is the thing this screen exists to
+   * surface, so it carries a state beside its name rather than a clause at
+   * the end of its meta line.
+   */
+  private sectionNode(sec: TreeSection): HTMLElement {
+    const d = this.o.doc;
+    return this.treeNode({
+      key: `S:${sec.id}`,
+      depth: 2,
+      name: `${sec.name} শাখা`,
+      meta: sec.classTeacher
+        ? `${bnNum(sec.studentCount)} জন · ${sec.classTeacher.nameBn}`
+        : `${bnNum(sec.studentCount)} জন`,
+      glyph: 'users',
+      expandable: false,
+      onOpen: () => void this.openSection(sec.id),
+      flag: sec.classTeacher ? null : statusBadge(d, { state: 'pending', label: 'শিক্ষক নেই' }),
+      actions: [{
+        glyph: 'edit',
+        text: 'নাম সংশোধন',
+        run: () => openRename({
+          doc: d,
+          auth: this.o.auth,
+          target: {
+            kind: 'section', id: sec.id, nameBn: sec.name,
+            capacity: sec.capacity, studentCount: sec.studentCount,
+          },
+          // Re-read rather than patch in place: the row, the crumbs and the
+          // move list all carry this name.
+          onSaved: () => void this.loadTree(),
+        }),
+      }],
+    });
+  }
+
+  /**
+   * An open বিভাগ with no sections says so, inside the branch, with the next
+   * action beside it — rather than an open row with nothing under it.
+   */
+  private emptyBranch(lvl: TreeLevel, g: TreeGroup): HTMLElement {
+    const d = this.o.doc;
+    return el(d, 'li', { className: 'ac-node is-empty', data: { depth: 2 } },
+      el(d, 'div', { className: 'ac-row' },
+        el(d, 'p', {
+          className: 'ac-node-empty-text',
+          text: `${lvl.nameBn} ${g.groupBn}-এ এখনো কোনো সেকশন তৈরি হয়নি।`,
+        }),
+        this.o.canManage
+          ? button(d, {
+              label: 'সেকশন তৈরি করুন', variant: 'ghost', size: 'sm',
+              onClick: () => this.startCreate('section', g.classId),
+            })
+          : null));
   }
 
   /** B-6. "Correct the name" for one `classes` row. */
-  private renameClassButton(
+  private renameClassAction(
     classId: string, nameBn: string, nameEn: string, levelNo: number,
-  ): HTMLElement {
+  ): NodeAction {
+    return {
+      glyph: 'edit',
+      text: 'শ্রেণির নাম সংশোধন',
+      run: () => openRename({
+        doc: this.o.doc,
+        auth: this.o.auth,
+        target: { kind: 'class', id: classId, nameBn, nameEn },
+        // Re-read the tree — every row beneath carries this name — and keep
+        // the renamed branch open so the new name is in front of them.
+        onSaved: () => {
+          this.expanded.add(`L:${levelNo}`);
+          this.expanded.add(`G:${classId}`);
+          void this.loadTree();
+        },
+      }),
+    };
+  }
+
+  private newSectionAction(classId: string): NodeAction {
+    return {
+      // The drawn glyph is "plus"; until the set has it, the section glyph
+      // the old create bar used for the same action.
+      glyph: drawn('plus', 'users') ?? 'users',
+      text: 'নতুন সেকশন',
+      run: () => this.startCreate('section', classId),
+    };
+  }
+
+  /**
+   * One row, and the branch under it.
+   *
+   * The row's one real control is `.ac-node-hit`, spanning the disclosure
+   * mark, the type glyph and the words: a disclosure button (`aria-expanded`
+   * + `aria-controls`) on a branch, a plain button on a section. Opening and
+   * closing happen IN PLACE — no repaint — so focus stays on the button that
+   * was pressed and nothing else on the screen moves.
+   *
+   * Both renderings of the actions are in the DOM, and CSS shows one
+   * (13 Responsive ০৪): the edit/plus pair inline on a desktop row, one dot
+   * button that opens them in a sheet on a phone.
+   */
+  private treeNode(o: NodeSpec): HTMLElement {
     const d = this.o.doc;
-    const b = button(d, {
-      label: 'শ্রেণির নাম সংশোধন', variant: 'secondary', size: 'sm', glyph: 'edit',
-      onClick: () => {
-        openRename({
-          doc: d,
-          auth: this.o.auth,
-          target: { kind: 'class', id: classId, nameBn, nameEn },
-          // Re-read the tree: the level heading, the crumbs and every row
-          // beneath carry this name.
-          onSaved: () => { this.depth = { at: 'level', levelNo }; void this.loadTree(); },
-        });
+    const open = o.expandable && this.expanded.has(o.key);
+    const li = el(d, 'li', { className: 'ac-node', data: { depth: o.depth, node: o.key } });
+    const row = el(d, 'div', { className: open && o.depth === 0 ? 'ac-row is-open' : 'ac-row' });
+    const groupId = o.expandable ? uid('ac') : '';
+
+    const toggle = el(d, 'span', { className: 'ac-node-toggle', attrs: { 'aria-hidden': 'true' } });
+    const drawToggle = (isOpen: boolean) => {
+      clear(toggle);
+      const mark = o.expandable ? (isOpen ? 'chevron-down' : 'chevron-right') : drawn('minus');
+      if (mark) toggle.append(icon(d, mark));
+    };
+    drawToggle(open);
+
+    const hit = el(d, 'button', {
+      className: 'ac-node-hit',
+      attrs: {
+        type: 'button',
+        'aria-expanded': o.expandable ? String(open) : null,
+        'aria-controls': o.expandable ? groupId : null,
       },
-    });
-    return b;
+    },
+      toggle,
+      el(d, 'span', { className: 'ac-node-glyph', attrs: { 'aria-hidden': 'true' } },
+        o.glyph ? icon(d, o.glyph) : null),
+      el(d, 'span', { className: 'ac-node-text' },
+        el(d, 'span', { className: 'ac-node-head' },
+          el(d, 'span', { className: 'ac-node-name' }, ...numText(d, o.name)),
+          o.flag ?? null),
+        el(d, 'span', { className: 'ac-node-meta' }, ...numText(d, o.meta))));
+    append(row, hit);
+
+    if (this.o.canManage && o.actions.length) {
+      append(row,
+        el(d, 'span', { className: 'ac-node-actions' },
+          ...o.actions.map((a) => iconButton(d, {
+            glyph: a.glyph, label: `${o.name}: ${a.text}`, onClick: a.run,
+          }))),
+        el(d, 'span', { className: 'ac-node-more' },
+          iconButton(d, {
+            glyph: drawn('more-vertical', 'more-horizontal') ?? 'more-horizontal',
+            label: `${o.name}: আরও কাজ`,
+            onClick: () => this.openActions(o.name, o.actions),
+          })));
+    }
+
+    let group: HTMLElement | null = null;
+    if (o.expandable) {
+      group = el(d, 'ul', {
+        className: 'ac-tree-group', attrs: { id: groupId, hidden: !open },
+      }, ...(o.children ?? []));
+      const branch = group;
+      hit.addEventListener('click', () => {
+        const next = !this.expanded.has(o.key);
+        if (next) this.expanded.add(o.key); else this.expanded.delete(o.key);
+        hit.setAttribute('aria-expanded', String(next));
+        drawToggle(next);
+        branch.hidden = !next;
+        if (o.depth === 0) row.classList.toggle('is-open', next);
+      });
+    } else if (o.onOpen) {
+      hit.addEventListener('click', o.onOpen);
+    }
+
+    append(li, row, group);
+    return li;
   }
 
-  private renderLevel(root: HTMLElement, levelNo: number): void {
+  /** A row's actions on a phone: a sheet, the primary under the thumb. */
+  private openActions(name: string, actions: NodeAction[]): void {
     const d = this.o.doc;
-    const lvl = this.tree?.classes.find((c) => c.levelNo === levelNo);
-    if (!lvl) { this.depth = { at: 'tree' }; this.render(); return; }
-
-    const bar = this.createBar(['section']);
-    if (bar) root.append(bar);
-
-    // B-6. The class whose sections these are.
-    //
-    // A "level" in this tree is a level NUMBER, and `classes` rows hang off
-    // its groups — নবম বিজ্ঞান and নবম ব্যবসায় are two rows, not one. So the
-    // button is offered per group, from the group heading below, and only
-    // when the level has exactly one group is it offered here as well, where
-    // there is no ambiguity about which record it means.
-    if (this.o.canManage && bar && lvl.groups.length === 1) {
-      bar.append(this.renameClassButton(lvl.groups[0].classId, lvl.nameBn, lvl.nameEn, levelNo));
-    }
-
-    for (const g of lvl.groups) {
-      const h = d.createElement('h2');
-      h.className = 'section-heading';
-      h.textContent = `${g.groupBn} · ${bnNum(g.sectionCount)} সেকশন · ${bnNum(g.studentCount)} জন`;
-      root.append(h);
-
-      // One class row per group, so the rename sits with the group it names.
-      if (this.o.canManage && lvl.groups.length > 1) {
-        root.append(buttonRow(d, this.renameClassButton(
-          g.classId, `${lvl.nameBn} — ${g.groupBn}`, lvl.nameEn, levelNo)));
-      }
-
-      if (g.sections.length === 0) {
-        root.append(emptyState(d, {
-          message: `${lvl.nameBn} ${g.groupBn}-এ এখনো কোনো সেকশন তৈরি হয়নি।`,
-          action: this.o.canManage
-            ? { label: 'সেকশন তৈরি করুন', onClick: () => {
-                this.creating = 'section'; this.created = null;
-                if (!this.structureOptions) void this.loadStructureOptions(); else this.render();
-              } }
-            : undefined,
-        }));
-        continue;
-      }
-
-      root.append(dataTable(d, {
-        caption: `${lvl.nameBn} ${g.groupBn} — সেকশনের তালিকা`,
-        rows: g.sections,
-        rowKey: (sec) => sec.id,
-        onRowClick: (sec) => void this.openSection(sec.id),
-        columns: [
-          { key: 'name', header: 'সেকশন', mobile: 'title',
-            cell: (sec) => `সেকশন ${sec.name}`, width: 'minmax(0, 1fr)' },
-          { key: 'teacher', header: 'শ্রেণি শিক্ষক', mobile: 'subtitle',
-            cell: (sec) => sec.classTeacher?.nameBn ?? 'নির্ধারণ করা হয়নি',
-            width: 'minmax(0, 2fr)' },
-          { key: 'subj', header: 'বিষয় শিক্ষক', mobile: 'meta', numeric: true,
-            cell: (sec) => bnNum(sec.subjectTeacherCount), width: '120px' },
-          { key: 'students', header: 'শিক্ষার্থী', mobile: 'meta', numeric: true,
-            cell: (sec) => bnNum(sec.studentCount), width: '110px' },
-          // A section with no class teacher is the thing this screen exists to
-          // surface, so it is a state in its own column rather than a clause
-          // at the end of a sentence.
-          { key: 'state', header: 'অবস্থা', mobile: 'status', width: '130px',
-            cell: (sec) => sec.classTeacher
-              ? statusBadge(d, { state: 'published', label: 'সম্পূর্ণ' })
-              : statusBadge(d, { state: 'pending', label: 'শিক্ষক নেই' }) },
-        ],
-      }));
-    }
+    let sheet: OverlayHandle | null = null;
+    sheet = openOverlay(d, {
+      title: name,
+      kind: 'sheet',
+      body: list(d, `${name} — কাজ`, ...actions.map((a) => listItem(d, {
+        title: a.text,
+        glyph: a.glyph,
+        onClick: () => { sheet?.close(); a.run(); },
+      }))),
+    });
   }
 
+  // ── a section ─────────────────────────────────────────────────────────
   private renderSection(root: HTMLElement): void {
     const d = this.o.doc;
     const det = this.detail;
     if (!det) return;
 
     // ── B-6: correct the name ──
-    // On the detail screen rather than the list: a rename needs the current
-    // value in front of you, and a pencil against forty rows invites the
-    // wrong one. Same four roles the endpoint and migration 042 allow.
+    // Here, with the section's own numbers in front of you. The tree row
+    // offers the same drawer (05 Principal draws edit on every row); a
+    // rename needs the current value visible, and the drawer's title names
+    // the section being changed, so a pencil on a row cannot quietly rename
+    // the one next to it. Same four roles the endpoint and migration 042 allow.
     if (this.o.canManage) {
       root.append(buttonRow(d, button(d, {
         label: 'নাম সংশোধন করুন', variant: 'secondary', size: 'sm', glyph: 'edit',
@@ -708,7 +996,8 @@ export class AcademicView {
         text: det.classTeacher?.nameBn ?? 'নির্ধারণ করা হয়নি',
       }),
       det.classTeacher?.since
-        ? el(d, 'p', { className: 'ui-card-note', text: `${bnDate(det.classTeacher.since)} থেকে` })
+        ? el(d, 'p', { className: 'ui-card-note' },
+            ...numText(d, `${bnDate(det.classTeacher.since)} থেকে`))
         : null,
     ));
 
@@ -806,8 +1095,10 @@ export class AcademicView {
           key: 'pick', header: 'নির্বাচন', mobile: 'status' as const, width: '96px',
           cell: (r: { studentId: string; nameBn: string }) => this.pickBox(r.studentId, r.nameBn),
         }] : []),
+        // A roll is an identifier: Latin, so it can be checked against the
+        // paper register (formatIdentifier).
         { key: 'roll', header: 'রোল', mobile: 'meta', numeric: true,
-          cell: (r) => bnNum(r.rollNo), width: '90px' },
+          cell: (r) => formatIdentifier(r.rollNo), width: '90px' },
         { key: 'name', header: 'নাম', mobile: 'title', cell: (r) => r.nameBn,
           width: 'minmax(0, 2fr)' },
         // The school's permanent id, never the uuid.
@@ -933,25 +1224,28 @@ export class AcademicView {
         return;
       }
       const teacherName = this.candidates?.teachers.find((t) => t.id === teacher.value())?.nameBn ?? '';
-      const go = () => void this.submitAssign(
+      const go = () => this.submitAssign(
         det.section.id, target?.subjectId ?? null, teacher.value(), when.value(),
         reason?.value() ?? '');
 
       // Replacement is irreversible in the sense that matters: it closes a
-      // record with a date. Confirm it, naming both people.
+      // record with a date. Confirm it, naming both people — in
+      // `confirmOverlay` (§7: destructive actions outside the four
+      // irreversible screens), which starts on Cancel, cannot be clicked
+      // away, keeps its confirm busy until the write answers, and is a
+      // bottom sheet on a phone.
       if (target?.current) {
-        form.append(confirmDialog({
-          doc: d,
+        confirmOverlay(d, {
           title: 'শিক্ষক বদল নিশ্চিত করুন',
           body: `${target.subjectBn}: ${target.current} → ${teacherName}, ${bnDate(when.value())} থেকে। ` +
                 `${target.current}-এর আগের দায়িত্বের রেকর্ড সংরক্ষিত থাকবে।`,
           confirmLabel: 'বদল করুন',
           danger: true,
           onConfirm: go,
-        }));
+        });
         this.error = '';
       } else {
-        go();
+        void go();
       }
     });
 
@@ -962,9 +1256,8 @@ export class AcademicView {
     const d = this.o.doc;
     const host = el(d, 'section', { className: 'ui-card ui-card-form' });
 
-    append(host, el(d, 'h3', {
-      className: 'ui-card-title', text: `${bnNum(this.selected.size)} জন নির্বাচিত`,
-    }));
+    append(host, el(d, 'h3', { className: 'ui-card-title' },
+      ...numText(d, `${bnNum(this.selected.size)} জন নির্বাচিত`)));
 
     const options = [{ value: '', label: 'বেছে নিন…' }];
     for (const lvl of this.tree?.classes ?? []) {
@@ -1007,15 +1300,14 @@ export class AcademicView {
           // Preview before commit, as the brief requires — and the preview
           // comes from the same endpoint that will do the move, so the two
           // cannot disagree.
-          host.append(confirmDialog({
-            doc: d,
+          confirmOverlay(d, {
             title: 'স্থানান্তর নিশ্চিত করুন',
             body: `${bnNum(this.selected.size)} জন শিক্ষার্থী ${label}-এ যাবে। ` +
                   `নতুন রোল নম্বর দেওয়া হবে; আগের বছরের রেকর্ড অপরিবর্তিত থাকবে।`,
             confirmLabel: 'স্থানান্তর করুন',
             danger: true,
-            onConfirm: () => void this.submitMove(to, false),
-          }));
+            onConfirm: () => this.submitMove(to, false),
+          });
         },
       }),
     ));
@@ -1038,13 +1330,13 @@ export class AcademicView {
     if (stu.current) {
       facts.splice(1, 0,
         ['শ্রেণি', `${stu.current.classBn} · ${stu.current.groupBn}`],
-        ['সেকশন ও রোল', `${stu.current.section} · ${bnNum(stu.current.rollNo)}`]);
+        ['সেকশন ও রোল', `${stu.current.section} · ${formatIdentifier(stu.current.rollNo)}`]);
     }
     const dl = el(d, 'dl', { className: 'ui-facts' });
     for (const [k, v] of facts) {
       append(dl,
         el(d, 'dt', { className: 'ui-facts-key', text: k }),
-        el(d, 'dd', { className: 'ui-facts-val', text: v }));
+        el(d, 'dd', { className: 'ui-facts-val' }, ...numText(d, v)));
     }
     root.append(card(d, { title: 'পরিচয়', glyph: 'user' }, dl));
 
@@ -1056,18 +1348,18 @@ export class AcademicView {
     // its subscription, and staff CAN act on the second — it is the office
     // that asks for the module. So they get told, plainly, rather than shown
     // a card that reads as though no teacher has marked a register all term.
-    root.append(card(d, { title: 'গত ৯০ দিনের হাজিরা', glyph: 'check-square', tone: 'info' },
+    // No tone on the glyph: --info carries meaning only (R5), and a card
+    // title is not news.
+    root.append(card(d, { title: 'গত ৯০ দিনের হাজিরা', glyph: 'check-square' },
       att === null
         ? el(d, 'p', {
             className: 'ui-card-note',
             text: 'এই প্রতিষ্ঠানে হাজিরা সেবা চালু নেই।',
           })
         : att.total > 0
-          ? el(d, 'p', {
-              className: 'ui-card-lead',
-              text: `${bnNum(Math.round((att.present / att.total) * 100))}% · ` +
-                    `${bnNum(att.present)} / ${bnNum(att.total)} দিন`,
-            })
+          ? el(d, 'p', { className: 'ui-card-lead' }, ...numText(d,
+              `${bnNum(Math.round((att.present / att.total) * 100))}% · ` +
+              `${bnNum(att.present)} / ${bnNum(att.total)} দিন`))
           : el(d, 'p', { className: 'ui-card-note', text: 'এই সময়ে কোনো হাজিরা নেওয়া হয়নি।' }),
     ));
 
@@ -1099,7 +1391,7 @@ export class AcademicView {
         { key: 'section', header: 'সেকশন', mobile: 'meta', cell: (h) => h.section,
           width: '110px' },
         { key: 'roll', header: 'রোল', mobile: 'meta', numeric: true,
-          cell: (h) => bnNum(h.rollNo), width: '90px' },
+          cell: (h) => formatIdentifier(h.rollNo), width: '90px' },
         { key: 'status', header: 'অবস্থা', mobile: 'status', width: '120px',
           cell: (h) => statusBadge(d, {
             state: h.status === 'active' ? 'published' : 'draft',

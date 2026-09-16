@@ -1,5 +1,5 @@
 /**
- * "রুটিন" — the published timetable, for whoever is reading it.  (P9-8)
+ * "প্রকাশিত রুটিন" — the published timetable, for whoever is reading it.  (P9-8)
  *
  * One screen and one grid for all eight audiences, because there is one
  * routine. A principal picking a room, a teacher opening their own week and a
@@ -24,15 +24,24 @@
  * than two components, every cell holds a LIST and shows the first few with
  * a count for the rest — so the same grid reads sensibly whether it is one
  * student's Tuesday or a whole school's.
+ *
+ * ── Ata Ekta (06 Routine §06, 13 Responsive ০৬) ──────────────────────────
+ * One white panel: the view tabs (the server's `offered`, drawn as the
+ * segmented strip), the "which one" select, then each shift's week. The week
+ * is drawn twice and CSS shows one: the full grid from 1024px, and on a phone
+ * the segmented day tabs over that one day's rows, today preselected. Both
+ * come from the same rows and the same `lessonParts()`, so nothing a desk
+ * shows is missing on a phone. Switching day is presentational — it reads
+ * the week already in memory and never asks the server again.
  */
 import {
-  el, pageHeader, card, statusBadge, statRow, statCard, button, buttonRow,
+  el, append, pageHeader, button, sectionHeading, tabs, list, listItem,
   permissionState, deniedMessage, deniedContact, openDrawer, announce,
-  listSkeleton, emptyState, errorState, field, inlineLoader,
+  listSkeleton, emptyState, errorState, field, inlineLoader, numText, numClass,
   type OverlayHandle,
 } from './ui/index.ts';
 import { refuseUnlessOk, isDenied } from './http-status.ts';
-import { formatCount, formatTime, formatDayMonth, toBanglaDigits, formatClockRange, ordinalBn, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
+import { formatCount, formatDayMonth, toBanglaDigits, formatClockRange, ordinalBn, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 import type { Auth } from './auth.ts';
 
 export interface Lesson {
@@ -91,6 +100,22 @@ export interface TimetableViewOptions {
 /** How many lessons a single cell prints before it counts the rest. */
 const PER_CELL = 3;
 
+/** One row of a shift's day: a taught hour carries its ordinal, a break does not. */
+interface Row { p: Period; ordinal: string | null }
+
+/** The names a lesson shows, the same on the desk grid and the phone list. */
+interface LessonParts { what: string[]; teacher: string | null; room: string | null; parallel: boolean }
+
+/** Scroll a tab strip just enough that its selected tab is in view. */
+function revealSelectedTab(strip: HTMLElement): void {
+  const tab = strip.querySelector<HTMLElement>('[aria-selected="true"]');
+  if (!tab) return;
+  const s = strip.getBoundingClientRect();
+  const t = tab.getBoundingClientRect();
+  if (t.right > s.right) strip.scrollLeft += t.right - s.right;
+  else if (t.left < s.left) strip.scrollLeft -= s.left - t.left;
+}
+
 const dateBn = (iso: string | null): string => {
   if (!iso) return '—';
   const d = new Date(iso);
@@ -110,6 +135,10 @@ export class TimetableView {
   private denied = false;
   private deniedErr: unknown = null;
   private error = '';
+  /** The phone's selected day for each shift, by routine id. View-local. */
+  private readonly dayByRoutine = new Map<string, number>();
+  /** A view tab asked for the reload: put keyboard focus back on the strip. */
+  private refocusScope = false;
 
   constructor(options: TimetableViewOptions) {
     this.o = options;
@@ -159,14 +188,30 @@ export class TimetableView {
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';
+    const ready = Boolean(this.data?.published)
+      && !this.loading && !this.error && !this.denied;
     root.append(pageHeader(d, {
-      title: 'রুটিন',
+      title: 'প্রকাশিত রুটিন',
       subtitle: this.data?.published
         ? `${this.data.titleBn} · ${this.data.subtitleBn}`
         : 'প্রতিষ্ঠানের চালু ক্লাস রুটিন',
+      // P9-9 §2. The print action sits with the routine it prints, not on a
+      // separate documents screen — a coordinator who is looking at ষষ্ঠ-ক's
+      // week and wants it on the noticeboard should not have to go and find
+      // it again somewhere else. 06 Routine draws it in the screen's bar as
+      // the one small outline button; this screen has no primary.
+      //
+      // No glyph: the icon set has no printer, and the fallback for an
+      // unknown name is a dot — worse than a plain labelled button. নথি ও ছাপা's
+      // own print button is unglyphed for the same reason.
+      actions: ready
+        ? [button(d, { label: 'ছাপুন', variant: 'secondary', size: 'sm',
+                       onClick: () => this.openPrint() })]
+        : undefined,
     }));
 
     if (this.denied) {
+      this.refocusScope = false;
       root.append(permissionState(d, {
         message: deniedMessage(this.deniedErr),
         contact: deniedContact(this.deniedErr),
@@ -175,14 +220,57 @@ export class TimetableView {
     }
     if (this.loading) { root.append(listSkeleton(d, 3)); return; }
     if (this.error) {
+      this.refocusScope = false;
       root.append(errorState(d, this.error, () => { void this.load(); }));
       return;
     }
-    if (this.data && this.data.offered.length > 1) root.append(this.pickerCard());
-    if (!this.data?.published) { root.append(this.nothingPublished()); return; }
+    if (!this.data) return;
 
-    root.append(this.summaryCard());
-    for (const r of this.data.routines) root.append(this.gridCard(r));
+    const panel = this.panel();
+    root.append(panel);
+    // Only now is the strip laid out. A school's seven views overflow a
+    // phone and scroll; the one showing must not be the one scrolled away.
+    for (const strip of Array.from(panel.querySelectorAll<HTMLElement>('.tt-tabs'))) {
+      revealSelectedTab(strip);
+    }
+    if (this.refocusScope) {
+      this.refocusScope = false;
+      panel.querySelector<HTMLElement>('.tt-scope-tabs [aria-selected="true"]')?.focus();
+    }
+  }
+
+  /** The one white surface: view tabs, which one, then the week or its absence. */
+  private panel(): HTMLElement {
+    const d = this.o.doc;
+    const data = this.data!;
+    const panel = el(d, 'div', { className: 'ui-data tt-panel' });
+    const body = el(d, 'div', { className: 'tt-body' });
+
+    if (data.offered.length > 1) {
+      // The select's own first-match: a scope offered twice shows its first.
+      const at = Math.max(0, data.offered.findIndex((o) => o.scope === this.scope));
+      const current = data.offered[at];
+      append(panel, this.scopeTabs(at));
+      body.id = 'tt-scope-panel';
+      body.setAttribute('role', 'tabpanel');
+      body.setAttribute('aria-labelledby', `tab-scope-${at}`);
+      // A scope with a list needs a second choice; one without (the whole
+      // institution) does not, and drawing an empty picker beside it would be
+      // a control that does nothing.
+      if (current.options && current.options.length > 0) {
+        append(body, this.whichSelect(current));
+      }
+    }
+
+    if (!data.published) {
+      append(body, this.nothingPublished());
+    } else {
+      const labelled = data.routines.length > 1;
+      data.routines.forEach((r, i) => append(body, this.shiftBlock(r, i, labelled)));
+      append(body, this.footnote());
+    }
+    append(panel, body);
+    return panel;
   }
 
   /** §15 — a real and ordinary state, with the way out. */
@@ -198,79 +286,87 @@ export class TimetableView {
     });
   }
 
-  /** The scopes this reader may ask for — the server's list, verbatim. */
-  private pickerCard(): HTMLElement {
+  /**
+   * The scopes this reader may ask for — the server's list, verbatim, as the
+   * segmented view strip 06 Routine draws (শ্রেণি · শাখা · শিক্ষক · কক্ষ).
+   *
+   * It was a select, and it keeps the select's semantics exactly: a choice
+   * other than the one showing asks the server again for the FIRST offer of
+   * that scope, with that offer's first option — which is what a select whose
+   * option values are scopes did.
+   */
+  private scopeTabs(at: number): HTMLElement {
     const d = this.o.doc;
     const data = this.data!;
-    const body = el(d, 'div', { className: 'ui-stack' });
-
-    const current = data.offered.find((o) => o.scope === this.scope) ?? data.offered[0];
-    body.append(field(d, {
-      label: 'কার রুটিন', name: 'scope', kind: 'select', value: current.scope,
-      options: data.offered.map((o) => ({ value: o.scope, label: o.labelBn })),
-      onChange: (v) => {
-        const next = data.offered.find((o) => o.scope === v);
-        if (!next) return;
+    const strip = tabs(d, {
+      label: 'কার রুটিন',
+      className: 'tt-tabs tt-scope-tabs',
+      active: `scope-${at}`,
+      items: data.offered.map((o, i) => ({ id: `scope-${i}`, label: o.labelBn })),
+      onSelect: (id) => {
+        const i = Number(id.slice('scope-'.length));
+        if (i === at) return;
+        const picked = data.offered[i];
+        if (!picked) return;
+        const next = data.offered.find((o) => o.scope === picked.scope) ?? picked;
+        this.refocusScope = true;
         this.pick(next.scope, next.options?.[0]?.id ?? '');
       },
-    }).root);
-
-    // A scope with a list needs a second choice; one without (the whole
-    // institution) does not, and drawing an empty picker beside it would be
-    // a control that does nothing.
-    if (current.options && current.options.length > 0) {
-      body.append(field(d, {
-        label: 'কোনটি', name: 'subject', kind: 'select',
-        value: this.id || current.options[0].id,
-        options: current.options.map((x) => ({ value: x.id, label: x.labelBn })),
-        onChange: (v) => this.pick(current.scope, v),
-      }).root);
+    });
+    for (const tab of Array.from(strip.querySelectorAll<HTMLElement>('[role="tab"]'))) {
+      tab.setAttribute('aria-controls', 'tt-scope-panel');
     }
-    return card(d, { title: 'রুটিন বেছে নিন', glyph: 'search' }, body);
+    return strip;
   }
 
-  private summaryCard(): HTMLElement {
+  /** Which class, room or teacher. Drawn without a visible label; it keeps one for a reader. */
+  private whichSelect(current: Offer): HTMLElement {
+    const d = this.o.doc;
+    const options = current.options ?? [];
+    const f = field(d, {
+      label: 'কোনটি', name: 'subject', kind: 'select', className: 'tt-which',
+      value: this.id || options[0]?.id,
+      options: options.map((x) => ({ value: x.id, label: x.labelBn })),
+      onChange: (v) => this.pick(current.scope, v),
+    });
+    f.root.querySelector('.ui-field-label')?.classList.add('ui-sr-only');
+    // R6. An option cannot hold a span, so only a wholly numeric label ("১০১")
+    // takes the numeral face; a room called "১০১ নম্বর কক্ষ" stays as it is.
+    for (const opt of Array.from(f.root.querySelectorAll('option'))) {
+      const cls = numClass('', opt.textContent ?? '');
+      if (cls) opt.className = cls;
+    }
+    return f.root;
+  }
+
+  /**
+   * The server's counts and the routine's edition, as a quiet line under the
+   * week. Not drawn in 06 Routine, and kept: the counts are the server's,
+   * counted on ids (see below), and B-116's year is pinned to this screen.
+   */
+  private footnote(): HTMLElement {
     const d = this.o.doc;
     const data = this.data!;
-    const body = el(d, 'div', { className: 'ui-stack' });
+    const foot = el(d, 'div', { className: 'tt-foot' });
     // The server's counts, on ids. Counting the rendered labels here made a
     // twenty-section school report four, because every class has a 'ক'.
     const n = data.counts ?? { sections: 0, teachers: 0, rooms: 0, classes: 0 };
-    body.append(statRow(d,
-      statCard(d, { label: 'মোট ক্লাস', value: `${formatCount(data.lessons.length, 'bn')}টি` }),
-      statCard(d, { label: 'শাখা', value: `${formatCount(n.sections, 'bn')}টি` }),
-      statCard(d, { label: 'শিক্ষক', value: `${formatCount(n.teachers, 'bn')} জন` }),
-      statCard(d, { label: 'কক্ষ', value: `${formatCount(n.rooms, 'bn')}টি` }),
-    ));
+    append(foot, el(d, 'p', { className: 'tt-note' }, ...numText(d,
+      `মোট ক্লাস ${formatCount(data.lessons.length, 'bn')}টি`
+      + ` · শাখা ${formatCount(n.sections, 'bn')}টি`
+      + ` · শিক্ষক ${formatCount(n.teachers, 'bn')} জন`
+      + ` · কক্ষ ${formatCount(n.rooms, 'bn')}টি`)));
 
     const r = data.routines[0];
     if (r) {
-      body.append(el(d, 'p', {
-        className: 'ui-card-note',
+      append(foot, el(d, 'p', { className: 'tt-note' }, ...numText(d,
         // B-116. The version beside it was already Bangla and the year was
         // not, on the same line. Digits only — a school that labels its
         // session '2026-27' gets ২০২৬-২৭, not a rewritten label.
-        text: `${formatAcademicYear(r.yearLabel)} শিক্ষাবর্ষ · সংস্করণ ${formatCount(r.version, 'bn')}`
-            + ` · প্রকাশ: ${dateBn(r.publishedAt)}`,
-      }));
+        `${formatAcademicYear(r.yearLabel)} শিক্ষাবর্ষ · সংস্করণ ${formatCount(r.version, 'bn')}`
+        + ` · প্রকাশ: ${dateBn(r.publishedAt)}`)));
     }
-
-    // P9-9 §2. The print action sits with the routine it prints, not on a
-    // separate documents screen — a coordinator who is looking at ষষ্ঠ-ক's
-    // week and wants it on the noticeboard should not have to go and find it
-    // again somewhere else.
-    body.append(buttonRow(d, button(d, {
-      // No glyph: the icon set has no printer, and the fallback for an
-      // unknown name is a dot — worse than a plain labelled button. নথি ও ছাপা's
-      // own print button is unglyphed for the same reason.
-      label: 'ছাপুন', variant: 'primary',
-      onClick: () => this.openPrint(),
-    })));
-    return card(d, {
-      title: data.titleBn,
-      subtitle: data.subtitleBn,
-      action: statusBadge(d, { state: 'active', label: 'প্রকাশিত' }),
-    }, body);
+    return foot;
   }
 
   /**
@@ -280,111 +376,234 @@ export class TimetableView {
    * period 1 are different numbers over the same clock time, so a single
    * table keyed on period number would put two different hours in one row.
    */
-  private gridCard(r: RoutineHead): HTMLElement {
+  private shiftBlock(r: RoutineHead, index: number, labelled: boolean): HTMLElement {
     const d = this.o.doc;
     const data = this.data!;
-    const periods = data.periods.filter((p) => p.routineId === r.id);
-    const lessons = data.lessons.filter((l) => l.routineId === r.id);
+    const block = el(d, 'div', { className: 'tt-shift' });
+    // A heading only when there is more than one shift to tell apart.
+    if (labelled) append(block, sectionHeading(d, { title: `${r.shiftBn} শিফট` }));
 
+    const periods = data.periods.filter((p) => p.routineId === r.id);
     if (periods.length === 0) {
-      return card(d, { title: r.shiftBn, glyph: 'clock' },
-        emptyState(d, { message: 'এই শিফটের ঘণ্টার সময়সূচি পাওয়া যায়নি।' }));
+      append(block, emptyState(d, { message: 'এই শিফটের ঘণ্টার সময়সূচি পাওয়া যায়নি।' }));
+      return block;
     }
 
     const byCell = new Map<string, Lesson[]>();
-    for (const l of lessons) {
+    for (const l of data.lessons) {
+      if (l.routineId !== r.id) continue;
       const k = `${l.dayOfWeek}|${l.periodNo}`;
       if (!byCell.has(k)) byCell.set(k, []);
       byCell.get(k)!.push(l);
     }
 
-    const scroll = el(d, 'div', { className: 'table-scroll' });
-    const table = el(d, 'table', { className: 'data-table routine-grid' });
-    const thead = el(d, 'thead');
-    const hrow = el(d, 'tr');
-    hrow.append(el(d, 'th', { text: 'পিরিয়ড', attrs: { scope: 'col' } }));
-    for (const day of data.days) {
-      hrow.append(el(d, 'th', { text: `${day.bn}বার`, attrs: { scope: 'col' } }));
-    }
-    thead.append(hrow);
-    table.append(thead);
-
-    const tbody = el(d, 'tbody');
     // The ordinal counts TAUGHT hours, not template rows: `period_no` is a
     // position in the day and tiffin holds one, so numbering by it put '৬'
     // over the hour the school calls ৫ম. Counting here keeps the screen and
     // the printed sheet saying the same thing, which is the whole reason
     // they share one read.
+    //
+    // §5. Tiffin, assembly and জোহর are rows of this week, not gaps in it.
+    // The read used to filter them out entirely; a school builds its day
+    // around the break, and a grid of nine unbroken hours is not the day
+    // anybody in the building actually works.
     let taught = 0;
-    for (const p of periods) {
-      // §5. Tiffin, assembly and জোহর are rows of this grid, not gaps in it.
-      // The read used to filter them out entirely; a school builds its day
-      // around the break, and a grid of nine unbroken hours is not the day
-      // anybody in the building actually works.
-      if ((p.kind ?? 'teaching') !== 'teaching') {
-        const band = el(d, 'tr', { className: 'routine-band' });
-        const td = el(d, 'td', {
-          attrs: { colspan: String(data.days.length + 1) } });
-        td.append(el(d, 'span', {
-          className: 'routine-band-name',
-          text: toBanglaDigits(p.labelBn) }));
-        td.append(el(d, 'span', {
-          className: 'routine-band-time',
-          text: formatClockRange(p.startsAt, p.endsAt, 'bn') }));
-        band.append(td);
-        tbody.append(band);
+    const rows: Row[] = periods.map((p) => ((p.kind ?? 'teaching') === 'teaching'
+      ? { p, ordinal: ordinalBn(++taught) }
+      : { p, ordinal: null }));
+
+    append(block, this.weekGrid(r, rows, byCell));
+    if (data.days.length > 0) append(block, this.dayBlock(r, index, labelled, rows, byCell));
+    return block;
+  }
+
+  /** The desk's week: periods down the side, days across the top. */
+  private weekGrid(r: RoutineHead, rows: Row[], byCell: Map<string, Lesson[]>): HTMLElement {
+    const d = this.o.doc;
+    const data = this.data!;
+    const scroll = el(d, 'div', { className: 'ui-table-scroll tt-week' });
+    const table = el(d, 'table', { className: 'routine-grid tt-grid' });
+    append(table, el(d, 'caption', {
+      className: 'ui-sr-only',
+      text: `${r.shiftBn} শিফটের সাপ্তাহিক রুটিন — সারিতে পিরিয়ড, কলামে দিন`,
+    }));
+
+    const hrow = el(d, 'tr');
+    // The corner is drawn empty; a reader still gets the column's name.
+    append(hrow, el(d, 'th', { attrs: { scope: 'col' } },
+      el(d, 'span', { className: 'ui-sr-only', text: 'পিরিয়ড' })));
+    for (const day of data.days) {
+      append(hrow, el(d, 'th', { text: day.bn, attrs: { scope: 'col' } }));
+    }
+    append(table, el(d, 'thead', {}, hrow));
+
+    const tbody = el(d, 'tbody');
+    for (const { p, ordinal } of rows) {
+      // The SAME formatter the printed sheet uses. A 24-hour '১৪:০০' sitting
+      // beside a period is read as a period number, and a screen that says
+      // one thing while the paper printed from it says another is the
+      // divergence this whole read exists to prevent.
+      const clock = formatClockRange(p.startsAt, p.endsAt, 'bn');
+      // Its own class, not `routine-slot-meta`: that one also carries teacher
+      // and room NAMES. This span is a clock time and nothing else.
+      const time = el(d, 'span', { className: 'routine-grid-time' }, ...numText(d, clock));
+      const th = el(d, 'th', { className: 'routine-grid-period', attrs: { scope: 'row' } });
+
+      if (ordinal === null) {
+        const band = el(d, 'tr', { className: 'tt-band' });
+        append(th, time);
+        append(band, th);
+        // 06 Routine draws the break as one quiet cell under every day.
+        const label = toBanglaDigits(p.labelBn);
+        for (let i = 0; i < data.days.length; i += 1) {
+          append(band, el(d, 'td', { className: 'tt-band-cell' }, ...numText(d, label)));
+        }
+        append(tbody, band);
         continue;
       }
-      const tr = el(d, 'tr');
-      const th = el(d, 'th', { className: 'routine-grid-period', attrs: { scope: 'row' } });
-      taught += 1;
-      const no = el(d, 'span', { className: 'routine-grid-no',
-        text: ordinalBn(taught) });
-      no.append(el(d, 'span', { className: 'routine-grid-pd', text: 'পিরিয়ড' }));
-      th.append(no);
-      // Its own class, not `routine-slot-meta`: that one also carries teacher
-      // and room NAMES, and `--font-bn-num` on it would move their letters
-      // too. This span is a clock time and nothing else.
-      //
-      // The SAME formatter the printed sheet uses. A 24-hour '১৪:০০' sitting
-      // under a period ordinal is read as a period number, and a screen that
-      // says one thing while the paper printed from it says another is the
-      // divergence this whole read exists to prevent.
-      th.append(el(d, 'span', {
-        className: 'routine-grid-time',
-        text: formatClockRange(p.startsAt, p.endsAt, 'bn') }));
-      tr.append(th);
 
+      // The ordinal is not drawn; it stays the row header's spoken name, so
+      // "৩য় পিরিয়ড" is still what a screen reader hears for this hour.
+      append(th,
+        el(d, 'span', { className: 'routine-grid-no ui-sr-only' },
+          ...numText(d, `${ordinal} পিরিয়ড`)),
+        ' ',
+        time);
+      const tr = el(d, 'tr', {}, th);
       for (const day of data.days) {
         const td = el(d, 'td', { className: 'routine-cell' });
         const here = byCell.get(`${day.dow}|${p.periodNo}`) ?? [];
         if (here.length === 0) {
-          td.append(el(d, 'span', { className: 'routine-slot-empty', text: '—' }));
+          append(td, el(d, 'span', { className: 'routine-slot-empty', text: '—' }));
         } else {
           for (const l of here.slice(0, PER_CELL)) {
-            td.append(this.cell(l, day.bn, p, ordinalBn(taught)));
+            append(td, this.cell(l, day.bn, p, ordinal));
           }
           if (here.length > PER_CELL) {
-            td.append(el(d, 'span', {
-              className: 'routine-slot-meta',
-              text: `আরও ${formatCount(here.length - PER_CELL, 'bn')}টি`,
-            }));
+            append(td, el(d, 'span', { className: 'routine-slot-meta' },
+              ...numText(d, `আরও ${formatCount(here.length - PER_CELL, 'bn')}টি`)));
           }
         }
-        tr.append(td);
+        append(tr, td);
       }
-      tbody.append(tr);
+      append(tbody, tr);
     }
-    table.append(tbody);
-    scroll.append(table);
+    append(table, tbody);
+    append(scroll, table);
+    return scroll;
+  }
 
-    const body = el(d, 'div', { className: 'ui-stack' });
-    body.append(scroll);
-    return card(d, {
-      title: `${r.shiftBn} শিফট`,
-      subtitle: `${formatCount(lessons.length, 'bn')}টি ক্লাস`,
-      glyph: 'clock',
-    }, body);
+  /**
+   * 13 Responsive ০৬ — the phone's week: the segmented day strip over one
+   * day's rows, today preselected.
+   *
+   * A tap repaints only this block, from the week already in memory. Nothing
+   * is fetched: the day is a way of looking at what arrived, not a new
+   * question for the server.
+   */
+  private dayBlock(
+    r: RoutineHead, index: number, labelled: boolean,
+    rows: Row[], byCell: Map<string, Lesson[]>,
+  ): HTMLElement {
+    const d = this.o.doc;
+    const data = this.data!;
+    const wrap = el(d, 'div', { className: 'tt-day' });
+    const panelId = `tt-day-panel-${index}`;
+    const prefix = `day-${index}-`;
+
+    const paint = (moveFocus: boolean): void => {
+      const dows = data.days.map((x) => x.dow);
+      let sel = this.dayByRoutine.get(r.id);
+      if (sel === undefined || !dows.includes(sel)) {
+        // `getDay()` and the server's `dow` share one convention: 0 = রবি.
+        const today = new Date().getDay();
+        sel = dows.includes(today) ? today : dows[0];
+        this.dayByRoutine.set(r.id, sel);
+      }
+      const chosen = sel;
+      const day = data.days.find((x) => x.dow === chosen) ?? data.days[0];
+      wrap.textContent = '';
+
+      const strip = tabs(d, {
+        label: labelled ? `${r.shiftBn} শিফট — সপ্তাহের দিন` : 'সপ্তাহের দিন',
+        className: 'tt-tabs tt-day-tabs',
+        active: `${prefix}${chosen}`,
+        items: data.days.map((x) => ({ id: `${prefix}${x.dow}`, label: x.bn })),
+        onSelect: (id) => {
+          const dow = Number(id.slice(prefix.length));
+          if (dow === chosen || !dows.includes(dow)) return;
+          this.dayByRoutine.set(r.id, dow);
+          announce(d, `${data.days.find((x) => x.dow === dow)?.bn ?? ''}বারের রুটিন`);
+          paint(true);
+        },
+      });
+      for (const tab of Array.from(strip.querySelectorAll<HTMLElement>('[role="tab"]'))) {
+        tab.setAttribute('aria-controls', panelId);
+      }
+
+      const tabpanel = el(d, 'div', {
+        className: 'tt-day-panel',
+        attrs: { id: panelId, role: 'tabpanel', 'aria-labelledby': `tab-${prefix}${chosen}` },
+      }, list(d, `${day.bn}বারের ক্লাস`, ...this.dayRows(chosen, rows, byCell)));
+
+      append(wrap, strip, tabpanel);
+      if (moveFocus) {
+        revealSelectedTab(strip);
+        strip.querySelector<HTMLElement>('[aria-selected="true"]')?.focus();
+      }
+    };
+
+    paint(false);
+    return wrap;
+  }
+
+  /** One day's rows: time · subject (teacher) · room, a break on its own ground. */
+  private dayRows(dow: number, rows: Row[], byCell: Map<string, Lesson[]>): HTMLElement[] {
+    const d = this.o.doc;
+    const out: HTMLElement[] = [];
+    for (const { p, ordinal } of rows) {
+      const clock = formatClockRange(p.startsAt, p.endsAt, 'bn');
+      const spoken = ordinal ? `${ordinal} পিরিয়ড, ` : '';
+      /**
+       * The time column. A second lesson in the same hour leaves it visually
+       * empty — the hour is printed once — but still says it to a reader, so
+       * every row is whole on its own.
+       */
+      const add = (item: HTMLElement, showTime: boolean): void => {
+        const time = el(d, 'span', { className: 'tt-day-time' });
+        if (showTime) {
+          if (spoken) append(time, el(d, 'span', { className: 'ui-sr-only' }, ...numText(d, spoken)));
+          append(time, ...numText(d, clock));
+        } else {
+          append(time, el(d, 'span', { className: 'ui-sr-only' }, ...numText(d, `${spoken}${clock}`)));
+        }
+        item.querySelector('.ui-list-hit')?.prepend(time);
+        out.push(item);
+      };
+
+      if (ordinal === null) {
+        add(listItem(d, { title: toBanglaDigits(p.labelBn), className: 'tt-day-break' }), true);
+        continue;
+      }
+      const here = byCell.get(`${dow}|${p.periodNo}`) ?? [];
+      if (here.length === 0) {
+        add(listItem(d, { title: '—' }), true);
+        continue;
+      }
+      here.slice(0, PER_CELL).forEach((l, k) => {
+        const x = this.lessonParts(l);
+        const meta = [x.teacher, x.parallel ? 'বিভাজিত ক্লাস' : null].filter(Boolean).join(' · ');
+        add(listItem(d, {
+          title: x.what.join(' · '),
+          meta: meta || undefined,
+          status: x.room ? el(d, 'span', { className: 'ui-list-meta', text: x.room }) : undefined,
+        }), k === 0);
+      });
+      if (here.length > PER_CELL) {
+        add(listItem(d, { title: `আরও ${formatCount(here.length - PER_CELL, 'bn')}টি` }), false);
+      }
+    }
+    return out;
   }
 
   /**
@@ -403,7 +622,7 @@ export class TimetableView {
    */
   private openPrint(): void {
     const d = this.o.doc;
-    const body = el(d, 'div', { className: 'ui-stack' });
+    const body = el(d, 'div', { className: 'ui-stack tt-print' });
     const slot = el(d, 'div', { className: 'ui-stack' });
     body.append(el(d, 'p', {
       className: 'ui-card-note',
@@ -480,6 +699,26 @@ export class TimetableView {
   }
 
   /**
+   * What a lesson names, given whose routine is on screen. One answer for
+   * the grid cell and the phone row, so the two never show different things.
+   */
+  private lessonParts(l: Lesson): LessonParts {
+    const what = [l.subjectBn ?? 'ক্লাস'];
+    // The section only when the reader is looking at more than one — on a
+    // section's own grid every cell would repeat it.
+    if (this.scope !== 'section' && this.scope !== 'student' && l.sectionLabel) {
+      what.push(`${l.classBn ?? ''}-${l.sectionLabel}`.replace(/^-/, ''));
+    }
+    return {
+      what,
+      // The teacher, unless this IS the teacher's own grid.
+      teacher: this.scope !== 'teacher' ? l.teacherBn : null,
+      room: this.scope !== 'room' ? l.roomBn : null,
+      parallel: l.isParallel,
+    };
+  }
+
+  /**
    * One lesson.
    *
    * A `div`, not a `button`: nothing here is clickable, and a control that
@@ -492,26 +731,14 @@ export class TimetableView {
     const wrap = el(d, 'div', { className: 'routine-slot' });
     wrap.setAttribute('data-filled', 'true');
 
-    const what = [l.subjectBn ?? 'ক্লাস'];
-    // The section only when the reader is looking at more than one — on a
-    // section's own grid every cell would repeat it.
-    if (this.scope !== 'section' && this.scope !== 'student' && l.sectionLabel) {
-      what.push(`${l.classBn ?? ''}-${l.sectionLabel}`.replace(/^-/, ''));
-    }
-    wrap.append(el(d, 'span', { className: 'routine-slot-subject', text: what.join(' · ') }));
-
-    // The teacher, unless this IS the teacher's own grid.
-    if (this.scope !== 'teacher' && l.teacherBn) {
-      wrap.append(el(d, 'span', { className: 'routine-slot-meta', text: l.teacherBn }));
-    }
-    if (this.scope !== 'room' && l.roomBn) {
-      wrap.append(el(d, 'span', { className: 'routine-slot-meta', text: l.roomBn }));
-    }
-    if (l.isParallel) {
-      wrap.append(el(d, 'span', { className: 'routine-slot-meta', text: 'বিভাজিত ক্লাস' }));
+    const x = this.lessonParts(l);
+    append(wrap, el(d, 'span', { className: 'routine-slot-subject' },
+      ...numText(d, x.what.join(' · '))));
+    for (const meta of [x.teacher, x.room, x.parallel ? 'বিভাজিত ক্লাস' : null]) {
+      if (meta) append(wrap, el(d, 'span', { className: 'routine-slot-meta' }, ...numText(d, meta)));
     }
 
-    // The SAME ordinal and the SAME clock the sighted column shows. This
+    // The SAME ordinal and the SAME clock the row header carries. This
     // label used to count `period_no`, so a screen-reader user heard
     // “৬ নম্বর পিরিয়ড” for the hour everyone else called ৫ম — the same
     // off-by-one as the printed sheet, one layer down where nobody looks.
@@ -519,7 +746,7 @@ export class TimetableView {
       `${dayBn}বার`,
       `${ordinal} পিরিয়ড`,
       formatClockRange(l.startsAt, l.endsAt, 'bn'),
-      ...what,
+      ...x.what,
       l.teacherBn ?? '',
       l.roomBn ?? '',
     ].filter(Boolean).join(', '));

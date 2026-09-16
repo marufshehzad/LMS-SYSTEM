@@ -35,16 +35,25 @@
  * No year/term/section editing after creation: PATCH writes seven columns and
  * ignores those three. A control that appears to work and silently does
  * nothing is worse than no control.
+ *
+ * ── Ata Ekta (05 Principal §05, examsScreen) ────────────────────────────
+ * One frame under the page header: the year/search strip, the register, and
+ * the drawn footer note. The header carries the page's ONE primary, "নতুন
+ * পরীক্ষা". The drawn columns শ্রেণি and পূর্ণমান have no source in this
+ * payload (maxima are per paper, scope is per section), so the real columns
+ * stay in their place; শিক্ষাবর্ষ is the year this list was fetched for.
  */
 import type { Auth } from './auth.ts';
 import { skeleton, errorState, emptyState, successNote, bnNum } from './view-states.ts';
 import { pageHeader } from './ui/page-header.ts';
 import {
-  el, append, button, buttonRow, field, dataTable, statusBadge,
+  el, append, button, buttonRow, field, dataTable, statusBadge, numText, uid,
   permissionState, permissionMessage, openDrawer,
-  statCard, statRow, setBusy, announce, type OverlayHandle,
+  setBusy, announce, type OverlayHandle, type BadgeTone,
 } from './ui/index.ts';
-import { formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
+import {
+  formatAcademicYear, parseUserNumber, toBanglaDigits,
+} from '../../../packages/ui-core/src/format.ts';
 
 interface Exam {
   id: string;
@@ -100,11 +109,15 @@ const typeLabel = (t: string) => TYPE_BN[t] ?? t;
  * All six values of the `exam_status` enum. Four of them are never written by
  * any production code today, but the server can return any of them (a fixture,
  * an import, a future endpoint) and a row with no label would render blank.
+ *
+ * Tones follow the drawing: green only for a published result, an exam in
+ * progress in warn, marking in info, a planned one neutral (§3 — colour means
+ * something, and always with the word beside it).
  */
-const STATUS_BN: Record<string, { label: string; state: string }> = {
+const STATUS_BN: Record<string, { label: string; state: string; tone?: BadgeTone }> = {
   planned:    { label: 'পরিকল্পিত',            state: 'draft' },
-  ongoing:    { label: 'চলছে',                 state: 'active' },
-  marking:    { label: 'নম্বর দেওয়া হচ্ছে',      state: 'partial' },
+  ongoing:    { label: 'চলছে',                 state: 'partial' },
+  marking:    { label: 'নম্বর দেওয়া হচ্ছে',      state: 'partial', tone: 'info' },
   moderation: { label: 'যাচাই চলছে',            state: 'partial' },
   published:  { label: 'ফলাফল প্রকাশিত',        state: 'published' },
   locked:     { label: 'চূড়ান্ত',               state: 'published' },
@@ -258,9 +271,19 @@ export class ExamsView {
     const root = this.o.root;
     root.textContent = '';
 
+    // The drawn bar: the title and ONE small primary, nothing else. It appears
+    // exactly when the old in-page create button did — after load, for a role
+    // that may manage, in a year that exists.
+    const canCreate = !this.loading && !this.planBlocked && !this.denied
+      && Boolean(this.data?.canManage) && Boolean(this.tree?.year);
     root.append(pageHeader(d, {
       title: 'পরীক্ষা ব্যবস্থাপনা',
-      subtitle: 'পরীক্ষা তৈরি করুন — নম্বর, ফলাফল ও পরীক্ষার রুটিন সবই এখান থেকে শুরু হয়',
+      primary: canCreate
+        ? button(d, {
+          label: 'নতুন পরীক্ষা', variant: 'primary', size: 'sm', disabled: this.busy,
+          onClick: () => this.openForm(null),
+        })
+        : undefined,
     }));
 
     if (this.planBlocked) {
@@ -290,12 +313,15 @@ export class ExamsView {
       return;
     }
 
-    root.append(this.controls(data, tree));
-    root.append(this.summary(data));
+    // One frame, as drawn: strip → register → footer note. The empty state
+    // sits inside it too, under the strip, so another year can still be picked.
+    const register = el(d, 'div', { className: 'card exams-register' });
+    register.append(this.controls(tree));
+    root.append(register);
 
     const rows = this.visible();
     if (rows.length === 0) {
-      root.append(emptyState(d, {
+      register.append(emptyState(d, {
         message: this.search
           ? 'এই নামে কোনো পরীক্ষা পাওয়া যায়নি।'
           : 'এই শিক্ষাবর্ষে এখনো কোনো পরীক্ষা তৈরি করা হয়নি। পরীক্ষা না থাকলে নম্বর দেওয়া বা ফলাফল প্রকাশ করা যাবে না।',
@@ -306,15 +332,26 @@ export class ExamsView {
       return;
     }
 
-    root.append(dataTable(d, {
+    // Every exam in this list belongs to the year it was fetched for, so the
+    // drawn শিক্ষাবর্ষ column is that year — a real value, not a sample.
+    const yearText = formatAcademicYear(tree.year.label);
+    // Numbers in the numeral face on the smallest element that holds them (R6).
+    const num = (text: string) => el(d, 'span', {}, ...numText(d, text));
+
+    register.append(dataTable(d, {
       caption: 'পরীক্ষার তালিকা',
+      className: 'exams-table',
       rows,
       rowKey: (e) => e.id,
       columns: [
         {
           key: 'name', header: 'পরীক্ষা', mobile: 'title',
-          cell: (e) => e.nameBn,
+          cell: (e) => num(e.nameBn),
           width: 'minmax(0, 2fr)',
+        },
+        {
+          key: 'year', header: 'শিক্ষাবর্ষ', mobile: 'meta',
+          cell: () => num(yearText),
         },
         {
           key: 'type', header: 'ধরন', mobile: 'subtitle',
@@ -322,42 +359,52 @@ export class ExamsView {
         },
         {
           key: 'dates', header: 'তারিখ', mobile: 'meta',
-          cell: (e) => dateRange(e.startsOn, e.endsOn),
+          cell: (e) => num(dateRange(e.startsOn, e.endsOn)),
         },
         {
           key: 'scope', header: 'বিষয় ও সেকশন', mobile: 'meta',
           // paperCount is what makes the exam markable at all — an exam with
           // no papers is invisible to the marks screen.
-          cell: (e) => `${bnNum(e.paperCount)} বিষয় · ${bnNum(e.sectionCount)} সেকশন`,
+          cell: (e) => num(`${bnNum(e.paperCount)} বিষয় · ${bnNum(e.sectionCount)} সেকশন`),
         },
         {
           key: 'marks', header: 'নম্বর দেওয়া', mobile: 'meta', numeric: true,
-          cell: (e) => bnNum(e.markCount),
+          cell: (e) => el(d, 'span', { className: 'n', text: bnNum(e.markCount) }),
         },
         {
           key: 'status', header: 'অবস্থা', mobile: 'status',
           cell: (e) => statusBadge(d, statusOf(e.status)),
         },
+        // On a phone the edit control sits at the row's end beside the chip,
+        // not inside the 12px meta line.
         ...(data.canManage ? [{
-          key: 'actions', header: 'ব্যবস্থা',
+          key: 'actions', header: 'ব্যবস্থা', mobile: 'status' as const,
           cell: (e: Exam) => this.rowActions(e),
         }] : []),
       ],
     }));
 
-    // Shown only when it applies to something on screen: the reason an edit
-    // control is missing from some rows and not others.
-    if (rows.some(isFinal)) {
-      root.append(el(d, 'p', {
-        className: 'att-sub',
-        text: 'ফলাফল প্রকাশিত পরীক্ষা আর সম্পাদনা করা যায় না — প্রকাশিত ফল অভিভাবককে ইতিমধ্যে জানানো হয়েছে।',
-      }));
-    }
+    // The drawn footer note. Its second sentence is shown only when it applies
+    // to something on screen: the reason an edit control is missing from some
+    // rows and not others.
+    register.append(el(d, 'div', { className: 'exams-foot' },
+      el(d, 'p', { text: 'পরীক্ষা তৈরি না হলে নম্বর এন্ট্রি খোলা যায় না — এটিই ফলাফলের প্রথম ধাপ।' }),
+      rows.some(isFinal)
+        ? el(d, 'p', {
+          text: 'ফলাফল প্রকাশিত পরীক্ষা আর সম্পাদনা করা যায় না — প্রকাশিত ফল অভিভাবককে ইতিমধ্যে জানানো হয়েছে।',
+        })
+        : null));
   }
 
-  private controls(data: Body, tree: Tree): HTMLElement {
+  /**
+   * The strip above the register (05 Principal §03's filter band): search
+   * first and wider, then the year. The drawing shows placeholders and values
+   * only, so each label stays in the accessibility tree — still the input's
+   * `<label for>` — and leaves the screen.
+   */
+  private controls(tree: Tree): HTMLElement {
     const d = this.o.doc;
-    const wrap = el(d, 'div', { className: 'ui-fieldset' });
+    const wrap = el(d, 'div', { className: 'exams-filters' });
 
     const year = field(d, {
       label: 'শিক্ষাবর্ষ', name: 'year', kind: 'select',
@@ -375,32 +422,15 @@ export class ExamsView {
       placeholder: 'পরীক্ষার নাম বা ধরন',
       onInput: (v) => { this.search = v; this.render(); },
     });
-    append(wrap, year.root, search.root);
-
-    if (data.canManage) {
-      append(wrap, buttonRow(d, button(d, {
-        label: 'নতুন পরীক্ষা', variant: 'primary', disabled: this.busy,
-        onClick: () => this.openForm(null),
-      })));
+    // The year select shows "২০২৬ (চলতি)"; an <option> cannot hold a span, so
+    // the control carries the numeral face (`is-num`: `.ui-input` would
+    // otherwise override `.n`).
+    year.input.classList.add('n', 'is-num');
+    for (const f of [search, year]) {
+      f.root.querySelector('.ui-field-label')?.classList.add('ui-sr-only');
     }
+    append(wrap, search.root, year.root);
     return wrap;
-  }
-
-  private summary(data: Body): HTMLElement {
-    const d = this.o.doc;
-    const exams = data.exams;
-    const papers = exams.reduce((n, e) => n + e.paperCount, 0);
-    const done = exams.filter(isFinal).length;
-    return statRow(d,
-      statCard(d, { label: 'পরীক্ষা', value: bnNum(exams.length), glyph: 'clipboard' }),
-      statCard(d, {
-        label: 'মোট বিষয়', value: bnNum(papers), glyph: 'layers',
-        note: 'নম্বর এই বিষয়গুলোতেই দেওয়া যায়',
-      }),
-      statCard(d, {
-        label: 'ফলাফল প্রকাশিত', value: bnNum(done), glyph: 'check-square',
-        note: done === 0 ? 'এখনো কোনোটির ফল প্রকাশ হয়নি' : undefined,
-      }));
   }
 
   private rowActions(e: Exam): HTMLElement {
@@ -408,7 +438,7 @@ export class ExamsView {
     // No delete: the database refuses it for every role and a button here
     // would report a deletion that never happened (DELETE 0 raises nothing).
     if (isFinal(e)) {
-      return el(d, 'span', { className: 'att-sub', text: '—' });
+      return el(d, 'span', { className: 'exams-na', text: '—' });
     }
     return buttonRow(d, button(d, {
       label: 'সম্পাদনা', size: 'sm', disabled: this.busy,
@@ -422,7 +452,7 @@ export class ExamsView {
     const tree = this.tree;
     if (!data || !tree || !tree.year) return;
 
-    const form = el(d, 'div', { className: 'ui-fieldset' });
+    const form = el(d, 'div', { className: 'ui-form exams-form' });
 
     // A refusal is shown here, beside the values that caused it, and the
     // drawer stays open so they do not have to be retyped (B-60).
@@ -462,9 +492,13 @@ export class ExamsView {
       value: existing?.endsOn ?? '',
       helper: 'ঐচ্ছিক — শুরুর তারিখের আগে হতে পারে না।',
     });
+    // Shown in Bangla digits, like every other figure on the screen (R6), and
+    // read back with parseUserNumber on save: the helper below invites "৫০",
+    // and `Number('৫০')` is NaN — which JSON sends as null, which the server
+    // reads as 0 on a create and as "unchanged" on an edit. Both silent.
     const weight = field(d, {
       label: 'ফলাফলে ওজন (%)', name: 'weightPercent', kind: 'number',
-      value: String(existing?.weightPercent ?? 100),
+      value: toBanglaDigits(existing?.weightPercent ?? 100),
       helper: 'বার্ষিক ফলে এই পরীক্ষা কতটা গণ্য হবে — ০ থেকে ১০০।',
       attrs: { min: 0, max: 100, step: 1 },
     });
@@ -475,22 +509,28 @@ export class ExamsView {
     // Toggle button, not a checkbox: this design system has no checkbox field
     // kind, and a filled button reads as an answer rather than an open
     // question. Same control the room register uses for capabilities.
+    //
+    // Always the secondary variant: the drawer's one accent is its save
+    // button (§3). The pressed state is drawn from `aria-pressed` — ink fill,
+    // as the active filterBar chip is drawn (14 Components §03) — so what a
+    // sighted user sees and what a reader announces are the same attribute.
     let gpaBearing = existing?.isGpaBearing ?? true;
-    const gpaGroup = el(d, 'div', { className: 'ui-fieldset' });
-    append(gpaGroup, el(d, 'p', { className: 'ui-field-label', text: 'জিপিএ' }));
+    const gpaLabelId = uid('exam-gpa');
+    const gpaGroup = el(d, 'div', {
+      className: 'ui-fieldset', attrs: { role: 'group', 'aria-labelledby': gpaLabelId },
+    });
+    append(gpaGroup, el(d, 'p', { className: 'ui-field-label', text: 'জিপিএ', attrs: { id: gpaLabelId } }));
     const gpaBtn = button(d, {
       label: 'জিপিএ-তে গণ্য হবে',
-      variant: gpaBearing ? 'primary' : 'secondary',
+      variant: 'secondary',
       onClick: () => {
         gpaBearing = !gpaBearing;
         gpaBtn.setAttribute('aria-pressed', gpaBearing ? 'true' : 'false');
-        gpaBtn.className = gpaBtn.className
-          .replace(/ui-btn-(primary|secondary)/, gpaBearing ? 'ui-btn-primary' : 'ui-btn-secondary');
       },
     });
     gpaBtn.setAttribute('aria-pressed', gpaBearing ? 'true' : 'false');
     append(gpaGroup, buttonRow(d, gpaBtn), el(d, 'p', {
-      className: 'att-sub',
+      className: 'ui-field-help',
       text: 'শ্রেণি পরীক্ষার মতো ছোট পরীক্ষা সাধারণত জিপিএ-তে গণ্য হয় না।',
     }));
     append(form, gpaGroup);
@@ -501,13 +541,21 @@ export class ExamsView {
     // be a control that appears to work and silently does nothing.
     const chosen = new Set<string>();
     if (!existing) {
-      const group = el(d, 'div', { className: 'ui-fieldset' });
-      append(group, el(d, 'p', { className: 'ui-field-label', text: 'কোন সেকশন পরীক্ষা দেবে *' }));
+      const sectionsLabelId = uid('exam-sections');
+      const group = el(d, 'div', {
+        className: 'ui-fieldset', attrs: { role: 'group', 'aria-labelledby': sectionsLabelId },
+      });
+      // The required marker the way field() draws it: a visible asterisk the
+      // reader skips, and the word it stands for, which only the reader hears.
+      append(group, el(d, 'p', { className: 'ui-field-label', attrs: { id: sectionsLabelId } },
+        el(d, 'span', { text: 'কোন সেকশন পরীক্ষা দেবে' }),
+        el(d, 'span', { className: 'ui-req', text: '*', attrs: { 'aria-hidden': 'true' } }),
+        el(d, 'span', { className: 'ui-sr-only', text: '(আবশ্যক)' })));
 
       const anySection = tree.classes.some((l) => l.groups.some((g) => g.sections.length > 0));
       if (!anySection) {
         append(group, el(d, 'p', {
-          className: 'att-sub',
+          className: 'ui-field-help',
           text: 'এই শিক্ষাবর্ষে কোনো সেকশন নেই। আগে শ্রেণি ও সেকশন তৈরি করুন।',
         }));
       }
@@ -518,12 +566,12 @@ export class ExamsView {
           // "নবম · বিজ্ঞান" — the group matters because two classes at the
           // same level teach different subjects, and the papers follow the
           // class, not the level.
-          append(group, el(d, 'p', {
-            className: 'att-sub',
-            text: `${level.nameBn} · ${g.groupBn}`,
-          }));
+          // The eyebrow label (14 Components §03) over each class's sections.
+          append(group, el(d, 'p', { className: 'label' },
+            ...numText(d, `${level.nameBn} · ${g.groupBn}`)));
           const row = buttonRow(d);
           for (const s of g.sections) {
+            // Secondary, pressed state from aria-pressed — see the GPA toggle.
             const btn = button(d, {
               label: `${s.name} (${bnNum(s.studentCount)} জন)`,
               variant: 'secondary',
@@ -531,8 +579,6 @@ export class ExamsView {
                 const on = chosen.has(s.id);
                 if (on) chosen.delete(s.id); else chosen.add(s.id);
                 btn.setAttribute('aria-pressed', on ? 'false' : 'true');
-                btn.className = btn.className
-                  .replace(/ui-btn-(primary|secondary)/, on ? 'ui-btn-secondary' : 'ui-btn-primary');
               },
             });
             btn.setAttribute('aria-pressed', 'false');
@@ -542,7 +588,7 @@ export class ExamsView {
         }
       }
       append(group, el(d, 'p', {
-        className: 'att-sub',
+        className: 'ui-field-help',
         text: 'প্রতিটি সেকশনের শ্রেণিতে যেসব বিষয় নির্ধারিত আছে, সেগুলোর জন্য প্রশ্নপত্র স্বয়ংক্রিয়ভাবে তৈরি হবে।',
       }));
       append(form, group);
@@ -554,11 +600,33 @@ export class ExamsView {
       label: existing ? 'সংরক্ষণ করুন' : 'পরীক্ষা তৈরি করুন',
       variant: 'primary',
       onClick: async () => {
+        // A refusal's sentence, its numbers in the numeral face (R6). The
+        // text is the server's or ours — text nodes only, never markup.
+        const showRefusal = (msg: string) => {
+          errLine.textContent = '';
+          append(errLine, ...numText(d, msg));
+          errLine.removeAttribute('hidden');
+          // Announced as well as shown: focus is on the button just pressed,
+          // and a message that only appears is one a screen-reader user
+          // never gets.
+          announce(d, msg, true);
+        };
+
+        // Either numeral system is a weight; an empty or unreadable box is
+        // not. Nothing is sent for it — the server would store 0 (create) or
+        // keep the old weight (edit) and report success. The sentence is the
+        // server's own `bad_weight` refusal, shown where that one is shown.
+        const weightPercent = parseUserNumber(weight.input.value);
+        if (weightPercent === null) {
+          showRefusal('ওজন ০ থেকে ১০০-এর মধ্যে দিন।');
+          return;
+        }
+
         const payload: Record<string, unknown> = {
           nameBn: nameBn.input.value.trim(),
           nameEn: nameEn.input.value.trim(),
           examType: examType.input.value,
-          weightPercent: Number(weight.input.value),
+          weightPercent,
           startsOn: startsOn.input.value || null,
           endsOn: endsOn.input.value || null,
           isGpaBearing: gpaBearing,
@@ -577,11 +645,7 @@ export class ExamsView {
           existing ? 'সংরক্ষণ করা হয়েছে।' : 'তৈরি করা হয়েছে।');
         setBusy(save, false);
         if (!msg) { handle.close(); return; }
-        errLine.textContent = msg;
-        errLine.removeAttribute('hidden');
-        // Announced as well as shown: focus is on the button just pressed, and
-        // a message that only appears is one a screen-reader user never gets.
-        announce(d, msg, true);
+        showRefusal(msg);
       },
     });
     handle = openDrawer(d, {

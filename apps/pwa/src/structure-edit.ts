@@ -7,13 +7,20 @@
  * distance between that policy and a person, and the pilot runbook calls that
  * a blocker.
  *
- * ── Why a drawer and not an inline form ────────────────────────────────────
+ * ── Why a dialog and not an inline form ────────────────────────────────────
  * The create forms on this screen are inline, and correctly: creating is the
  * expected next action after looking at an empty list. Correcting is not — it
  * is rare, it is done to one named thing, and it needs that thing's current
- * value in front of you. A drawer titled with the name being changed puts the
+ * value in front of you. A dialog titled with the name being changed puts the
  * before and the after in the same glance, and leaves the tree undisturbed
  * behind it.
+ *
+ * Ata Ekta (14 Components §09, 13 Responsive ০৭): a centred dialog on a desk,
+ * a full-width bottom sheet on a phone with the primary under the thumb — the
+ * overlay's `auto` kind. It was a right-hand drawer; §05 keeps drawers for
+ * when the list behind must stay readable, and nothing here needs the tree
+ * while a name is typed. Focus trap, Escape, scrim click and the return of
+ * focus are the overlay's and did not change.
  *
  * ── What it does not offer ─────────────────────────────────────────────────
  * No class, no year, no level, no stream, no group. The endpoint refuses all
@@ -23,7 +30,7 @@
  * job, where it is explicit and audited per student.
  */
 import {
-  el, append, field, button, buttonRow, openDrawer, humanError, announce,
+  el, append, clear, numText, field, button, setBusy, openOverlay, humanError, announce,
   type Field,
 } from './ui/index.ts';
 import type { Auth } from './auth.ts';
@@ -50,7 +57,7 @@ export interface RenameOptions {
   onSaved: (nameBn: string) => void;
 }
 
-/** Open the rename drawer. Returns nothing: the drawer owns its own lifetime. */
+/** Open the rename dialog. Returns nothing: the overlay owns its own lifetime. */
 export function openRename(o: RenameOptions): void {
   const d = o.doc;
   const t = o.target;
@@ -77,6 +84,8 @@ export function openRename(o: RenameOptions): void {
         label: 'ইংরেজি নাম',
         name: 'nameEn',
         value: t.nameEn ?? '',
+        // §09 draws the empty English name as a grey "ঐচ্ছিক".
+        placeholder: 'ঐচ্ছিক',
         helper: 'সনদ ও রিপোর্টে ছাপা হয়। খালি রাখলে বাংলা নামই ব্যবহার হবে।',
         attrs: { maxlength: 60 },
       })
@@ -90,7 +99,9 @@ export function openRename(o: RenameOptions): void {
         value: String(t.capacity ?? ''),
         // The number the office needs before it can choose one. Without it a
         // capacity below the enrolled count is a guess the server refuses,
-        // which reads as the form being broken.
+        // which reads as the form being broken. (R6: `kind: 'number'` sets
+        // the control in the numeral face, and field() wraps the count in the
+        // helper sentence in a `.n` span — nothing to add here.)
         helper: t.studentCount !== undefined
           // A COUNT, so Bangla digits — unlike a roll number, which stays
           // Latin because it is an identifier read down a phone line.
@@ -100,29 +111,35 @@ export function openRename(o: RenameOptions): void {
       })
     : null;
 
-  const save = button(d, { label: 'সংরক্ষণ করুন', variant: 'primary' });
-  const cancel = button(d, { label: 'বাতিল', variant: 'secondary' });
+  // Both small, as §09 draws them (`btn-sm` keeps a 44px hit area).
+  const save = button(d, { label: 'সংরক্ষণ করুন', variant: 'primary', size: 'sm' });
+  const cancel = button(d, { label: 'বাতিল', variant: 'secondary', size: 'sm' });
 
-  const handle = openDrawer(d, {
-    // The current name in the title: the drawer says which of forty sections
+  const handle = openOverlay(d, {
+    kind: 'auto',
+    // The current name in the title: the dialog says which of forty sections
     // is being changed, without the form having to repeat it.
     title: isClass ? `“${t.nameBn}” শ্রেণির নাম সংশোধন` : `“${t.nameBn}” সেকশনের নাম সংশোধন`,
-    body: el(d, 'div', { className: 'ui-form' },
+    body: el(d, 'div', { className: 'ui-form structure-rename' },
       nameField.root, enField?.root ?? null, capField?.root ?? null, errLine),
-    actions: [buttonRow(d, cancel, save)],
+    // The overlay puts these in its own button row: cancel, then the primary
+    // last. (They were wrapped in a second row inside that one.)
+    actions: [cancel, save],
   });
 
   cancel.addEventListener('click', () => handle.close());
 
   const fail = (msg: string): void => {
-    errLine.textContent = msg;
+    // A server sentence can carry a count ("৪২ জন শিক্ষার্থী আছে"): its
+    // figures in the numeral face, the words in the text face (R6).
+    clear(errLine);
+    append(errLine, ...numText(d, msg));
     errLine.removeAttribute('hidden');
-    // Announced as well as shown: the drawer's focus may be on the button the
+    // Announced as well as shown: the dialog's focus may be on the button the
     // person just pressed, and a message that only appears is a message a
     // screen-reader user does not get.
-    announce(d, msg, true);   // assertive: the drawer's focus is on the button just pressed
-    save.removeAttribute('disabled');
-    save.removeAttribute('aria-busy');
+    announce(d, msg, true);   // assertive: the dialog's focus is on the button just pressed
+    setBusy(save, false);     // no-op when it was never busy (the empty-name path)
   };
 
   save.addEventListener('click', () => {
@@ -130,8 +147,8 @@ export function openRename(o: RenameOptions): void {
     if (!nameBn) { fail('নাম লিখুন।'); return; }
 
     errLine.setAttribute('hidden', 'hidden');
-    save.setAttribute('disabled', 'true');
-    save.setAttribute('aria-busy', 'true');
+    // Disabled and aria-busy as before, plus the spinner §01 draws.
+    setBusy(save, true);
 
     const body: Record<string, unknown> = { kind: t.kind, id: t.id };
     if (isClass) { body.nameBn = nameBn; body.nameEn = enField?.value().trim() || nameBn; }

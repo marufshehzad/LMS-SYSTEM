@@ -134,6 +134,18 @@ const PATHS: Record<string, string> = {
   'file-text':
     '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'
     + '<line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>',
+  // Wave 2C. plus / minus: the academic tree's add action and section leaf,
+  // and a not-allowed cell in the roles matrix (08 Admin & IT). git-branch:
+  // the বিভাগ rows. more-vertical: the phone row menu (13 Responsive ০৪).
+  plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+  minus: '<line x1="5" y1="12" x2="19" y2="12"/>',
+  'git-branch':
+    '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>'
+    + '<path d="M18 9a9 9 0 0 1-9 9"/>',
+  'more-vertical':
+    '<circle cx="12" cy="5" r="1.6" fill="currentColor" stroke="none"/>'
+    + '<circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>'
+    + '<circle cx="12" cy="19" r="1.6" fill="currentColor" stroke="none"/>',
   // Wave 2B. chevron-left: the calendar's month arrows (04 Guardian §05).
   // save: the marks sheet's offline note (02 Teacher §04). credit-card,
   // receipt, printer: the document cells (04 §05, 05 Principal §07).

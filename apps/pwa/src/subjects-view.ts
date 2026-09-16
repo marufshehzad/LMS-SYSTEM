@@ -1,5 +1,5 @@
 /**
- * My subjects — F-802, wireframe §6.2 ⟨offline⟩
+ * My subjects — F-802, wireframe §6.2 ⟨offline⟩ · Ata Ekta 03 Student §02
  *
  * "The subject-based model made visible. No catalog, no browse, no enrol,
  * no search-for-a-course." The student sees exactly the subjects their
@@ -8,21 +8,27 @@
  *
  * Framework-free manual DOM, same as every other view here.
  *
- * All six universal states from wireframe §4 are implemented: loading is a
- * SKELETON of the real layout (never a centred spinner — a spinner tells
- * the user nothing about what is coming), empty carries one primary
- * action, error says what failed in plain language with one retry, and
- * offline is a non-blocking banner over the last cached list rather than a
- * modal that stops work.
+ * The drawing is one flush column of rows: a glyph (a star for the optional
+ * subject, an open book for the rest), the subject's name, one quiet line
+ * under it, and the requirement chip on the optional subject only. Built from
+ * `list` / `listItem`, so the row is the same row every other list uses.
+ *
+ * All five states (IMPLEMENTATION §7): loading is `listSkeleton` — grey rows
+ * the shape of the real list, never a spinner; empty says what is missing and
+ * who can fix it; error says what failed in plain language with one retry;
+ * offline is a --warn-tint banner over the last cached list rather than a
+ * modal that stops work; denied is the canonical refusal (B-30).
  */
 import type { Auth } from './auth.ts';
-import { emptyState } from './view-states.ts';
 // ui-core owns the numeral policy (counts in Bangla, identifiers always
 // Latin). Three views define a local `bn` instead; this one does not add a
 // fourth copy of a rule that already has a home and a test suite.
 import { formatCount } from '../../../packages/ui-core/src/format.ts';
 import { refuseUnlessOk, isDenied } from './http-status.ts';
-import { permissionState, permissionMessage, pageHeader, statusBadge,} from './ui/index.ts';
+import {
+  permissionState, permissionMessage, pageHeader, badge, list, listItem,
+  listSkeleton, emptyState, errorState, el, icon,
+} from './ui/index.ts';
 
 const bn = (n: number): string => formatCount(n, 'bn');
 
@@ -118,12 +124,14 @@ export class SubjectsView {
     root.textContent = '';
     root.setAttribute('lang', 'bn');
 
+    // The count only when there is a list to count. Above an error or a
+    // refusal, "০টি বিষয়" read as a fact about the student rather than about
+    // the request. pageHeader sets the figure in the numeral face (R6).
     root.append(pageHeader(d, {
       title: 'আমার বিষয়',
-      subtitle: this.loading ? 'লোড হচ্ছে…' : `${bn(this.subjects.length)}টি বিষয়`,
-      badge: this.offline
-        ? statusBadge(d, { state: 'pending', label: 'অফলাইন — সংরক্ষিত' })
-        : undefined,
+      subtitle: this.loading
+        ? 'লোড হচ্ছে…'
+        : this.subjects.length > 0 ? `${bn(this.subjects.length)}টি বিষয়` : undefined,
     }));
 
     // B-30. A refusal outranks the offline banner, the skeleton and the
@@ -141,38 +149,35 @@ export class SubjectsView {
     if (this.error)   { this.renderError(root);    return; }
     if (this.subjects.length === 0) { this.renderEmpty(root); return; }
 
-    // A grid, not a column. Nine subjects down a 1110px page is nine trips
-    // across the width; three across is one glance. `ui-card-grid` is the
-    // primitive for exactly this — rows that are a CHOICE, each with a
-    // sentence, rather than records with fields.
-    const ul = d.createElement('ul');
-    ul.className = 'subj-list ui-card-grid';
-    for (const sub of this.subjects) ul.append(this.card(sub));
+    if (this.offline) {
+      // The sheet's --warn-tint banner (§7), above the cached list: the rows
+      // under it are real but may be stale. This screen only reads, so
+      // nothing is queued and there is no waiting count to show.
+      root.append(el(d, 'p', {
+        className: 'offline-banner subj-offline', attrs: { role: 'status' },
+      }, icon(d, 'wifi-off', 'offline-icon'),
+         el(d, 'span', { text: 'অফলাইন — সংরক্ষিত বিষয় দেখানো হচ্ছে' })));
+    }
+
+    // One column of flush rows (03 Student §02), not a card grid: a subject
+    // list is a short, fixed set the student scans top to bottom.
+    const ul = list(d, 'আমার বিষয়', ...this.subjects.map((s) => this.row(s)));
+    ul.classList.add('subj-rows');
     root.append(ul);
   }
 
-  /** Wireframe §4: a skeleton OF THE REAL LAYOUT, never a spinner. */
+  /** Foundations §04: grey rows the shape of the list, never a spinner. */
   private renderSkeleton(root: HTMLElement): void {
-    const d = this.o.doc;
-    const ul = d.createElement('ul');
-    ul.className = 'subj-list';
-    ul.setAttribute('aria-busy', 'true');
-    ul.setAttribute('aria-label', 'বিষয় লোড হচ্ছে');
-    for (let i = 0; i < 4; i++) {
-      const li = d.createElement('li');
-      li.className = 'card subj-card is-skeleton';
-      const a = d.createElement('div'); a.className = 'skel skel-title';
-      const b = d.createElement('div'); b.className = 'skel skel-bar';
-      const c = d.createElement('div'); c.className = 'skel skel-line';
-      li.append(a, b, c);
-      ul.append(li);
-    }
-    root.append(ul);
+    const sk = listSkeleton(this.o.doc, 3);
+    // The component says "লোড হচ্ছে"; this screen always said WHAT is loading.
+    sk.setAttribute('aria-label', 'বিষয় লোড হচ্ছে');
+    root.append(sk);
   }
 
   private renderEmpty(root: HTMLElement): void {
     // One sentence, and it says what to DO — a student seeing this has not
-    // had their subject set derived yet (F-304), which is a school action.
+    // had their subject set derived yet (F-304), which is a school action,
+    // so there is no in-app button to offer.
     root.append(emptyState(this.o.doc, {
       glyph: 'layers',
       message: 'এখনো কোনো বিষয় নির্ধারণ হয়নি। আপনার শ্রেণিশিক্ষকের সাথে কথা বলুন।',
@@ -180,124 +185,56 @@ export class SubjectsView {
   }
 
   private renderError(root: HTMLElement): void {
-    const d = this.o.doc;
-    const box = d.createElement('div');
-    box.className = 'empty-state';
-    const glyph = d.createElement('div');
-    glyph.className = 'empty-glyph';
-    // U+2715, which has no emoji form at all. This element held the warning
-    // sign, which the no-emoji sweep stripped — leaving the string empty and
-    // the error state silently iconless. Not re-fixed with a variation
-    // selector: that only asks a font for text presentation and is ignored
-    // often enough to reintroduce the bug. A glyph with no emoji form cannot.
-    glyph.textContent = '✕';
-    glyph.setAttribute('aria-hidden', 'true');
-    const msg = d.createElement('p');
-    msg.textContent = 'বিষয়ের তালিকা লোড হয়নি।';
-    const retry = d.createElement('button');
-    retry.type = 'button';
-    retry.className = 'btn-secondary';
-    retry.textContent = 'আবার চেষ্টা করুন';
-    retry.addEventListener('click', () => {
-      this.loading = true; this.error = false; this.render(); void this.load();
-    });
-    box.append(glyph, msg, retry);
-    root.append(box);
+    // Foundations §04's error copy, and the same retry as before: back to the
+    // skeleton, then the same request again.
+    root.append(errorState(this.o.doc,
+      'বিষয়ের তালিকা আনা গেল না। ইন্টারনেট নেই বা সার্ভার সাড়া দিচ্ছে না।',
+      () => { this.loading = true; this.error = false; this.render(); void this.load(); }));
   }
 
-  private card(s: SubjectRow): HTMLElement {
+  private row(s: SubjectRow): HTMLElement {
     const d = this.o.doc;
-    const li = d.createElement('li');
-    // A real <button> when the card opens something, matching .chapter-card,
-    // .assign-card and .next-card. This was a <li role="button"> with its own
-    // tabIndex and Enter/Space handling — the documented workaround, but a
-    // workaround: it re-implements by hand what the element gives for free,
-    // and it made this the one card in the product that was not a button.
-    const openable = Boolean(this.o.onOpenSubject);
-    const card = d.createElement(openable ? 'button' : 'div');
-    if (openable) (card as HTMLButtonElement).type = 'button';
-    card.className = 'card subj-card';
-    card.dataset.requirement = s.requirementType;
-
-    const head = d.createElement('div');
-    head.className = 'subj-head';
-    const name = d.createElement('span');
-    name.className = 'subj-name';
-    name.textContent = s.nameBn;
-
-    // The requirement-type chip: "the surface expression of the subject
-    // taxonomy" (§6.2). Carries a LABEL, so the requirement type is never
-    // conveyed by colour alone (F-812).
-    const chip = d.createElement('span');
-    chip.className = 'status-chip subj-chip';
-    chip.dataset.requirement = s.requirementType;
-    chip.textContent = s.requirementLabelBn;
-    head.append(name, chip);
-    card.append(head);
-
-    // progress-bar, "with numeric label, never bar-only" (§3 component
-    // vocabulary). The number is the point: a bar alone is unreadable at
-    // 360px and meaningless to a guardian.
-    const track = d.createElement('div');
-    track.className = 'progress-track';
-    track.setAttribute('role', 'progressbar');
-    track.setAttribute('aria-valuemin', '0');
-    // Coerced, because `String(undefined)` is the word "undefined" and this
-    // string is read aloud. A missing count is zero chapters, which is true
+    // Coerced, because `String(undefined)` is the word "undefined" and these
+    // figures are read aloud. A missing count is zero chapters, which is true
     // and sayable; the word "undefined" is neither. §27: no undefined, null
     // or UUID may reach accessible text.
     const total = Number.isFinite(s.totalChapters) ? s.totalChapters : 0;
     const done = Number.isFinite(s.completedChapters) ? s.completedChapters : 0;
-    track.setAttribute('aria-valuemax', String(total));
-    track.setAttribute('aria-valuenow', String(done));
-    // Bangla numerals in the spoken label too: the visible count already uses
-    // them, and a screen reader that says the figures in English mid-Bangla
-    // is reading a different sentence than the one on screen.
-    track.setAttribute('aria-label',
-      `${s.nameBn}: ${bn(total)}টির মধ্যে ${bn(done)}টি অধ্যায় শেষ`);
-    const fill = d.createElement('div');
-    fill.className = 'progress-fill';
-    fill.style.width = `${s.progressPercent}%`;
-    track.append(fill);
+    const optional = s.requirementType === 'optional';
+    // A real <button> when the row opens something (listItem renders one for
+    // onClick): no tabIndex, no role, no hand-rolled Enter/Space.
+    const openable = Boolean(this.o.onOpenSubject);
 
-    const count = d.createElement('span');
-    count.className = 'subj-count';
-    count.textContent = `${bn(done)}/${bn(total)} অধ্যায়`;
-
-    const row = d.createElement('div');
-    row.className = 'subj-progress-row';
-    row.append(track, count);
-    card.append(row);
-
-    if (s.nextChapter?.nameBn) {
-      const next = d.createElement('p');
-      next.className = 'subj-next';
-      const no = s.nextChapter.chapterNo;
-      next.textContent = no
-        ? `পরবর্তী: অধ্যায় ${bn(no)} — ${s.nextChapter.nameBn}`
-        : `পরবর্তী: ${s.nextChapter.nameBn}`;
-      card.append(next);
-    } else if (s.totalChapters > 0) {
-      const done = d.createElement('p');
-      done.className = 'subj-next subj-next-done';
-      done.textContent = 'সব অধ্যায় শেষ ✓';
-      card.append(done);
-    }
+    const li = listItem(d, {
+      title: s.nameBn,
+      // The drawing's second line is the subject teacher, which the subjects
+      // API does not return. The chapter count is the quiet fact this row
+      // already carried, in the same slot. Bangla numerals; listItem puts the
+      // figure in the numeral face (R6).
+      subtitle: `${bn(done)}/${bn(total)} অধ্যায়`,
+      glyph: optional ? 'star' : 'book-open',
+      // The chip only on the optional subject (03 Student §02). It carries the
+      // server's words, so the fourth subject is never marked by glyph alone
+      // (F-812). badge() sets any figure in it in the numeral face.
+      status: optional && s.requirementLabelBn
+        ? badge(d, { label: s.requirementLabelBn, tone: 'neutral' })
+        : undefined,
+      onClick: openable ? () => this.o.onOpenSubject?.(s.subjectId) : undefined,
+    });
+    li.dataset.requirement = s.requirementType;
 
     if (openable) {
-      // No tabIndex, no role, no hand-rolled Enter/Space: a <button> brings
-      // all three. Only the accessible name has to be said out loud.
-      card.setAttribute('aria-label', `${s.nameBn} খুলুন`);
-      card.addEventListener('click', () => this.o.onOpenSubject?.(s.subjectId));
+      // The accessible name says what the row shows and what it does. Bangla
+      // numerals in the spoken label too: the visible count uses them, and a
+      // screen reader that says the figures in English mid-Bangla is reading
+      // a different sentence than the one on screen.
+      const label = [
+        `${s.nameBn}: ${bn(total)}টির মধ্যে ${bn(done)}টি অধ্যায় শেষ`,
+        optional && s.requirementLabelBn ? `, ${s.requirementLabelBn}` : '',
+        ' — খুলুন',
+      ].join('');
+      li.querySelector('button.ui-list-hit')?.setAttribute('aria-label', label);
     }
-    li.append(card);
     return li;
-  }
-
-  private banner(text: string, cls: string): HTMLElement {
-    const p = this.o.doc.createElement('p');
-    p.className = cls;
-    p.textContent = text;
-    return p;
   }
 }

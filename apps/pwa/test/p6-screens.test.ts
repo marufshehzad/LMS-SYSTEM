@@ -234,32 +234,75 @@ describe('P6 — বদলি শিক্ষক', () => {
 
 // ═══════════════════════════════════════════════════════════════════════
 describe('P6 — ভূমিকা ও অ্যাক্সেস is a matrix, so it is a table', () => {
-  test('ten roles compared on the same three questions', () => {
+  test('ten roles compared on the same five questions, in one table', () => {
     root().textContent = '';
     new RolesView({ root: root(), doc: dom.window.document });
-    // Grouped by tier, each tier its own table — it was 11 full-width
-    // `.role-card` strips at 1110px, where comparing two roles meant holding
-    // one in your head.
-    assert.ok(root().querySelectorAll('table.ui-table').length >= 4);
+    // 08 Admin & IT §05: one role × capability matrix replaces the five tier
+    // tables. Still a real table — it was 11 full-width `.role-card` strips
+    // at 1110px, where comparing two roles meant holding one in your head.
+    assert.equal(root().querySelectorAll('table.ui-table').length, 1);
     const heads = [...root().querySelectorAll('thead th')].map((h) => h.textContent);
-    assert.ok(heads.includes('ভূমিকা'));
-    assert.ok(heads.includes('কী করতে পারেন'));
-    assert.ok(heads.includes('পরিসর'));
+    assert.deepEqual(heads, ['ভূমিকা', 'হাজিরা', 'নম্বর', 'প্রকাশ', 'টাকা', 'সেটিংস']);
+    const rows = [...root().querySelectorAll('tbody tr')];
+    assert.equal(rows.length, 10);
+    for (const tr of rows) {
+      // Every row is named by a row header, and every glyph-only cell carries
+      // a word for a screen reader.
+      assert.equal(tr.querySelectorAll('th[scope="row"]').length, 1);
+      for (const td of tr.querySelectorAll('td')) {
+        assert.match(td.querySelector('.ui-sr-only')?.textContent ?? '', /^অনুমোদিত( নয়)?$/);
+      }
+    }
     assert.equal(root().querySelectorAll('.role-card').length, 0);
+    // The chip's count is the number of rows shown.
+    assert.match(root().querySelector('.page-header .ui-badge')?.textContent ?? '', /১০ ভূমিকা/);
   });
 
-  test('the scope is a word, not a database key', () => {
+  test('a role is a word, not a database key', () => {
     root().textContent = '';
     new RolesView({ root: root(), doc: dom.window.document });
-    assert.match(text(), /পুরো প্ল্যাটফর্ম/);
-    assert.match(text(), /নিজের প্রতিষ্ঠান/);
-    // `platform` and `tenant` are the values; neither belongs on screen.
+    assert.match(text(), /প্রধান শিক্ষক/);
+    // `platform` and `tenant` are values; neither belongs on screen — and
+    // neither does any role code.
     assert.doesNotMatch(text(), /\bplatform\b|\btenant\b/);
+    assert.doesNotMatch(text(),
+      /\b(super_admin|school_owner|principal|academic_coordinator|dept_head|class_teacher|subject_teacher|accountant|it_admin|student|guardian)\b/);
   });
 
   test('the isolation guarantee says it cannot be switched off', () => {
     root().textContent = '';
     new RolesView({ root: root(), doc: dom.window.document });
     assert.match(text(), /বন্ধ করার উপায় নেই/);
+  });
+
+  test('the page says access is enforced on the server, not by what is hidden', () => {
+    root().textContent = '';
+    new RolesView({ root: root(), doc: dom.window.document });
+    assert.match(text(), /অনুমতি সবসময় সার্ভারে যাচাই হয়/);
+    assert.match(text(), /পর্দায় লুকানো মানে নিরাপত্তা নয়/);
+    assert.match(text(), /RLS/);
+  });
+
+  test('the matrix says what the server enforces, not what the drawing guessed', () => {
+    root().textContent = '';
+    new RolesView({ root: root(), doc: dom.window.document });
+    const heads = [...root().querySelectorAll('thead th')].map((h) => h.textContent ?? '');
+    const allowed = (role: string) => {
+      const tr = [...root().querySelectorAll('tbody tr')]
+        .find((r) => r.querySelector('th')?.textContent === role);
+      assert.ok(tr, `row ${role}`);
+      return [...tr!.querySelectorAll('td')]
+        .filter((td) => td.querySelector('.ui-sr-only')?.textContent === 'অনুমোদিত')
+        .map((td) => heads[(td as HTMLTableCellElement).cellIndex]);
+    };
+    // SETTINGS_ROLES, services/ops-svc/api/settings.ts
+    for (const role of ['প্রধান শিক্ষক', 'প্রতিষ্ঠান মালিক', 'আইটি অ্যাডমিন', 'একাডেমিক সমন্বয়কারী']) {
+      assert.ok(allowed(role).includes('সেটিংস'), role);
+    }
+    // PUBLISH_ROLES + BILLING/COLLECT/LEDGER_ROLES: the owner is on the page.
+    assert.deepEqual(allowed('প্রতিষ্ঠান মালিক'), ['প্রকাশ', 'টাকা', 'সেটিংস']);
+    assert.deepEqual(allowed('হিসাবরক্ষক'), ['টাকা']);
+    assert.deepEqual(allowed('শিক্ষার্থী'), []);
+    assert.deepEqual(allowed('অভিভাবক'), []);
   });
 });

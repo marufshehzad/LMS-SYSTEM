@@ -9,10 +9,10 @@
  *      time either changed, and being believed is this screen's whole value.
  *
  *   2. No invented progress. `POST /rms/generate` is one blocking request
- *      with no stream and no job id, so the wait shows a spinner, a true
- *      elapsed second count, and a sentence saying why there is no
- *      percentage. A bar creeping to 90% and stopping teaches people to
- *      distrust the wait, and then the result.
+ *      with no stream and no job id, so the wait shows a true elapsed second
+ *      count, a sweep that claims no position, and a sentence saying why
+ *      there is no percentage. A bar creeping to 90% and stopping teaches
+ *      people to distrust the wait, and then the result.
  *
  *   3. A hard conflict outranks "all periods placed". The teacher and room
  *      EXCLUDE constraints only bind an ACTIVE routine, so a draft can hold
@@ -26,7 +26,7 @@
  *   5. "Generation failed." never appears alone. Each refusal says what it
  *      was and what to do next.
  */
-import { test, describe, before, beforeEach } from 'node:test';
+import { test, describe, before, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -577,5 +577,145 @@ describe('P9-4 — the explanation on screen', () => {
     assert.match(root().textContent ?? '', /কারণ ও সমাধান উপরের তালিকায়/);
     assert.equal(root().querySelectorAll('.gen-finding').length, 3,
       'exactly one row per finding, once');
+  });
+});
+
+/**
+ * Ata Ekta — what the redesign has to keep true on this screen.
+ *
+ *   1. ONE accent. §3 puts `--accent` on a page's single primary button, and
+ *      which button that is follows the step the coordinator is on: making
+ *      a routine, fixing a conflict, or reviewing before publishing.
+ *   2. A read that failed is an error with a way out — not the readiness
+ *      frame saying "সব প্রয়োজনীয় তথ্য পাওয়া গেছে" over steps it never saw.
+ *   3. The wait ticks in place. Rebuilding the page every second replayed the
+ *      entrance animation and re-created the status region a reader follows.
+ *   4. Every digit is set in the numeral face (R6).
+ */
+describe('Ata Ekta — the generate screen', () => {
+  beforeEach(() => {
+    readiness = READY; runs = []; navigated = []; postCalls = 0; postGate = null;
+    post = { ok: true, status: 200, body: CLEAN_RESULT };
+  });
+  afterEach(() => { mock.timers.reset(); });
+
+  const primaries = () => [...root().querySelectorAll('.btn-primary')]
+    .map((b) => (b.textContent ?? '').trim());
+
+  test('THE ONE THAT MATTERS — one primary button, owned by the current step', async () => {
+    const v = await mount();
+    assert.deepEqual(primaries(), ['রুটিন তৈরি করুন'], 'before a run: making one');
+
+    buttonNamed('রুটিন তৈরি করুন')?.click();
+    await settle();
+    assert.deepEqual(primaries(), ['প্রকাশের জন্য দেখুন'],
+      'after a clean run: the review before publishing, and the generate button steps down');
+    assert.ok(buttonNamed('রুটিন তৈরি করুন'), 'the generate button is still there');
+    v.destroy();
+
+    post = { ok: true, status: 200, body: CONFLICT_RESULT };
+    const w = await mount();
+    buttonNamed('রুটিন তৈরি করুন')?.click();
+    await settle();
+    w.destroy();
+    assert.deepEqual(primaries(), ['রুটিন সম্পাদনা'],
+      'a hard conflict: the editor that fixes it — not the publish review');
+  });
+
+  test('a run in flight has no primary at all, and nothing to cancel it with', async () => {
+    postGate = () => new Promise<void>(() => {});
+    const v = await mount();
+    buttonNamed('রুটিন তৈরি করুন')?.click();
+    await settle();
+    v.destroy();
+    assert.deepEqual(primaries(), []);
+    assert.equal(buttonNamed('বাতিল'), undefined,
+      'the request cannot be cancelled once sent, so no button pretends it can');
+  });
+
+  test('a failed READ says so and offers the same read again', async () => {
+    let failReads = true;
+    let reads = 0;
+    const base = auth();
+    const flaky = {
+      ...base,
+      authedFetch: async (url: string, init?: { method?: string }) => {
+        if (!init?.method) {
+          reads++;
+          if (failReads) throw new TypeError('network');
+        }
+        return base.authedFetch(url, init as never);
+      },
+    } as unknown as ConstructorParameters<typeof RoutineGenerateView>[0]['auth'];
+
+    const v = await mount({ auth: flaky });
+    const t = root().textContent ?? '';
+    assert.match(t, /প্রস্তুতির তথ্য আনা যায়নি/);
+    assert.doesNotMatch(t, /সব প্রয়োজনীয় তথ্য পাওয়া গেছে/,
+      'a readiness claim about steps that never arrived');
+    assert.equal(buttonNamed('রুটিন তৈরি করুন'), undefined);
+
+    const before = reads;
+    failReads = false;
+    buttonNamed('আবার চেষ্টা করুন')?.click();
+    await settle();
+    v.destroy();
+    assert.ok(reads > before, 'the retry reads again');
+    assert.match(root().textContent ?? '', /সব প্রয়োজনীয় তথ্য পাওয়া গেছে/);
+    assert.equal(postCalls, 0, 'and a retried READ never starts a run');
+  });
+
+  test('the wait ticks in place — the figure changes, the page is not rebuilt', async () => {
+    mock.timers.enable({ apis: ['setInterval'] });
+    let release: (() => void) | null = null;
+    postGate = () => new Promise<void>((r) => { release = r; });
+    let clock = 5_000_000;
+    const v = await mount({ now: () => clock });
+
+    buttonNamed('রুটিন তৈরি করুন')?.click();
+    await settle();
+    const frame = root().querySelector('.rgen-run');
+    const status = root().querySelector('[role="status"]');
+    assert.ok(frame && status);
+
+    clock += 3_000;
+    mock.timers.tick(3_000);
+    assert.match(root().textContent ?? '', /৩ সেকেন্ড চলছে/, 'the count is still real');
+    assert.equal(root().querySelector('.rgen-run'), frame, 'the same frame, not a rebuilt one');
+    assert.equal(root().querySelector('[role="status"]'), status,
+      'the status region a reader is following survives the tick');
+
+    release?.();
+    await settle();
+    v.destroy();
+    assert.match(root().textContent ?? '', /সব ৫৮০টি পিরিয়ড/);
+  });
+
+  test('every digit on the screen is set in the numeral face (R6)', async () => {
+    const unmarked = () => {
+      const out: string[] = [];
+      const walker = doc().createTreeWalker(root(), 4 /* SHOW_TEXT */);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        if (/[0-9০-৯]/.test(n.nodeValue ?? '') && !n.parentElement?.closest('.n')) {
+          out.push((n.nodeValue ?? '').trim());
+        }
+      }
+      return out;
+    };
+
+    readiness = BLOCKED;
+    runs = [{ routineId: ROUTINE_M, shift: 'morning', version: 1, status: 'draft',
+              slots: 540, solverSeconds: 1.1, generatedAt: null }];
+    const a = await mount();
+    a.destroy();
+    assert.deepEqual(unmarked(), [], 'the readiness and prior-run frames');
+
+    readiness = READY; runs = [];
+    post = { ok: true, status: 200, body: WITH_FINDINGS };
+    const b = await mount();
+    buttonNamed('রুটিন তৈরি করুন')?.click();
+    await settle();
+    b.destroy();
+    assert.deepEqual(unmarked(), [], 'the result, findings and shift frames');
   });
 });

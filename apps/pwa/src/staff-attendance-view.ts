@@ -7,13 +7,23 @@
  * product could say who was absent.
  *
  * ── One screen, one decision per row ────────────────────────────────────
- * A date at the top and a list of teachers under it, each with three buttons.
- * No bulk actions, no "mark all present", no leave-balance column. A head
- * teacher does this once each morning against a list of thirty names, and the
- * fastest version of that is three fat targets per row, not a workflow.
+ * A date at the top and a list of teachers under it, each with one three-way
+ * choice. No bulk actions, no "mark all present", no leave-balance column. A
+ * head teacher does this once each morning against a list of thirty names,
+ * and the fastest version of that is three fat targets per row, not a
+ * workflow.
+ *
+ * ── Ata Ekta (05 Principal §06) ─────────────────────────────────────────
+ * The drawn frame is a title bar with the day on the right, a band of four
+ * counts, and the register flush under it. The band and the table are one
+ * white panel here for the same reason. The drawing has no controls — it is
+ * the register as read — so the three choices are the one thing added to it,
+ * drawn as the segmented control from 00 Foundations §04 (ink frame, the
+ * chosen segment filled with ink). The accent is never a row's answer: that
+ * is `--accent` on thirty rows, and §3 gives it to one primary button.
  *
  * ── Marking is immediate, and says so ───────────────────────────────────
- * There is no save button. Each button POSTs on press and the row shows what
+ * There is no save button. Each choice POSTs on press and the row shows what
  * the server came back with — not what was clicked. A register that showed
  * the optimistic answer would show a mark that failed, which is worse than
  * showing nothing on a screen whose whole job is to be believed.
@@ -28,11 +38,12 @@ import type { Auth } from './auth.ts';
 import { skeleton, errorState, emptyState, successNote, bnNum } from './view-states.ts';
 import { ROLE_BN } from './ui/roles.ts';
 import { pageHeader } from './ui/page-header.ts';
-import { todayLocalIso } from '../../../packages/ui-core/src/format.ts';
+import { todayLocalIso, formatDayMonth } from '../../../packages/ui-core/src/format.ts';
 import {
-  el, append, button, buttonRow, field, dataTable, statCard, statRow,
+  el, append, field, dataTable, statCard, statRow, numText,
   statusBadge, permissionState, permissionMessage,
 } from './ui/index.ts';
+import type { Column } from './ui/index.ts';
 
 interface TeacherRow {
   teacherId: string;
@@ -171,9 +182,16 @@ export class StaffAttendanceView {
     const root = this.o.root;
     root.textContent = '';
 
+    // 05 Principal §06: the title, and on the right the day the register is
+    // for — day and month, no year, in the text colour of a caption. No
+    // subtitle: the drawn bar has none. Not shown beside a refusal, where
+    // there is no register for the day to belong to.
     root.append(pageHeader(d, {
       title: 'শিক্ষক হাজিরা',
-      subtitle: 'কে এসেছেন, কে আসেননি — বিকল্প শিক্ষক খোঁজায় এটিই ব্যবহার হয়',
+      actions: this.denied ? undefined : [el(d, 'time', {
+        className: 'staff-att-date-text',
+        attrs: { datetime: this.date },
+      }, ...numText(d, formatDayMonth(this.date, 'bn')))],
     }));
 
     // The refusal is the whole answer, and it comes before any control. A
@@ -190,12 +208,16 @@ export class StaffAttendanceView {
     if (this.notice) root.append(successNote(d, this.notice));
     if (this.error) root.append(errorState(d, this.error, () => void this.load()));
 
+    // Not drawn — the frame shows only today — but viewing and correcting
+    // another day is half of what this screen is for, so the picker stays,
+    // capped to the width a date needs.
     root.append(field(d, {
       label: 'তারিখ',
       name: 'date',
       kind: 'date',
       value: this.date,
       helper: 'অন্য দিনের হাজিরা দেখতে বা সংশোধন করতে তারিখ বদলান।',
+      className: 'staff-att-date',
       onChange: (v) => { if (!v) return; this.date = v; void this.load(); },
     }).root);
 
@@ -206,62 +228,69 @@ export class StaffAttendanceView {
 
     if (data.teachers.length === 0) {
       root.append(emptyState(d, {
+        glyph: 'users',
         message: 'এই প্রতিষ্ঠানে এখনো কোনো শিক্ষক যোগ করা হয়নি।',
+        detail: 'শিক্ষকের অ্যাকাউন্ট যোগ হলে এখানে তাঁদের হাজিরা নেওয়া যাবে।',
       }));
       return;
     }
 
-    root.append(this.summary(data));
-
-    // Read-only staff get the register without the buttons. The server has
+    // Read-only staff get the register without the choices. The server has
     // already said `canMark: false`, so this is not hidden UI standing in for
     // authorization — it is the screen agreeing with the answer it was given.
     const canMark = data.canMark;
 
-    root.append(dataTable(d, {
-      caption: 'শিক্ষকের হাজিরা তালিকা',
-      rows: data.teachers,
-      rowKey: (t) => t.teacherId,
-      columns: [
-        {
-          key: 'name', header: 'নাম', mobile: 'title',
-          cell: (t) => t.name.bn ?? t.name.en ?? 'নাম নেই',
-          width: 'minmax(0, 2fr)',
-        },
-        {
-          key: 'role', header: 'ভূমিকা', mobile: 'subtitle',
-          cell: (t) => ROLE_BN[t.roleCode] ?? t.roleCode,
-        },
-        {
-          key: 'status', header: 'অবস্থা', mobile: 'status',
-          cell: (t) => t.status === null
-            // Not "present". An unmarked teacher is a teacher nobody has
-            // looked at yet, and the substitute finder treats it that way too.
-            ? statusBadge(d, { state: 'pending', label: 'চিহ্নিত হয়নি' })
-            : statusBadge(d, {
-              state: t.status === 'present' ? 'published' : 'overdue',
-              label: STATUS_BN[t.status] ?? t.status,
-            }),
-        },
-        // Read-only staff see the reason as text. For anybody who can mark,
-        // the box and the buttons are ONE cell: they are written in one
-        // request, and on a phone the table collapses to a card where two
-        // separate meta items are joined by a "·" — a stray dot beside a text
-        // input, which reads as a defect.
-        ...(canMark ? [] : [{
-          key: 'reason', header: 'কারণ', mobile: 'meta' as const,
-          cell: (t: TeacherRow) => t.reason ?? '—',
-        }]),
-        ...(canMark ? [{
-          key: 'actions', header: 'চিহ্নিত করুন',
-          cell: (t: TeacherRow) => this.markCell(t),
-        }] : []),
-      ],
-    }));
+    const columns: Array<Column<TeacherRow>> = [
+      {
+        key: 'name', header: 'নাম', mobile: 'title',
+        cell: (t) => this.nameOf(t),
+        width: 'minmax(0, 2fr)',
+      },
+      {
+        key: 'role', header: 'ভূমিকা', mobile: 'subtitle',
+        cell: (t) => ROLE_BN[t.roleCode] ?? t.roleCode,
+      },
+      // Read-only staff see the reason as text. For anybody who can mark,
+      // the box and the choices are ONE cell: they are written in one
+      // request, and on a phone the table collapses to a card where two
+      // separate meta items are joined by a "·" — a stray dot beside a text
+      // input, which reads as a defect.
+      canMark
+        ? { key: 'actions', header: 'চিহ্নিত করুন', mobile: 'meta', cell: (t) => this.markCell(t) }
+        : { key: 'reason', header: 'কারণ', mobile: 'meta', cell: (t) => t.reason ?? '—' },
+      // Last, as drawn: the answer sits at the right-hand edge of its row.
+      // The drawn header is blank; it keeps a word here because a column
+      // header with no name is a column a screen reader cannot announce.
+      {
+        key: 'status', header: 'অবস্থা', mobile: 'status',
+        cell: (t) => this.statusChip(t),
+      },
+    ];
+
+    root.append(el(d, 'div', { className: 'staff-att-panel' },
+      this.summary(data),
+      dataTable(d, {
+        caption: 'শিক্ষকের হাজিরা তালিকা',
+        className: 'staff-att-table',
+        rows: data.teachers,
+        rowKey: (t) => t.teacherId,
+        columns,
+      })));
+  }
+
+  private nameOf(t: TeacherRow): string {
+    return t.name.bn ?? t.name.en ?? 'নাম নেই';
   }
 
   /**
-   * Three counts, so the office can see at a glance what is left to do.
+   * The four counts the drawn band carries: everyone, then the three answers.
+   * No glyphs, and a figure takes its meaning's colour only when there is
+   * something to mean — a red "০ অনুপস্থিত" is an alarm with nothing behind it.
+   *
+   * The three answers are counted from the rows on screen, so they move with
+   * every mark the same moment the row does. Teachers nobody has marked yet
+   * are real, and belong to none of the three: while any are left, the total
+   * says how many, which is the one thing the office still has to do.
    *
    * statCard/statRow rather than a row of spans: the first draft used two
    * class names this codebase does not have (`ui-filter-bar`, `ui-stack`), so
@@ -271,56 +300,90 @@ export class StaffAttendanceView {
    */
   private summary(data: RegisterBody): HTMLElement {
     const d = this.o.doc;
+    const count = (status: string) => data.teachers.filter((t) => t.status === status).length;
+    const present = count('present');
+    const absent = count('absent');
+    const leave = count('on_leave');
     const left = data.total - data.marked;
-    return statRow(d,
-      statCard(d, { label: 'মোট শিক্ষক', value: bnNum(data.total), glyph: 'users' }),
+    return el(d, 'div', { className: 'staff-att-band' }, statRow(d,
       statCard(d, {
-        label: 'চিহ্নিত', value: bnNum(data.marked), glyph: 'check-square',
-        note: left > 0 ? `বাকি ${bnNum(left)} জন` : 'সবাইকে চিহ্নিত করা হয়েছে',
+        label: 'মোট শিক্ষক', value: bnNum(data.total),
+        note: left > 0 ? `বাকি ${bnNum(left)} জন চিহ্নিত হয়নি` : undefined,
       }),
-      statCard(d, {
-        label: 'অনুপস্থিত ও ছুটি', value: bnNum(data.away), glyph: 'alert-triangle',
-        tone: data.away > 0 ? 'warn' : 'primary',
-      }));
+      statCard(d, { label: 'উপস্থিত', value: bnNum(present), tone: present > 0 ? 'success' : undefined }),
+      statCard(d, { label: 'অনুপস্থিত', value: bnNum(absent), tone: absent > 0 ? 'danger' : undefined }),
+      statCard(d, { label: 'ছুটি', value: bnNum(leave), tone: leave > 0 ? 'info' : undefined })));
+  }
+
+  /** The row's answer, as the drawn chip: উপস্থিত ok, অনুপস্থিত danger, ছুটি info. */
+  private statusChip(t: TeacherRow): HTMLElement {
+    const d = this.o.doc;
+    // Not "present". An unmarked teacher is a teacher nobody has looked at
+    // yet, and the substitute finder treats it that way too.
+    if (t.status === null) return statusBadge(d, { state: 'pending', label: 'চিহ্নিত হয়নি' });
+    return statusBadge(d, {
+      state: t.status,
+      label: STATUS_BN[t.status] ?? t.status,
+      // ছুটি is §3's info meaning. STATUS in ui/badge.ts has no `on_leave`
+      // key yet, and without one an unknown state paints neutral; the tone
+      // is passed until the key exists, then this line is dead weight.
+      tone: t.status === 'on_leave' ? 'info' : undefined,
+    });
   }
 
   private reasonBox(t: TeacherRow): HTMLElement {
     // Optional, and only meaningful when somebody is away — but it must be
-    // fillable BEFORE the button is pressed, because the mark and the reason
+    // fillable BEFORE a choice is pressed, because the mark and the reason
     // are written in one request.
-    return field(this.o.doc, {
-      label: 'কারণ',
+    const f = field(this.o.doc, {
+      label: `${this.nameOf(t)}: কারণ`,
       name: `reason-${t.teacherId}`,
       value: this.reasons.get(t.teacherId) ?? '',
-      placeholder: 'ঐচ্ছিক',
+      placeholder: 'কারণ (ঐচ্ছিক)',
       attrs: { maxlength: 200 },
       disabled: this.busy === t.teacherId,
       onInput: (v) => { this.reasons.set(t.teacherId, v); },
-    }).root;
+    });
+    // A row has no room for a label over its box. The <label for> stays, so
+    // the box keeps its name (with whose reason it is, which a column of
+    // thirty identical "কারণ" did not say); the placeholder carries the word.
+    f.root.querySelector('.ui-field-label')?.classList.add('ui-sr-only');
+    return f.root;
   }
 
-  /** The reason and the three buttons, together, because they are one write. */
+  /** The reason and the three choices, together, because they are one write. */
   private markCell(t: TeacherRow): HTMLElement {
-    // .ui-fieldset is the codebase's column stack with a gap — this cell is a
-    // field plus its buttons, which is what that utility is for.
-    const wrap = el(this.o.doc, 'div', { className: 'ui-fieldset' });
-    append(wrap, this.reasonBox(t), this.rowButtons(t));
+    const wrap = el(this.o.doc, 'div', { className: 'staff-att-mark' });
+    append(wrap, this.reasonBox(t), this.choices(t));
     return wrap;
   }
 
-  private rowButtons(t: TeacherRow): HTMLElement {
+  /**
+   * One of three, as a segmented control. The current answer is the pressed
+   * segment — `aria-pressed` for a reader, the ink fill for the eye — so the
+   * row reads as an answer rather than as three open questions. Pressing the
+   * chosen one again is allowed: it is how a reason typed afterwards is saved.
+   */
+  private choices(t: TeacherRow): HTMLElement {
     const d = this.o.doc;
-    const wrap = buttonRow(d);
+    const group = el(d, 'div', {
+      className: 'staff-att-seg',
+      attrs: { role: 'group', 'aria-label': `${this.nameOf(t)}: হাজিরা` },
+    });
     for (const c of CHOICES) {
-      append(wrap, button(d, {
-        label: c.label,
-        // The current state is the filled button, so the row reads as an
-        // answer rather than as three open questions.
-        variant: t.status === c.value ? 'primary' : 'secondary',
-        disabled: this.busy === t.teacherId,
-        onClick: () => { void this.mark(t.teacherId, c.value); },
-      }));
+      const b = el(d, 'button', {
+        className: 'staff-att-choice',
+        text: c.label,
+        attrs: {
+          type: 'button',
+          'aria-pressed': t.status === c.value ? 'true' : 'false',
+          disabled: this.busy === t.teacherId,
+        },
+        data: { choice: c.value },
+      });
+      b.addEventListener('click', () => { void this.mark(t.teacherId, c.value); });
+      group.append(b);
     }
-    return wrap;
+    return group;
   }
 }

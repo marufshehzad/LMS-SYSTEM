@@ -10,22 +10,27 @@
  *
  * Named `teaching-assignments` because `assignments-view.ts` is homework
  * (বাড়ির কাজ) and has been since R-2. Two different things share the English
- * word and nothing in Bangla confuses them.
+ * word and nothing in Bangla confuses them. The homework screen owns the
+ * `assign-*` look in app.css, so the classes this screen added in the Ata
+ * Ekta pass are `ta-*`; the older `assign-matrix` / `assign-cell` /
+ * `#assign-bar` hooks stay because the tests read them.
  *
- * ── The shape is the paperwork, not the table ──────────────────────────────
- * A coordinator holds one class in their head at a time: "class 9 — who is
- * taking maths in ক, in খ, in গ?" So this is subjects DOWN and sections
- * ACROSS, one class at a time, which is how the sheet already pinned up in
- * the office looks. A flat list of eight hundred assignments would be
- * technically equivalent and unusable.
+ * ── The shape is the drawing: sections down, subjects across ───────────────
+ * Ata Ekta 06 Routine §02 draws the matrix with a row per SECTION and a
+ * column per SUBJECT, headed "সেকশন", one class at a time here because the
+ * API serves one class at a time. A flat list of eight hundred assignments
+ * would be technically equivalent and unusable. The frame is the drawn one:
+ * the header carries the title, the gap chip ("২ ঘর ফাঁকা") and the small
+ * primary; the table and its legend footer are one block.
  *
  * ── The empty cells are the feature ────────────────────────────────────────
  * The grid is built from the CURRICULUM (`class_subjects`) and not from the
  * assignments that exist, so a coordinator sees the eleven subjects nobody is
- * teaching yet rather than the two that are done. The progress line says the
- * same thing in a sentence, and P9-2's wizard reads it to decide whether
- * Generate may be reached at all — nobody arrives at that button without
- * knowing what is missing.
+ * teaching yet rather than the two that are done. An empty cell reads
+ * "শিক্ষক দিন" on the danger tint — the words carry it, the colour only
+ * repeats it — and the progress line says the same thing in a sentence.
+ * P9-2's wizard reads the progress to decide whether Generate may be reached
+ * at all — nobody arrives at that button without knowing what is missing.
  *
  * ── Editing is a batch; saving is explicit ─────────────────────────────────
  * Changes are held locally and marked, then sent together in one transaction.
@@ -35,22 +40,22 @@
  * which half.
  *
  * ── Mobile ─────────────────────────────────────────────────────────────────
- * A matrix does not survive 360px, so the narrow layout is one CARD PER
- * SUBJECT with a row per section — the same data read down instead of across.
- * `dataTable` does that transformation for read-only rows; here every cell is
- * an editable control, so the narrow shape is built directly rather than
- * pretending a table works.
+ * 13 Responsive rule ০৩: a matrix NEVER reflows — the row × column
+ * relationship is the data. There is one matrix at every width; below 1024px
+ * its first column is frozen (sticky, with a 2px edge and a shadow) and the
+ * subject columns scroll beside it. §03 "বুড়ো আঙুলের নাগাল" puts a phone's
+ * primary at the bottom, so Save is drawn twice — small in the header, full
+ * width in the pinned footer bar — and a media query shows one. Both follow
+ * the same state.
  */
 import {
-  el, pageHeader, card, button, buttonRow, statusBadge, permissionState,
-  deniedMessage, deniedContact, announce, toast, sectionHeading, listSkeleton,
+  el, append, numText, pageHeader, button, setBusy, statusBadge, field, icon,
+  permissionState, deniedMessage, deniedContact, announce, toast, listSkeleton,
+  confirmOverlay,
 } from './ui/index.ts';
-import { emptyState, errorState } from './view-states.ts';
+import { emptyState, errorState, bnNum } from './view-states.ts';
 import { refuseUnlessOk, isDenied } from './http-status.ts';
 import type { Auth } from './auth.ts';
-
-const BN_DIGITS = '০১২৩৪৫৬৭৮৯';
-const bn = (n: number): string => String(n).replace(/\d/g, (d) => BN_DIGITS[Number(d)]);
 
 interface ClassRow { id: string; nameBn: string; levelNo: number }
 interface SectionRow { id: string; name: string; shift: string }
@@ -86,6 +91,12 @@ export interface TeachingAssignmentsViewOptions {
   onProgress?: (p: { required: number; assigned: number }) => void;
 }
 
+const TITLE = 'কে কোন বিষয় পড়ান';
+const SAVE_LABEL = 'সংরক্ষণ';
+const SAVING_LABEL = 'সংরক্ষণ হচ্ছে…';
+/** The drawn footer sentence (06 Routine §02). */
+const LEGEND = 'লাল ঘর মানে ঐ সেকশনে ঐ বিষয়ের শিক্ষক নেই — রুটিন তৈরিতে ঐ পিরিয়ডগুলো ফাঁকা থাকবে।';
+
 const key = (sectionId: string, subjectId: string) => `${sectionId}|${subjectId}`;
 
 export class TeachingAssignmentsView {
@@ -99,6 +110,15 @@ export class TeachingAssignmentsView {
   private error = '';
   /** Cell → teacherId ('' means nobody). Only cells the user actually changed. */
   private pending = new Map<string, string>();
+
+  /**
+   * The header's small Save and the footer bar's full-width one. Updated in
+   * place by renderBar(), never rebuilt, so neither a dropdown nor the button
+   * just pressed loses focus while the count moves.
+   */
+  private saveButtons: HTMLButtonElement[] = [];
+  /** The progress line inside #assign-bar, refilled in place. */
+  private statusEl: HTMLElement | null = null;
 
   /** Resolved once, then reused for every class switch and save. */
   private yearId = '';
@@ -191,6 +211,12 @@ export class TeachingAssignmentsView {
       (c) => c.sectionId === sectionId && c.subjectId === subjectId)?.teacherId ?? '';
   }
 
+  /** Mark a cell's state for CSS: unsaved (neutral edge) and empty (the red "শিক্ষক দিন" box). */
+  private static mark(sel: HTMLSelectElement, dirty: boolean): void {
+    if (dirty) sel.dataset.dirty = 'true'; else delete sel.dataset.dirty;
+    if (sel.value === '') sel.dataset.empty = 'true'; else delete sel.dataset.empty;
+  }
+
   /** One editable cell: a real <select>, so keyboard and screen reader work. */
   private picker(section: SectionRow, subject: SubjectRow): HTMLElement {
     const d = this.o.doc;
@@ -198,34 +224,35 @@ export class TeachingAssignmentsView {
     const k = key(section.id, subject.id);
     const chosen = this.currentTeacher(section.id, subject.id);
 
-    const sel = d.createElement('select');
-    sel.className = 'field-input assign-cell';
-    // Named explicitly: a screen reader landing in a grid cell announces
-    // neither its column header nor its row header.
-    sel.setAttribute('aria-label', `${subject.nameBn} — ${section.name} শাখার শিক্ষক`);
-    // Both layouts are rendered and CSS picks one, so every cell exists TWICE
-    // in the DOM. The pending map is keyed by cell so the state stays right,
-    // but the twin control would keep showing the old name until a save —
-    // and a tablet crossing the breakpoint would then display stale choices.
-    // The key lets the change handler move both.
-    sel.dataset.cellKey = k;
-    if (this.pending.has(k)) sel.dataset.dirty = 'true';
+    const sel = el(d, 'select', {
+      // The sheet's select, drawn as the design's 36px teacher box by
+      // `.assign-matrix .assign-cell` (the tap floor keeps it 44px, R8).
+      className: 'ui-input ui-select assign-cell',
+      attrs: {
+        // Named explicitly: a screen reader landing in a grid cell announces
+        // neither its column header nor its row header.
+        'aria-label': `${subject.nameBn} — ${section.name} শাখার শিক্ষক`,
+      },
+      // The key a test (and a future bulk action) finds a cell by.
+      data: { cellKey: k },
+    });
 
-    const none = d.createElement('option');
-    none.value = '';
-    none.textContent = '— কেউ নয় —';
-    sel.append(none);
+    // The drawn empty cell reads "শিক্ষক দিন". Value '' is still "nobody",
+    // which is also how a coordinator removes a teacher.
+    sel.append(el(d, 'option', { text: 'শিক্ষক দিন', attrs: { value: '' } }));
 
     for (const t of g.teachers) {
-      const opt = d.createElement('option');
-      opt.value = t.id;
       // The competency register is a HINT, never a filter: it is empty in
       // every school on this deployment, so filtering by it would offer an
       // empty list and make the screen unusable.
-      opt.textContent = t.teaches.includes(subject.id) ? `${t.nameBn} ✓` : t.nameBn;
+      const opt = el(d, 'option', {
+        text: t.teaches.includes(subject.id) ? `${t.nameBn} ✓` : t.nameBn,
+        attrs: { value: t.id },
+      });
       if (t.id === chosen) opt.selected = true;
       sel.append(opt);
     }
+    TeachingAssignmentsView.mark(sel, this.pending.has(k));
 
     sel.addEventListener('change', () => {
       const saved = g.cells.find(
@@ -236,51 +263,50 @@ export class TeachingAssignmentsView {
       if (sel.value === saved) this.pending.delete(k);
       else this.pending.set(k, sel.value);
 
-      // Move the twin in the other layout with it.
-      const dirty = this.pending.has(k) ? 'true' : '';
-      for (const twin of d.querySelectorAll<HTMLSelectElement>(
-        `select.assign-cell[data-cell-key="${CSS.escape(k)}"]`)) {
-        twin.value = sel.value;
-        twin.dataset.dirty = dirty;
-      }
+      // One matrix at every width, so there is no twin to move — only this
+      // cell's own marks, then the bar.
+      TeachingAssignmentsView.mark(sel, this.pending.has(k));
       this.renderBar();
     });
     return sel;
   }
 
-  /** Wide: subjects down, sections across — the office's own sheet. */
-  private matrix(): HTMLElement {
+  /**
+   * The drawn block: the class strip, the matrix (sections down, subjects
+   * across), the legend footer and the save bar — one surface, one frame.
+   */
+  private matrix(shell: HTMLElement): void {
     const d = this.o.doc;
     const g = this.grid as Grid;
 
     const table = el(d, 'table', { className: 'ui-table assign-matrix' });
+    // The design draws no caption; the table still needs a name.
     table.append(el(d, 'caption', {
+      className: 'ui-sr-only',
       text: `${g.classes.find((c) => c.id === g.classId)?.nameBn ?? ''}`
-        + ' — বিষয় ও শাখাভিত্তিক শিক্ষক',
+        + ' — শাখা ও বিষয়ভিত্তিক শিক্ষক',
     }));
 
     const head = el(d, 'thead');
     const hr = el(d, 'tr');
-    hr.append(el(d, 'th', { text: 'বিষয়', attrs: { scope: 'col' } }));
-    for (const s of g.sections) {
-      hr.append(el(d, 'th', { text: `${s.name} শাখা`, attrs: { scope: 'col' } }));
+    hr.append(el(d, 'th', { text: 'সেকশন', attrs: { scope: 'col' } }));
+    for (const sub of g.subjects) {
+      const th = el(d, 'th', { attrs: { scope: 'col' } });
+      append(th, el(d, 'span', { className: 'assign-subject' }, ...numText(d, sub.nameBn)));
+      // The weekly load, because it is what makes an assignment mean
+      // something: six periods is a different ask from two.
+      append(th, el(d, 'span', { className: 'ta-load' },
+        ...numText(d, `সপ্তাহে ${bnNum(sub.periodsPerWeek)}টি পিরিয়ড`
+          + (sub.requiresCapability ? ' · ল্যাব লাগবে' : ''))));
+      hr.append(th);
     }
     head.append(hr); table.append(head);
 
     const body = el(d, 'tbody');
-    for (const sub of g.subjects) {
+    for (const sec of g.sections) {
       const tr = el(d, 'tr');
-      const th = el(d, 'th', { attrs: { scope: 'row' } });
-      th.append(el(d, 'span', { className: 'assign-subject', text: sub.nameBn }));
-      // The weekly load, because it is what makes an assignment mean
-      // something: six periods is a different ask from two.
-      th.append(el(d, 'span', {
-        className: 'ui-cell-meta',
-        text: `সপ্তাহে ${bn(sub.periodsPerWeek)}টি পিরিয়ড`
-          + (sub.requiresCapability ? ' · ল্যাব লাগবে' : ''),
-      }));
-      tr.append(th);
-      for (const sec of g.sections) {
+      tr.append(el(d, 'th', { attrs: { scope: 'row' } }, ...numText(d, `${sec.name} শাখা`)));
+      for (const sub of g.subjects) {
         const td = el(d, 'td');
         td.append(this.picker(sec, sub));
         tr.append(td);
@@ -289,66 +315,68 @@ export class TeachingAssignmentsView {
     }
     table.append(body);
 
+    // The section heading this block had ("শিক্ষক নির্ধারণ", h2) is not drawn
+    // — its status moved to the header chip — but a reader's heading
+    // navigation still lands here (R8), so it stays for them only.
+    shell.append(el(d, 'h2', { className: 'ui-sr-only', text: 'শিক্ষক নির্ধারণ' }));
+
     const scroll = el(d, 'div', { className: 'ui-table-scroll' });
     scroll.append(table);
-    return scroll;
+    shell.append(scroll);
+
+    shell.append(el(d, 'p', { className: 'ta-legend', text: LEGEND }));
+
+    // The bar is the shell's last child so it can pin to the bottom of a
+    // phone's screen for the whole height of the matrix.
+    const bar = el(d, 'div', { className: 'assign-bar' });
+    bar.id = 'assign-bar';
+    this.statusEl = el(d, 'p', { className: 'ta-status' });
+    append(this.statusEl, ...this.statusChildren());
+    bar.append(this.statusEl, this.saveButton('ta-save-bottom', true));
+    shell.append(bar);
   }
 
-  /** Narrow: one card per subject, a row per section. Same data, read down. */
-  private stack(): HTMLElement {
-    const d = this.o.doc;
-    const g = this.grid as Grid;
-    const wrap = el(d, 'div', { className: 'assign-stack' });
-
-    for (const sub of g.subjects) {
-      const rows = el(d, 'div', { className: 'ui-stack' });
-      for (const sec of g.sections) {
-        const row = el(d, 'label', { className: 'field assign-row' });
-        row.append(el(d, 'span', { className: 'field-label', text: `${sec.name} শাখা` }));
-        row.append(this.picker(sec, sub));
-        rows.append(row);
-      }
-      wrap.append(card(d, {
-        title: sub.nameBn,
-        subtitle: `সপ্তাহে ${bn(sub.periodsPerWeek)}টি পিরিয়ড`
-          + (sub.requiresCapability ? ' · ল্যাব লাগবে' : ''),
-        glyph: 'book-open',
-        headingLevel: 3,
-      }, rows));
-    }
-    return wrap;
-  }
-
-  /** The save bar, re-rendered alone so a dropdown never loses focus. */
-  private renderBar(): void {
-    const bar = this.o.doc.getElementById('assign-bar');
-    if (!bar) return;
-    bar.textContent = '';
-    for (const node of this.barChildren()) bar.append(node);
-  }
-
-  private barChildren(): HTMLElement[] {
+  /** "১ / ৪ টি ঘর পূরণ হয়েছে · ১টি পরিবর্তন সংরক্ষণ করা হয়নি", numbers in the numeral face. */
+  private statusChildren(): HTMLElement[] {
     const d = this.o.doc;
     const g = this.grid as Grid;
     const dirty = this.pending.size;
-
-    const status = el(d, 'p', { className: 'ui-card-note' });
-    status.append(el(d, 'span', {
-      text: `${bn(g.progress.assigned)} / ${bn(g.progress.required)} টি ঘর পূরণ হয়েছে`,
-    }));
+    const out = [el(d, 'span', {},
+      ...numText(d, `${bnNum(g.progress.assigned)} / ${bnNum(g.progress.required)} টি ঘর পূরণ হয়েছে`))];
     if (dirty > 0) {
-      status.append(el(d, 'span', {
-        className: 'assign-dirty',
-        text: ` · ${bn(dirty)}টি পরিবর্তন সংরক্ষণ করা হয়নি`,
-      }));
+      out.push(el(d, 'span', { className: 'assign-dirty' },
+        ...numText(d, ` · ${bnNum(dirty)}টি পরিবর্তন সংরক্ষণ করা হয়নি`)));
     }
+    return out;
+  }
 
-    return [status, buttonRow(d, button(d, {
-      label: this.saving ? 'সংরক্ষণ হচ্ছে…' : 'সংরক্ষণ করুন',
+  /** Save. Small in the header as drawn; a full-width bar button on a phone. */
+  private saveButton(className: string, bottom: boolean): HTMLButtonElement {
+    const btn = button(this.o.doc, {
+      label: this.saving ? SAVING_LABEL : SAVE_LABEL,
       variant: 'primary',
-      disabled: this.saving || dirty === 0,
+      size: bottom ? 'md' : 'sm',
+      block: bottom,
+      className,
+      disabled: this.saving || this.pending.size === 0,
       onClick: () => { void this.onSave(); },
-    }))];
+    });
+    this.saveButtons.push(btn);
+    return btn;
+  }
+
+  /** The progress line and both Save buttons, updated in place so focus stays put. */
+  private renderBar(): void {
+    for (const btn of this.saveButtons) {
+      setBusy(btn, this.saving);
+      const label = btn.querySelector('.btn-label');
+      if (label) label.textContent = this.saving ? SAVING_LABEL : SAVE_LABEL;
+      if (!this.saving) btn.disabled = this.pending.size === 0;
+    }
+    const status = this.statusEl;
+    if (!status || !this.grid) return;
+    status.textContent = '';
+    append(status, ...this.statusChildren());
   }
 
   private async onSave(): Promise<void> {
@@ -365,17 +393,45 @@ export class TeachingAssignmentsView {
       announce(this.o.doc, msg);
       return;
     }
-    toast(this.o.doc, { message: `${bn(n)}টি পরিবর্তন সংরক্ষণ হয়েছে`, tone: 'success' });
+    toast(this.o.doc, { message: `${bnNum(n)}টি পরিবর্তন সংরক্ষণ হয়েছে`, tone: 'success' });
     await this.load(this.grid?.classId ?? null);
+  }
+
+  /** The drawn header chip: the gaps as a count, or "সম্পূর্ণ" once there are none. */
+  private gapChip(g: Grid): HTMLElement {
+    const gap = Math.max(0, g.progress.required - g.progress.assigned);
+    return gap > 0
+      ? statusBadge(this.o.doc, { state: 'unassigned', label: `${bnNum(gap)} ঘর ফাঁকা`, tone: 'danger' })
+      : statusBadge(this.o.doc, { state: 'active', label: 'সম্পূর্ণ', tone: 'success' });
+  }
+
+  /**
+   * Switching class throws the pending edits away, so it asks first — in the
+   * app's own confirm (a bottom sheet on a phone), never a bare confirm()
+   * (IMPLEMENTATION §7). The select goes back to the class on screen until
+   * the answer is yes.
+   */
+  private switchClass(value: string, input: HTMLSelectElement, current: string): void {
+    if (this.pending.size === 0) { void this.load(value); return; }
+    input.value = current;
+    confirmOverlay(this.o.doc, {
+      title: 'সংরক্ষণ করা হয়নি',
+      body: 'সংরক্ষণ না করা পরিবর্তন আছে। শ্রেণি বদলালে সেগুলো হারিয়ে যাবে।',
+      confirmLabel: 'বাদ দিন',
+      danger: true,
+      onConfirm: () => { void this.load(value); },
+    });
   }
 
   private render(): void {
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';
+    this.saveButtons = [];
+    this.statusEl = null;
 
     if (this.denied) {
-      root.append(pageHeader(d, { title: 'কে কোন বিষয় পড়ান' }));
+      root.append(pageHeader(d, { title: TITLE }));
       root.append(permissionState(d, {
         message: deniedMessage(this.deniedErr, 'শিক্ষক নির্ধারণ'),
         contact: deniedContact(this.deniedErr),
@@ -383,18 +439,22 @@ export class TeachingAssignmentsView {
       return;
     }
 
+    const g = this.grid;
+    const ready = !this.loading && !!g && g.classes.length > 0 && g.subjects.length > 0;
+
+    // The drawn bar (06 Routine §02): title, the gap chip, the small primary.
     root.append(pageHeader(d, {
-      title: 'কে কোন বিষয় পড়ান',
-      subtitle: 'রুটিন তৈরির আগে প্রতিটি শাখার প্রতিটি বিষয়ে একজন শিক্ষক দিন',
+      title: TITLE,
+      actions: ready && g ? [this.gapChip(g)] : undefined,
+      primary: ready ? this.saveButton('ta-save-top', false) : undefined,
     }));
 
     if (this.loading) { root.append(listSkeleton(d, 6)); return; }
 
-    if (this.error && !this.grid) {
+    if (this.error && !g) {
       root.append(errorState(d, this.error, () => void this.load(null)));
       return;
     }
-    const g = this.grid;
     if (!g) {
       root.append(emptyState(d, {
         glyph: 'calendar',
@@ -412,61 +472,47 @@ export class TeachingAssignmentsView {
     }
 
     // A save failed. Loud, above the grid, and the grid stays editable.
-    if (this.error) root.append(errorState(d, this.error));
+    if (this.error) {
+      const failed = errorState(d, this.error);
+      failed.classList.add('ta-error');
+      root.append(failed);
+    }
+
+    const shell = el(d, 'div', { className: 'ui-data ta-shell' });
+    root.append(shell);
+
+    // Offline is a statement about the data on screen, not a failure.
     if (this.offline) {
-      root.append(el(d, 'p', {
-        className: 'ui-banner-offline',
-        text: 'অফলাইন — সর্বশেষ সংরক্ষিত তথ্য দেখানো হচ্ছে।',
-      }));
+      shell.append(el(d, 'p', { className: 'offline-banner ta-offline', attrs: { role: 'status' } },
+        icon(d, 'wifi-off', 'offline-icon'),
+        el(d, 'span', { text: 'অফলাইন — সর্বশেষ সংরক্ষিত তথ্য দেখানো হচ্ছে।' })));
     }
 
     // A <select> and not tabs: a college has twelve classes, and tabs would
-    // wrap into three rows on a phone.
-    const picker = el(d, 'label', { className: 'field' });
-    picker.append(el(d, 'span', { className: 'field-label', text: 'শ্রেণি' }));
-    const sel = d.createElement('select');
-    sel.className = 'field-input';
-    for (const c of g.classes) {
-      const opt = d.createElement('option');
-      opt.value = c.id; opt.textContent = c.nameBn;
-      if (c.id === g.classId) opt.selected = true;
-      sel.append(opt);
-    }
-    sel.addEventListener('change', () => {
-      if (this.pending.size > 0
-        && !confirm('সংরক্ষণ না করা পরিবর্তন আছে। শ্রেণি বদলালে সেগুলো হারিয়ে যাবে।')) {
-        sel.value = g.classId ?? '';
-        return;
-      }
-      void this.load(sel.value);
+    // wrap into three rows on a phone. The design draws the matrix without
+    // one; the API serves one class at a time, so the strip heads the block.
+    const current = g.classId ?? '';
+    const cls = field(d, {
+      kind: 'select',
+      name: 'classId',
+      label: 'শ্রেণি',
+      className: 'ta-class',
+      value: current,
+      options: g.classes.map((c) => ({ value: c.id, label: c.nameBn })),
+      onChange: (value) => {
+        this.switchClass(value, cls.input as HTMLSelectElement, current);
+      },
     });
-    picker.append(sel);
-    root.append(picker);
+    shell.append(el(d, 'div', { className: 'ta-picker' }, cls.root));
 
     if (g.subjects.length === 0) {
-      root.append(emptyState(d, {
+      shell.append(emptyState(d, {
         glyph: 'book-open',
         message: 'এই শ্রেণিতে কোনো বিষয় নির্ধারিত নেই। পাঠ্যসূচি ছাড়া রুটিন তৈরি করা যাবে না।',
       }));
       return;
     }
 
-    const complete = g.progress.assigned === g.progress.required;
-    root.append(sectionHeading(d, {
-      title: 'শিক্ষক নির্ধারণ',
-      action: statusBadge(d, complete
-        ? { state: 'active', label: 'সম্পূর্ণ', tone: 'success' }
-        : { state: 'pending', label: 'অসম্পূর্ণ', tone: 'warn' }),
-    }));
-
-    // Both shapes render and CSS chooses. Building only one would mean a
-    // resize across the breakpoint showed the wrong thing until reload.
-    root.append(this.matrix());
-    root.append(this.stack());
-
-    const bar = el(d, 'div', { className: 'assign-bar' });
-    bar.id = 'assign-bar';
-    for (const node of this.barChildren()) bar.append(node);
-    root.append(bar);
+    this.matrix(shell);
   }
 }

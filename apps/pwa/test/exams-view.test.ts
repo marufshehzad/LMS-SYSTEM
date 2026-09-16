@@ -256,12 +256,93 @@ describe('the exam register reports what the server says', () => {
     assert.equal(patch?.body.academicYearId, undefined);
   });
 
+  test('the weight is shown in Bangla digits and a Bangla-digit weight is sent as that number', async () => {
+    // Number('৫০') is NaN, JSON sends it as null, and the server reads null
+    // as 0 on a create and as "unchanged" on an edit — both reported as saved.
+    const s = await mount();
+    byLabel('নতুন পরীক্ষা')?.click();
+    await settle();
+    const weight = () => doc().querySelector<HTMLInputElement>('input[name="weightPercent"]');
+    assert.equal(weight()?.value, '১০০', 'the default weight is a figure, in Bangla digits');
+    doc().querySelector<HTMLInputElement>('input[name="nameBn"]')!.value = 'নতুন';
+    weight()!.value = '৫০';
+    byLabel('পরীক্ষা তৈরি করুন')?.click();
+    await settle();
+    assert.equal(s.writes[0]?.body.weightPercent, 50,
+      'a weight typed in Bangla digits must reach the server as that number');
+
+    for (const el of [...doc().querySelectorAll('.ui-scrim')]) el.remove();
+    const planned = [...root().querySelectorAll('tbody tr')]
+      .find((r) => (r.textContent ?? '').includes('মাসিক'));
+    planned?.querySelector<HTMLElement>('button')?.click();
+    await settle();
+    assert.equal(weight()?.value, '২০', 'an edit shows the stored weight in Bangla digits');
+    byLabel('সংরক্ষণ করুন')?.click();
+    await settle();
+    assert.equal(s.writes[1]?.method, 'PATCH');
+    assert.equal(s.writes[1]?.body.weightPercent, 20,
+      'saving an untouched edit must send the weight it shows, not null');
+  });
+
+  test('an empty or unreadable weight is refused in the drawer and nothing is sent', async () => {
+    const s = await mount();
+    byLabel('নতুন পরীক্ষা')?.click();
+    await settle();
+    doc().querySelector<HTMLInputElement>('input[name="nameBn"]')!.value = 'নতুন';
+    for (const bad of ['', 'পঞ্চাশ']) {
+      doc().querySelector<HTMLInputElement>('input[name="weightPercent"]')!.value = bad;
+      byLabel('পরীক্ষা তৈরি করুন')?.click();
+      await settle();
+      assert.equal(s.writes.length, 0, `a weight of "${bad}" must not be sent — the server would store 0`);
+      assert.ok(drawer(), 'the drawer must stay open so the weight can be corrected');
+      const alert = drawer()?.querySelector<HTMLElement>('.ui-field-error[role=alert]');
+      assert.equal(alert?.hidden, false);
+      assert.match(alert?.textContent ?? '', /ওজন ০ থেকে ১০০-এর মধ্যে দিন/);
+      // Its figures in the numeral face (R6), with the text unchanged.
+      assert.deepEqual([...(alert?.querySelectorAll('.n') ?? [])].map((n) => n.textContent), ['০', '১০০']);
+    }
+    assert.equal(doc().querySelector<HTMLInputElement>('input[name="nameBn"]')?.value, 'নতুন',
+      'the typed name must survive the refusal');
+  });
+
   test('a role that cannot manage gets no create button and no row actions', async () => {
     await mount({ exams: { canManage: false } });
     assert.equal(byLabel('নতুন পরীক্ষা'), undefined);
     assert.equal(root().querySelectorAll('tbody button').length, 0);
     // But it still reads the list — this endpoint is staff-wide by design.
     assert.equal(root().querySelectorAll('tbody tr').length, 2);
+  });
+
+  test('one accent: the create action is the page header\'s only primary, and the drawer has one', async () => {
+    // Ata Ekta §3. The GPA toggle used to be a primary button beside the
+    // drawer's save — two accents — and its "off" look never changed.
+    await mount();
+    const primaries = [...root().querySelectorAll('.btn-primary')];
+    assert.equal(primaries.length, 1, 'the register must carry exactly one primary action');
+    assert.ok(primaries[0]?.closest('.page-header'), 'the create action belongs in the page header');
+    assert.equal(primaries[0]?.textContent?.trim(), 'নতুন পরীক্ষা');
+
+    byLabel('নতুন পরীক্ষা')?.click();
+    await settle();
+    assert.equal(drawer()?.querySelectorAll('.btn-primary').length, 1,
+      'the drawer\'s only primary is its save button');
+  });
+
+  test('the toggles report their state through aria-pressed', async () => {
+    // The pressed look is drawn from aria-pressed, so the attribute IS the
+    // visible state — it has to follow every click.
+    await mount();
+    byLabel('নতুন পরীক্ষা')?.click();
+    await settle();
+    const gpa = byLabel('জিপিএ-তে গণ্য হবে');
+    assert.equal(gpa?.getAttribute('aria-pressed'), 'true');
+    gpa?.click();
+    assert.equal(gpa?.getAttribute('aria-pressed'), 'false');
+    const section = [...doc().querySelectorAll('[role=dialog] button')]
+      .find((b) => /\(.*জন\)/.test(b.textContent ?? ''));
+    assert.equal(section?.getAttribute('aria-pressed'), 'false');
+    (section as HTMLElement | undefined)?.click();
+    assert.equal(section?.getAttribute('aria-pressed'), 'true');
   });
 
   test('an empty year explains what will not work, and offers the way out', async () => {

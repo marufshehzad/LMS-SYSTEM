@@ -84,7 +84,9 @@ describe('B-34 — the user list is a table on a desktop', () => {
 
   test('the columns are the ones an office needs, in order', () => {
     const heads = [...root().querySelectorAll('thead th')].map((h) => h.textContent);
-    assert.deepEqual(heads, ['নাম', 'ভূমিকা', 'আইডি', 'অবস্থা', 'ব্যবস্থা']);
+    // 05 Principal §03 draws মোবাইল after ভূমিকা. It is a manager's column
+    // (this fixture is canManage) — see the reader test below.
+    assert.deepEqual(heads, ['নাম', 'ভূমিকা', 'মোবাইল', 'আইডি', 'অবস্থা', 'ব্যবস্থা']);
   });
 
   test('the id column is the SCHOOL’s code, never the uuid', () => {
@@ -136,6 +138,7 @@ describe('B-34 — the user list is a table on a desktop', () => {
     await settle();
     const heads = [...root().querySelectorAll('thead th')].map((h) => h.textContent);
     assert.ok(!heads.includes('ব্যবস্থা'));
+    assert.ok(!heads.includes('মোবাইল'), 'a reader who may not manage sees no phone column');
     assert.equal(root().querySelectorAll('button[data-action="issue-code"]').length, 0);
   });
 });

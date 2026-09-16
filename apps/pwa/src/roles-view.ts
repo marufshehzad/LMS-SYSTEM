@@ -1,101 +1,145 @@
 /**
- * Roles & Access (ভূমিকা ও অ্যাক্সেস) — visualises the PRD §1 RBAC surface.
+ * Roles & Access (ভূমিকা ও অ্যাক্সেস) — 08 Admin & IT §05.
  *
- * Static: the 10 role codes are defined by the migrations and don't change
- * per-tenant; a live user-count column is fetched from the roster endpoint
- * when authenticated (this makes it useful for real principals) and falls
- * back to descriptive counts in demo mode.
+ * A static, read-only role × capability matrix: ten roles down, five
+ * capabilities across, a check where the role is allowed and a minus where it
+ * is not. It explains what each role may do; it changes nothing. Permissions
+ * are changed on the users screen, and they are enforced by the endpoint
+ * guards and RLS on the server — never by what this page, or the sidebar,
+ * draws. Nothing is fetched: the view renders synchronously from the
+ * precached bundle.
+ *
+ * The layout is the design's. The VALUES are the server's: the page tells a
+ * principal "this page decides what is permitted", so a cell that disagrees
+ * with the enforced allowlist is a false security fact, and the drawing does
+ * not get to overrule the gate. Each column below names the gate it mirrors.
+ * If a gate changes, change the matrix in the same commit.
  */
-import { pageHeader, card, dataTable, sectionHeading, statusBadge, el } from './ui/index.ts';
+import { pageHeader, dataTable, badge, roleLabel, el, icon } from './ui/index.ts';
+import { formatCount } from '../../../packages/ui-core/src/format.ts';
 
 export interface RolesViewOptions {
   root: HTMLElement;
   doc: Document;
 }
 
-const ROLES: { code: string; nameBn: string; scope: string; canDo: string; tier: 'system' | 'management' | 'academic' | 'finance' | 'people' }[] = [
-  { code: 'super_admin',          nameBn: 'সুপার অ্যাডমিন',       scope: 'platform', canDo: 'পুরো প্ল্যাটফর্ম নিয়ন্ত্রণ',                       tier: 'system' },
-  { code: 'school_owner',         nameBn: 'প্রতিষ্ঠান মালিক',      scope: 'tenant',   canDo: 'বিদ্যালয়ের সব কনফিগ ও চুক্তি',                   tier: 'management' },
-  { code: 'principal',            nameBn: 'অধ্যক্ষ',               scope: 'tenant',   canDo: 'ফলাফল প্রকাশ, নিরাপত্তা সতর্কতা, সব রিপোর্ট',        tier: 'management' },
-  { code: 'academic_coordinator', nameBn: 'একাডেমিক কো-অর্ডিনেটর', scope: 'tenant',   canDo: 'রুটিন, বদলি, পরীক্ষা পরিচালনা',                     tier: 'academic' },
-  { code: 'dept_head',            nameBn: 'বিভাগ প্রধান',          scope: 'tenant',   canDo: 'বিষয়-ভিত্তিক মূল্যায়ন, দলিল অনুমোদন',              tier: 'academic' },
-  { code: 'class_teacher',        nameBn: 'শ্রেণি শিক্ষক',         scope: 'section',  canDo: 'নিজের সেকশনের হাজিরা, রোস্টার, রুটিন',              tier: 'people' },
-  { code: 'subject_teacher',      nameBn: 'বিষয় শিক্ষক',           scope: 'section',  canDo: 'শেখানো বিষয়ের নম্বর ও ক্লাসের লগ',                  tier: 'people' },
-  { code: 'accountant',           nameBn: 'হিসাবরক্ষক',            scope: 'tenant',   canDo: 'ইনভয়েস, রসিদ, MFS পুনর্মিলন, লেজার',              tier: 'finance' },
-  { code: 'student',              nameBn: 'শিক্ষার্থী',            scope: 'self',     canDo: 'নিজের রুটিন, ফলাফল, ফি, শিখো টিউটর',                tier: 'people' },
-  { code: 'guardian',             nameBn: 'অভিভাবক',               scope: 'self',     canDo: 'নিজ সন্তানের হাজিরা, ফলাফল, ফি, রসিদ',              tier: 'people' },
+type Cap = 'attendance' | 'marks' | 'publish' | 'money' | 'settings';
+
+/**
+ * The five questions every role is compared on, in the design's column order.
+ * Each is ONE named act, not a whole area — "anything touching money" would
+ * tick almost every staff row and stop answering anything.
+ *
+ * - হাজিরা   mark a student's attendance: `attendance_write_scope` and
+ *            `attendance_sessions_scope` WITH CHECK, db/migrations/
+ *            010_rls_policies.sql:177-196 — principal, academic_coordinator,
+ *            or a teacher of that section (`app.my_section_ids()`, 010:98-108).
+ *            Staff attendance (063, MARK_ROLES) is a different register.
+ * - নম্বর    enter exam marks: `marks_write_scope`, 010:213-220 — principal,
+ *            academic_coordinator, or a teacher of that section.
+ * - প্রকাশ   publish results: PUBLISH_ROLES, services/academics-svc/api/
+ *            publish.ts:35 — principal, school_owner, academic_coordinator.
+ * - টাকা     bill, collect, keep the ledger: BILLING_ROLES and LEDGER_ROLES,
+ *            services/finance-svc/api/index.ts:200 and :355; COLLECT_ROLES,
+ *            payments.ts:53 — principal, school_owner, accountant. Setting up
+ *            fee heads (FEE_ADMIN_ROLES, feestructures.ts:72) is not this act.
+ * - সেটিংস   change the school's settings: SETTINGS_ROLES, services/ops-svc/
+ *            api/settings.ts:50, mirrored by MANAGE_SETTINGS in app.ts —
+ *            principal, school_owner, it_admin, academic_coordinator.
+ */
+const CAPS: { key: Cap; header: string }[] = [
+  { key: 'attendance', header: 'হাজিরা' },
+  { key: 'marks',      header: 'নম্বর' },
+  { key: 'publish',    header: 'প্রকাশ' },
+  { key: 'money',      header: 'টাকা' },
+  { key: 'settings',   header: 'সেটিংস' },
 ];
 
-/** `platform` and `tenant` are different KINDS of reach, not jargon. */
-const SCOPE_BN: Record<string, string> = {
-  platform: 'পুরো প্ল্যাটফর্ম',
-  tenant: 'নিজের প্রতিষ্ঠান',
-};
+interface MatrixRow { code: string; allow: Cap[] }
 
-const TIER_LABEL: Record<string, string> = {
-  system: 'সিস্টেম', management: 'ব্যবস্থাপনা', academic: 'একাডেমিক', finance: 'অর্থ', people: 'ব্যবহারকারী',
-};
+/**
+ * The rows in the design's order (not rank order — keep it), with the values
+ * the gates above enforce. Two departures from the drawing, both because the
+ * drawing is wrong about the server:
+ * - academic_coordinator may change সেটিংস (SETTINGS_ROLES); the drawing
+ *   showed a minus.
+ * - school_owner is drawn nowhere, but holds publish, money and settings
+ *   rights. It sits beside the principal, and with it the table has the ten
+ *   rows the design's own chip counts.
+ * A teacher's হাজিরা and নম্বর are for the sections they teach, a dept_head's
+ * the same way; the matrix answers "may this role do it", not "where".
+ */
+const MATRIX: MatrixRow[] = [
+  { code: 'class_teacher',        allow: ['attendance', 'marks'] },
+  { code: 'subject_teacher',      allow: ['attendance', 'marks'] },
+  { code: 'dept_head',            allow: ['attendance', 'marks'] },
+  { code: 'accountant',           allow: ['money'] },
+  { code: 'academic_coordinator', allow: ['attendance', 'marks', 'publish', 'settings'] },
+  { code: 'principal',            allow: ['attendance', 'marks', 'publish', 'money', 'settings'] },
+  { code: 'school_owner',         allow: ['publish', 'money', 'settings'] },
+  { code: 'it_admin',             allow: ['settings'] },
+  { code: 'student',              allow: [] },
+  { code: 'guardian',             allow: [] },
+];
+
+/**
+ * One capability cell: a check (allowed) or a minus (not). The glyph is
+ * aria-hidden, so the word beside it is what a screen reader hears — the
+ * shape, not only the colour, carries the meaning on screen.
+ */
+function mark(d: Document, allowed: boolean): HTMLElement {
+  return el(d, 'span', { className: 'roles-mark', data: { allowed: allowed ? 'true' : 'false' } },
+    allowed ? icon(d, 'check') : icon(d, 'minus'),
+    el(d, 'span', { className: 'ui-sr-only', text: allowed ? 'অনুমোদিত' : 'অনুমোদিত নয়' }));
+}
 
 export class RolesView {
   constructor(o: RolesViewOptions) {
     const d = o.doc;
     o.root.textContent = '';
 
+    // Title left, one neutral chip at the right edge — the design bar has no
+    // subtitle and no button. `actions`, not `badge`: the badge slot sits
+    // beside the title. badge() wraps the count in `.n` itself (R6). The count
+    // is the table's own, so the chip cannot claim a role the table lacks.
     o.root.append(pageHeader(d, {
       title: 'ভূমিকা ও অ্যাক্সেস',
-      subtitle: 'কে কী দেখতে ও করতে পারেন — এবং কেন অন্য প্রতিষ্ঠানের তথ্য কখনো দেখা যায় না',
+      actions: [badge(d, { label: `${formatCount(MATRIX.length, 'bn')} ভূমিকা · RLS`, tone: 'neutral' })],
     }));
 
-    // The isolation statement. A `card` rather than a bespoke `.iso-banner`:
-    // it is one fact with a title, which is what a card is.
-    o.root.append(card(d, {
-      title: 'বিচ্ছিন্নতা সক্রিয়',
-      glyph: 'lock',
-      tone: 'success',
-      headingLevel: 2,
-      action: statusBadge(d, { state: 'published', label: 'সবসময় চালু' }),
-    },
-      el(d, 'p', {
-        className: 'ui-card-note',
-        text: 'প্রতিটি ব্যবহারকারীর অনুরোধ ডাটাবেস স্তরে নিজের প্রতিষ্ঠানে সীমাবদ্ধ করা হয় — ' +
-              'অন্য বিদ্যালয়ের কোনো সারি কখনো দৃশ্যমান হয় না। এটি কোনো সেটিং নয়; ' +
-              'বন্ধ করার উপায় নেই।',
-      }),
-    ));
+    // A matrix is the original tabular data: the row × column relationship IS
+    // the information, so it stays a table at every width (13 Responsive
+    // rule ০৩) — the list dataTable also emits is hidden by the screen's CSS.
+    const matrix = dataTable<MatrixRow>(d, {
+      caption: 'ভূমিকা ও অনুমতির ছক',
+      className: 'roles-matrix',
+      rows: MATRIX,
+      rowKey: (r) => r.code,
+      columns: [
+        // roleLabel: the one vocabulary, so the users list, the audit log and
+        // the profile menu name a role exactly as this page does.
+        { key: 'role', header: 'ভূমিকা', mobile: 'title', cell: (r) => roleLabel(r.code) },
+        ...CAPS.map((c) => ({
+          key: c.key,
+          header: c.header,
+          mobile: 'meta' as const,
+          cell: (r: MatrixRow) => mark(d, r.allow.includes(c.key)),
+        })),
+      ],
+    });
 
-    // Grouped by tier, and each tier is a TABLE. A role matrix is the
-    // original tabular data: ten roles compared on the same three questions.
-    // What was here — 11 full-width `.role-card` strips at 1110px — made a
-    // reader hold one role in their head to compare it with the next.
-    const tiers = ['system', 'management', 'academic', 'finance', 'people'] as const;
-    for (const tier of tiers) {
-      const inTier = ROLES.filter((r) => r.tier === tier);
-      if (inTier.length === 0) continue;
-
-      o.root.append(sectionHeading(d, { title: TIER_LABEL[tier] }));
-      o.root.append(dataTable(d, {
-        caption: `${TIER_LABEL[tier]} ভূমিকা`,
-        rows: inTier,
-        rowKey: (r) => r.code,
-        columns: [
-          { key: 'name', header: 'ভূমিকা', mobile: 'title', cell: (r) => r.nameBn,
-            width: 'minmax(0, 1.4fr)' },
-          { key: 'can', header: 'কী করতে পারেন', mobile: 'subtitle', cell: (r) => r.canDo,
-            width: 'minmax(0, 2.4fr)' },
-          { key: 'scope', header: 'পরিসর', mobile: 'status', width: '150px',
-            cell: (r) => statusBadge(d, {
-              // A platform role and a school role are different KINDS of
-              // access, and that difference is the point of this page.
-              state: r.scope === 'platform' ? 'overdue' : 'invited',
-              label: SCOPE_BN[r.scope] ?? r.scope,
-            }) },
-          // The code is what appears in an audit entry and in a JWT, so an IT
-          // admin genuinely needs it — at a desk, not on a phone.
-          { key: 'code', header: 'কোড', mobile: 'hidden',
-            cell: (r) => el(d, 'code', { className: 'role-code', text: r.code }),
-            width: 'minmax(0, 1.4fr)' },
-        ],
-      }));
-    }
+    // The info band is the top of the same white panel as the table, with no
+    // gap between them, so it goes inside the table's shell, before the table.
+    matrix.prepend(el(d, 'p', {
+      className: 'roles-note',
+      attrs: { role: 'note' },
+      text: 'সাইডবার ঠিক করে কী দরকারি, এই পাতা ঠিক করে কী অনুমোদিত। ' +
+            'অনুমতি সবসময় সার্ভারে যাচাই হয় — পর্দায় লুকানো মানে নিরাপত্তা নয়। ' +
+            // Kept although the drawing dropped it: tenant isolation is the one
+            // promise on this page that no role, setting or owner can change,
+            // and a school reading "who may see what" is owed that sentence.
+            'অন্য বিদ্যালয়ের কোনো সারি কখনো দৃশ্যমান হয় না — এটি কোনো সেটিং নয়, বন্ধ করার উপায় নেই।',
+    }));
+    o.root.append(matrix);
   }
 }
