@@ -5768,3 +5768,13 @@ input[type="radio"]:focus-visible { outline: 2px solid var(--accent); outline-of
 @media (max-width:1023.98px) {
 .fleet-cards { display: block; padding-left: var(--space-4); padding-right: var(--space-4); }
 }
+
+/* ── lead: the session-ended card (01 Shell & Auth §ক "সময় শেষ") ──
+   It reuses the login card's frame and its warn panel, so the only rules are
+   the glyph and the type the drawing gives the card itself. */
+.session-ended .session-ended-glyph { display: block; width: 32px; height: 32px; margin: 0 0 var(--space-4); color: var(--ink-2); }
+.session-ended .session-ended-glyph[data-tone="warn"] { color: var(--warn); }
+.session-ended .session-ended-glyph svg { width: 100%; height: 100%; }
+.session-ended .session-ended-title { margin: 0 0 10px; font-size: var(--text-h2); line-height: var(--lh-h2); font-weight: 700; letter-spacing: normal; }
+.session-ended .session-ended-text { margin: 0 0 var(--space-6); font-size: var(--text-body); line-height: 1.65; color: var(--ink-2); }
+.session-ended .session-ended-queue { margin: 0 0 22px; }

@@ -70,7 +70,8 @@ import {
   tenantKeyFromHost,
 } from './branding.ts';
 import { brandName } from '../../../packages/ui-core/src/branding.ts';
-import { todayLocalIso } from '../../../packages/ui-core/src/format.ts';
+import { iconSvg } from './icon.ts';
+import { todayLocalIso, formatCount } from '../../../packages/ui-core/src/format.ts';
 import {
   purgeLocalData, sweepNow, isTenantSwitch, sessionTenantId,
 } from './local-data.ts';
@@ -483,6 +484,7 @@ async function main() {
     : fetchPublicBranding(brandingKey);
 
   function startShell(): Shell {
+    lastOwner = { tenantId: auth.tenantId || 'demo', actorId: auth.userId };
     const transport = new FetchTransport({ auth });
     // Set once the shell exists (below): the engine is built first because the
     // routes need it, and the banner it reports to is built from those routes.
@@ -1312,6 +1314,12 @@ async function main() {
   }
 
   let shell: Shell | null = null;
+  /**
+   * Whose queued work the session-ended card counts. Captured when the shell
+   * starts, because `onSessionEnded` fires after auth has cleared its state —
+   * and on a shared phone the outbox may also hold somebody else's register.
+   */
+  let lastOwner: { tenantId: string; actorId: string } | null = null;
   // Held so the route's `unmount` can drop the screen's connectivity
   // listeners. Without it, navigating away and back stacks one pair of
   // online/offline handlers per visit.
@@ -1385,11 +1393,14 @@ async function main() {
     // Cleared BEFORE the screen is drawn, so nothing can re-cache behind it.
     void purgeLocalData('logout').finally(() => { sweepNow('logout'); });
 
+    // 01 Shell & Auth §ক "সময় শেষ": the login card's frame, a glyph, the
+    // heading, one sentence, the queued-work panel and one primary.
+    const outer = document.createElement('div');
+    outer.className = 'login-wrap';
     const wrap = document.createElement('div');
-    wrap.className = 'ui-state';
+    wrap.className = 'card login-card session-ended';
     wrap.setAttribute('role', 'alert');
     wrap.setAttribute('data-session-ended', reason);
-    wrap.style.padding = 'var(--s-5) var(--s-4)';
 
     // Two endings, two screens — heading, sentence and button together.
     // Telling somebody whose account was suspended that their "session
@@ -1403,26 +1414,61 @@ async function main() {
     // again" is the true and useful instruction for all of them.
     const inactive = reason === 'account_inactive';
 
+    const glyph = document.createElement('span');
+    glyph.className = 'session-ended-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.dataset.tone = inactive ? 'neutral' : 'warn';
+    glyph.innerHTML = iconSvg(inactive ? 'lock' : 'clock');
+    wrap.append(glyph);
+
     const h = document.createElement('h1');
-    h.textContent = inactive ? 'অ্যাকাউন্টটি সক্রিয় নেই' : 'আপনার সেশন শেষ হয়েছে';
+    h.className = 'session-ended-title';
+    h.textContent = inactive ? 'অ্যাকাউন্টটি সক্রিয় নেই' : 'সময় শেষ হয়ে গেছে';
     wrap.append(h);
 
     const p = document.createElement('p');
+    p.className = 'session-ended-text';
+    // The drawing says "যা লিখেছিলেন তা এই যন্ত্রে জমা আছে". Only SUBMITTED
+    // work is kept (the outbox survives the purge); a register still being
+    // filled in is not saved anywhere, so the sentence is not promised here.
     p.textContent = inactive
       ? 'আপনার অ্যাকাউন্টটি এখন সক্রিয় নেই। প্রতিষ্ঠানের অফিসে যোগাযোগ করুন।'
-      : 'আপনার সেশন শেষ হয়েছে। আবার লগইন করুন।';
+      : 'নিরাপত্তার জন্য আপনাকে বের করে দেওয়া হয়েছে। আবার প্রবেশ করুন।';
     wrap.append(p);
+
+    // The queued count, when there is one. The outbox is never purged on a
+    // session end, so this work is still on the phone and will be sent after
+    // the next sign-in by the same person.
+    const queue = document.createElement('p');
+    queue.className = 'login-panel login-cooldown session-ended-queue';
+    queue.setAttribute('role', 'status');
+    queue.hidden = true;
+    wrap.append(queue);
+    if (lastOwner) {
+      const owner = lastOwner;
+      void store.counts(owner).then((c) => {
+        const n = c.pending + c.inflight;
+        if (n <= 0 || !queue.isConnected) return;
+        queue.textContent = '';
+        const num = document.createElement('span');
+        num.className = 'n';
+        num.textContent = formatCount(n, 'bn');
+        queue.append(num, `টি কাজ পাঠানো বাকি আছে — এই যন্ত্রে জমা আছে, আবার প্রবেশ করলে পাঠানো হবে।`);
+        queue.hidden = false;
+      }).catch(() => { /* no store: nothing to count, nothing to claim */ });
+    }
 
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'btn btn-primary';
+    btn.className = 'btn-primary btn-block ui-btn';
     // The way back exists either way — a shared device may hold somebody
     // else's account — but it is not dressed up as a login that will work.
-    btn.textContent = inactive ? 'লগইন স্ক্রিনে ফিরে যান' : 'আবার লগইন করুন';
+    btn.textContent = inactive ? 'লগইন স্ক্রিনে ফিরে যান' : 'আবার প্রবেশ করুন';
     btn.addEventListener('click', () => { showLogin(); });
     wrap.append(btn);
 
-    root.append(wrap);
+    outer.append(wrap);
+    root.append(outer);
     // Focus the one action, so a keyboard or screen-reader user lands on it
     // rather than at the top of an empty page.
     btn.focus();

@@ -134,7 +134,7 @@ async function cleanup() {
   } catch { /* first run */ }
 }
 
-function mountScreen() {
+function mountScreen(takenOn = TAKEN_ON) {
   const store = new MemoryOutboxStore();
   const transport = new DirectTransport(new SyncPushHandler(db), ctx);
   let offset = 0;
@@ -153,47 +153,51 @@ function mountScreen() {
     doc,
     students: roster,
     section: { id: sectionId, labelBn: '৯-ক', academicYearId: yearId },
-    takenOn: TAKEN_ON,
+    takenOn,
     subjectBn: 'পদার্থবিজ্ঞান',
     outbox: engine,
     newId: () => crypto.randomUUID(),
   });
 
-  const tapRoll = (roll: number) => {
-    const t = root.querySelector<HTMLButtonElement>(
-      `.tile[data-student-id="${roster[roll - 1].studentId}"]`,
-    )!;
-    t.dispatchEvent(new dom.window.Event('click'));
-    return t;
+  // Ata Ekta path খ: a row opens its three choices, and a choice sets that
+  // status. Nobody starts marked, and nothing cycles.
+  const click = (node: Element) =>
+    node.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true, detail: 1 }));
+  const rowOf = (roll: number) => root.querySelector<HTMLLIElement>(
+    `.att-row[data-student-id="${roster[roll - 1].studentId}"]`,
+  )!;
+  const mark = (roll: number, status: 'present' | 'absent' | 'late') => {
+    const row = rowOf(roll);
+    const hit = row.querySelector<HTMLButtonElement>('.att-row-hit')!;
+    if (hit.getAttribute('aria-expanded') !== 'true') click(hit);
+    click(row.querySelector<HTMLButtonElement>(`.att-opt[data-status="${status}"]`)!);
+    return rowOf(roll);
   };
+  const markAll = () => click(root.querySelector<HTMLButtonElement>('[data-action="mark-all"]')!);
 
-  return { view, root, engine, store, transport, tapRoll, advance: (ms: number) => { offset += ms; } };
+  return { view, root, engine, store, transport, mark, markAll, rowOf, advance: (ms: number) => { offset += ms; } };
 }
 
 describe('vertical slice: tap → outbox → server → database', { skip }, () => {
   test('a teacher marks a register offline and it lands in PostgreSQL', async () => {
-    const { view, root, engine, store, transport, tapRoll, advance } = mountScreen();
+    const { view, root, engine, store, transport, mark, markAll, advance } = mountScreen();
 
     // ── 07:12, no signal at all ────────────────────────────────────────
     transport.online = false;
 
-    // Rolls 7, 23 and 44 are absent. Three taps, not sixty.
+    // Everyone the teacher can see is here: one tap marks the room present.
+    markAll();
+    // Rolls 7, 23 and 44 are absent — the exceptions, not sixty taps.
     for (const roll of [7, 23, 44]) {
-      const t = tapRoll(roll);
-      assert.equal(t.dataset.status, 'absent');
+      assert.equal(mark(roll, 'absent').dataset.status, 'absent');
     }
-    // Roll 12 is late: two taps.
-    tapRoll(12); tapRoll(12);
-    assert.equal(
-      root.querySelector<HTMLButtonElement>(
-        `.tile[data-student-id="${roster[11].studentId}"]`,
-      )!.dataset.status,
-      'late',
-    );
+    // Roll 12 is late.
+    assert.equal(mark(12, 'late').dataset.status, 'late');
 
-    assert.ok(
-      root.querySelector('.att-counts')!.textContent!.includes('উপস্থিত ৫৬'),
-      'counters reflect 56 present / 3 absent / 1 late',
+    assert.match(
+      root.querySelector('.att-progress')!.textContent!,
+      /সবাই চিহ্নিত · ৪ জন ব্যতিক্রম/,
+      'every student marked, with 3 absent + 1 late as the exceptions',
     );
 
     // Save — must not throw, must not await the network.
@@ -259,17 +263,19 @@ describe('vertical slice: tap → outbox → server → database', { skip }, () 
   });
 
   test('re-saving the same register merges instead of duplicating', async () => {
-    const { view, engine, transport, tapRoll, advance } = mountScreen();
+    const { view, transport, mark, markAll, advance } = mountScreen();
     transport.online = true;
 
-    tapRoll(9);                       // roll 9 absent
+    markAll();
+    mark(9, 'absent');                // roll 9 absent
     await (await view.save()).flushed;
 
     // The teacher notices a mistake and re-marks the same day.
     const second = mountScreen();
     second.transport.online = true;
-    second.tapRoll(9);                // absent again
-    second.tapRoll(9);                // ...no, late
+    second.markAll();
+    second.mark(9, 'absent');         // absent again
+    second.mark(9, 'late');           // ...no, late
     await (await second.view.save()).flushed;
 
     await db.withTenant(ctx, async (c) => {
@@ -285,7 +291,56 @@ describe('vertical slice: tap → outbox → server → database', { skip }, () 
         [TAKEN_ON],
       );
       assert.equal(rec[0].n, 60, 'still exactly one row per student');
+
+      const { rows: nine } = await c.query(
+        `SELECT ar.status::text AS status FROM attendance_records ar
+           JOIN enrolments e ON e.student_id = ar.student_id AND e.section_id = ar.section_id
+          WHERE ar.taken_on = $1 AND e.roll_no = 9`,
+        [TAKEN_ON],
+      );
+      assert.deepEqual(nine, [{ status: 'late' }], 'the correction replaced the first mark');
     });
     advance(0);
+  });
+
+  test('THE ONE THAT MATTERS for path খ — an unmarked student reaches the database as nothing', async () => {
+    // "তবুও জমা" sends only the students the teacher looked at. A student
+    // left unmarked must not be written present (no looked-at child is
+    // recorded as in the room) or absent (no guardian is texted for them).
+    const DAY = '2026-10-16';
+    const { view, root, transport, mark, rowOf } = mountScreen(DAY);
+    transport.online = true;
+
+    mark(7, 'absent');
+    mark(8, 'present');
+    mark(9, 'late');
+    assert.equal(rowOf(10).dataset.status, 'unset', 'the rest are still unmarked on screen');
+    assert.ok(root.querySelector('.att-row[data-status="unset"]'));
+    await (await view.save()).flushed;
+
+    await db.withTenant(ctx, async (c) => {
+      const { rows } = await c.query(
+        `SELECT e.roll_no, ar.status::text AS status, ar.sms_state::text AS sms
+           FROM attendance_records ar
+           JOIN enrolments e ON e.student_id = ar.student_id AND e.section_id = ar.section_id
+          WHERE ar.taken_on = $1 ORDER BY e.roll_no`,
+        [DAY],
+      );
+      assert.deepEqual(rows.map((r) => [r.roll_no, r.status]), [[7, 'absent'], [8, 'present'], [9, 'late']],
+        'exactly the three marked students, each as marked — 57 unmarked students have no row');
+      const { rows: ev } = await c.query(
+        `SELECT count(*)::int AS n FROM event_outbox
+          WHERE event_type='attendance.marked.v1' AND payload->>'takenOn' = $1`,
+        [DAY],
+      );
+      assert.equal(ev[0].n, 2, 'guardian events only for the absent and the late student');
+    });
+  });
+
+  test('a save with nobody marked is refused before anything is queued', async () => {
+    // The server would accept an empty register and count the section taken.
+    const { view, store } = mountScreen();
+    await assert.rejects(() => view.save(), (err: Error & { code?: string }) => err.code === 'nothing_marked');
+    assert.equal((await store.all()).length, 0, 'the outbox is untouched');
   });
 });

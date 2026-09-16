@@ -169,3 +169,27 @@ describe('B-121 — a transient failure is NOT a logout', () => {
     assert.equal(b.auth.isLoggedIn(), true);
   });
 });
+
+describe('Ata Ekta — the session-ended card says only what is true', () => {
+  test('two endings, and the queued count is this person\'s own', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const src = await readFile(new URL('../src/app.ts', import.meta.url), 'utf8');
+    const start = src.indexOf('function showSessionEnded');
+    const body = src.slice(start, src.indexOf('\n  }\n', start));
+    // Two endings keep their own heading and way out (B-121).
+    assert.match(body, /'অ্যাকাউন্টটি সক্রিয় নেই'/);
+    assert.match(body, /'সময় শেষ হয়ে গেছে'/);
+    assert.match(body, /'লগইন স্ক্রিনে ফিরে যান'/);
+    // Only submitted work survives a session end, so the drawing's promise that
+    // everything typed is kept must not appear.
+    // (The comment that explains the omission may quote it; a string may not.)
+    assert.doesNotMatch(body, /['`][^'`\n]*যা লিখেছিলেন তা এই যন্ত্রে জমা আছে/);
+    // The count is scoped to the person whose session ended — a shared phone's
+    // outbox can hold somebody else's register.
+    assert.match(body, /store\.counts\(owner\)/);
+    assert.match(src, /lastOwner = \{ tenantId: auth\.tenantId \|\| 'demo', actorId: auth\.userId \}/);
+    // Still one alert, still focused on its one action.
+    assert.match(body, /setAttribute\('role', 'alert'\)/);
+    assert.match(body, /btn\.focus\(\)/);
+  });
+});
