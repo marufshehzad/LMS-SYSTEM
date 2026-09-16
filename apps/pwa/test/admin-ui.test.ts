@@ -397,23 +397,113 @@ describe('invoice generation', () => {
       'without this sentence the second press is the scariest thing in the product');
   });
 
+  // §7 / R11: the run sits behind "আমি বুঝেছি এটি ফেরানো যাবে না". The tick
+  // IS the confirmation — the dialog that asked after the press is gone.
+  const runForm = () => root().querySelector('form.inv-run') as HTMLFormElement;
+  const runButton = () => [...runForm().querySelectorAll('button[type="submit"]')]
+    .find((b) => b.textContent === 'ইনভয়েস তৈরি করুন') as HTMLButtonElement;
+  const ackBox = () => runForm().querySelector('input[type="checkbox"]') as HTMLInputElement;
+  const posts = (auth: ReturnType<typeof fakeAuth>) =>
+    auth.calls.filter((c) => c.init?.method === 'POST');
+  /** Tick the acknowledgement and press the run, the way a person does. */
+  async function acknowledgeAndRun(): Promise<void> {
+    ackBox().checked = true;
+    ackBox().dispatchEvent(new dom.window.Event('change'));
+    // A real press: jsdom runs the submit button's activation behaviour for
+    // `click()`, so this goes through the form's submit handler.
+    runButton().click();
+    // generate() awaits the POST and then a reload; both need to land.
+    await settle(); await settle(); await settle();
+  }
+
   test('zero new invoices is explained, not reported as a failure', async () => {
     const auth = fakeAuth({
       '/api/v1/finance/invoices': { invoices: [] },
-      '/api/v1/finance/generate': { invoiceCount: 0 },
+      '/api/v1/finance/generate': { invoicesCreated: 0 },
     });
     new InvoiceView({ root: root(), doc: doc(), auth: auth as never, canGenerate: true });
     await settle();
-    // P5 made this a real `<form>`, so the act is a submit. jsdom does not
-    // run default behaviour for a manually dispatched click, which is why
-    // pressing the button is expressed as the submit it causes.
-    (root().querySelector('form.ui-card-form') as HTMLFormElement)
-      .dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
-    await settle();
-    clickLabel('তৈরি করুন');
-    // generate() awaits the POST and then a reload; both need to land.
-    await settle(); await settle(); await settle();
+    await acknowledgeAndRun();
+    assert.equal(posts(auth).length, 1, 'the run was actually sent');
     assert.match(text(), /সবার ইনভয়েস আগেই তৈরি হয়েছে/);
+  });
+
+  test('a run that creates invoices says how many, and who was told', async () => {
+    // finance-svc answers `invoicesCreated`. The screen read `invoiceCount`,
+    // which the server never sends, so every successful run — the month's
+    // first included — was reported as "nothing new".
+    const auth = fakeAuth({
+      '/api/v1/finance/invoices': { invoices: [] },
+      '/api/v1/finance/generate': { ok: true, invoicesCreated: 3, notified: 2 },
+    });
+    new InvoiceView({ root: root(), doc: doc(), auth: auth as never, canGenerate: true });
+    await settle();
+    await acknowledgeAndRun();
+    assert.equal(posts(auth).length, 1, 'the run was actually sent');
+    assert.match(text(), /৩ টি ইনভয়েস তৈরি হয়েছে/);
+    assert.match(text(), /২ জন অভিভাবককে জানানো হয়েছে/, 'the guardians told are named');
+    assert.doesNotMatch(text(), /নতুন কোনো ইনভয়েস তৈরি হয়নি/,
+      'three new bills must not be reported as none');
+  });
+
+  test('the run is behind an acknowledgement that comes first, and nothing is sent without it', async () => {
+    // Takes over the guarantee the removed confirm dialog gave, in the same
+    // form as the result-publishing test above.
+    const auth = fakeAuth({
+      '/api/v1/finance/invoices': { invoices: [] },
+      '/api/v1/finance/generate': { invoicesCreated: 0 },
+    });
+    new InvoiceView({ root: root(), doc: doc(), auth: auth as never, canGenerate: true });
+    await settle();
+    const form = runForm();
+    const btn = runButton();
+    const box = ackBox();
+    assert.ok(btn, 'the run action exists');
+
+    // What cannot be undone names the panel, and is said before the button.
+    const group = form.querySelector('[role="group"][aria-labelledby]') as HTMLElement;
+    const statement = doc().getElementById(group.getAttribute('aria-labelledby')!)!;
+    assert.match(statement.textContent ?? '', /ফেরানো যাবে না/);
+    assert.ok(statement.compareDocumentPosition(btn) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+      'the consequence is read before the action');
+    assert.match(box.labels![0].textContent ?? '', /ফেরানো যাবে না/);
+    assert.ok(box.compareDocumentPosition(btn) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+      'the way to stop is reached before the action');
+
+    // The month the run is for, fixed so the payload can be checked exactly.
+    const month = form.querySelector('input[type="month"]') as HTMLInputElement;
+    month.value = '2026-03';
+    month.dispatchEvent(new dom.window.Event('change'));
+
+    assert.equal(btn.disabled, true, 'nothing irreversible is one click away');
+    btn.click();
+    // Enter in the month field submits even while the button is disabled.
+    form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    await settle();
+    assert.equal(posts(auth).length, 0, 'a press or a submit before the tick generates nothing');
+    assert.equal(doc().activeElement, box, 'the way forward is the box, not the run');
+
+    box.checked = true;
+    box.dispatchEvent(new dom.window.Event('change'));
+    assert.equal(btn.disabled, false, 'the tick unlocks it');
+
+    // The tick belongs to the month it was given for.
+    month.value = '2026-04';
+    month.dispatchEvent(new dom.window.Event('change'));
+    assert.equal(box.checked, false, 'a new month clears the tick');
+    assert.equal(btn.disabled, true, 'and locks the run again');
+    form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    await settle();
+    assert.equal(posts(auth).length, 0, 'a tick given for another month sends nothing');
+
+    box.checked = true;
+    box.dispatchEvent(new dom.window.Event('change'));
+    btn.click();
+    await settle(); await settle(); await settle();
+    const sent = posts(auth);
+    assert.equal(sent.length, 1, 'one tick, one press, one run');
+    assert.equal(sent[0].path, '/api/v1/finance/generate');
+    assert.deepEqual(JSON.parse(String(sent[0].init!.body)), { billingPeriod: '2026-04' });
   });
 });
 

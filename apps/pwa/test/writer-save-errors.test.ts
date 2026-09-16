@@ -129,7 +129,7 @@ describe('a refused save is visible, and the typed values survive it', () => {
     new FeeStructuresView({ root: root(), doc: doc(), auth });
     await settle();
 
-    byLabel('নতুন ফি নির্ধারণ')?.click();
+    byLabel('নতুন ফি')?.click();
     await settle();
     setSelect('feeHeadId', 'h-1');
     setInput('amount', '1500');
@@ -149,7 +149,7 @@ describe('a refused save is visible, and the typed values survive it', () => {
     new FeeStructuresView({ root: root(), doc: doc(), auth });
     await settle();
 
-    byLabel('নতুন ফি নির্ধারণ')?.click();
+    byLabel('নতুন ফি')?.click();
     await settle();
     setSelect('feeHeadId', 'h-1');
     setInput('amount', '1500');
@@ -200,7 +200,7 @@ describe('a refused save is visible, and the typed values survive it', () => {
     new FeeStructuresView({ root: root(), doc: doc(), auth });
     await settle();
 
-    byLabel('নতুন ফি নির্ধারণ')?.click();
+    byLabel('নতুন ফি')?.click();
     await settle();
     setSelect('feeHeadId', 'h-1');
     setInput('amount', '1500');

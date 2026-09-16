@@ -36,8 +36,15 @@
  * never remembered locally, so an interrupted setup reports what actually
  * landed rather than what this page thought it did.
  */
-import { skeleton, errorState, emptyState, bnNum, bnDate } from './view-states.ts';
-import { PlatformOpsView } from './platform-ops.ts';
+import { skeleton, errorState, emptyState, successNote, bnNum, bnDate } from './view-states.ts';
+import {
+  PlatformOpsView, platBand, plainError, errorCodeOf, isDenied, type Tab,
+} from './platform-ops.ts';
+import {
+  el, icon, append, uid, numText, button, pageHeader, backLink, sectionHeading,
+  field as uiField, fileUpload, permissionState, type FieldKind,
+} from './ui/index.ts';
+import { parseUserNumber } from '../../../packages/ui-core/src/format.ts';
 import {
   INSTITUTION_TYPE_BN, institutionTypeOf, institutionTypeLabel,
   defaultsForType, LEVELS_FOR_TYPE, STREAMS_FOR_TYPE,
@@ -191,6 +198,31 @@ const STEPS = [
 ] as const;
 
 /**
+ * The operator sidebar's four rows (10 Platform Console `shell()`), in the
+ * drawn order, with the drawn Lucide glyphs. Written as `glyph:` literals so
+ * icon-names.test.ts checks every one against the icon set.
+ */
+const NAV: ReadonlyArray<{ key: Tab; label: string; glyph: string }> = [
+  { key: 'dashboard', label: 'ড্যাশবোর্ড', glyph: 'layout-dashboard' },
+  { key: 'institutions', label: 'প্রতিষ্ঠান', glyph: 'building-2' },
+  { key: 'plans', label: 'প্ল্যান', glyph: 'layers' },
+  { key: 'operators', label: 'অপারেটর', glyph: 'users' },
+];
+
+/**
+ * A figure typed into a field, as the old `type="number"` input read it.
+ *
+ * The shared field renders numbers as text with the numeric keypad, so a
+ * figure can now arrive in Bangla digits; those are read as the number they
+ * are. Everything else reads exactly as `Number()` did — an empty field is
+ * still 0 and junk is still NaN, so every guard downstream sees what it saw.
+ */
+function figure(value: string): number {
+  if (value.trim() === '') return Number(value);
+  return parseUserNumber(value) ?? Number(value);
+}
+
+/**
  * A slug from an English name.
  *
  * R-7.3: lowercase, runs of non-alphanumerics become one hyphen, trimmed.
@@ -225,7 +257,11 @@ export class Console_ {
   private tenants: TenantRow[] = [];
   private loading = false;
   private error = '';
+  /** The API's code for a failed LOAD — how a refusal is told from a failure. */
+  private errorCode = '';
   private notice = '';
+  /** The sidebar's rows, so the highlight can move without a re-render. */
+  private navButtons = new Map<Tab, HTMLButtonElement>();
   private search = '';
   // P10-1. Where in the fleet the operator is, and what they filtered to.
   // All of it goes to the server: the browser no longer holds the fleet.
@@ -341,7 +377,7 @@ export class Console_ {
   }
 
   private async loadList(): Promise<void> {
-    this.loading = true; this.error = ''; this.render();
+    this.loading = true; this.error = ''; this.errorCode = ''; this.render();
     try {
       const p = new URLSearchParams({
         q: this.search,
@@ -363,7 +399,8 @@ export class Console_ {
       this.fleet = r.page;
       if (sum) this.summary = sum;
     } catch (e) {
-      this.error = (e as Error).message;
+      this.error = plainError(e, 'প্রতিষ্ঠানের তালিকা আনা যায়নি।');
+      this.errorCode = errorCodeOf(e);
       this.tenants = [];
     } finally {
       this.loading = false; this.render();
@@ -371,18 +408,19 @@ export class Console_ {
   }
 
   private async loadReadiness(): Promise<void> {
-    this.loading = true; this.error = ''; this.goLive = null; this.render();
+    this.loading = true; this.error = ''; this.errorCode = ''; this.goLive = null; this.render();
     try {
       this.goLive = await this.call('readiness');
     } catch (e) {
-      this.error = (e as Error).message;
+      this.error = plainError(e, 'গো-লাইভ অবস্থা আনা যায়নি।');
+      this.errorCode = errorCodeOf(e);
     } finally {
       this.loading = false; this.render();
     }
   }
 
   private async loadDetail(id: string): Promise<void> {
-    this.loading = true; this.error = ''; this.render();
+    this.loading = true; this.error = ''; this.errorCode = ''; this.render();
     try {
       this.detail = await this.call(`tenant?id=${encodeURIComponent(id)}`);
       this.tenantId = id;
@@ -394,7 +432,8 @@ export class Console_ {
         this.health = await this.call(`health?id=${encodeURIComponent(id)}`);
       } catch { /* the panel says so */ }
     } catch (e) {
-      this.error = (e as Error).message;
+      this.error = plainError(e, 'প্রতিষ্ঠানের তথ্য আনা যায়নি।');
+      this.errorCode = errorCodeOf(e);
     } finally {
       this.loading = false; this.render();
     }
@@ -402,35 +441,69 @@ export class Console_ {
 
   // ── Shell ─────────────────────────────────────────────────────────────
 
+  /**
+   * The operator shell (Ata Ekta, 10 Platform Console): a black sidebar with
+   * the ShikhonBD wordmark, the four sections and the way out, beside a
+   * white main column. Black so that an operator knows at a glance this is
+   * not a school's app — and never a school's logo (D11).
+   */
   private render(): void {
     const d = this.doc;
     this.root.replaceChildren();
+    const signedIn = Boolean(this.token && this.key);
 
-    const bar = d.createElement('header');
-    bar.className = 'platform-bar';
-    const brand = d.createElement('span');
-    brand.className = 'platform-brand';
-    // D11: this stays. It is the platform's own tool.
-    brand.textContent = 'shikhonBD';
-    const sub = d.createElement('span');
-    sub.className = 'platform-sub';
-    sub.textContent = 'প্ল্যাটফর্ম কনসোল';
-    bar.append(brand, sub);
+    const side = el(d, 'aside', {
+      className: 'plat-sidebar', attrs: { 'aria-label': 'অপারেটর মেনু' },
+    },
+      // D11: this stays. It is the platform's own tool, and the one surface
+      // that says whose tool it is.
+      el(d, 'div', { className: 'plat-brand' },
+        el(d, 'p', { className: 'plat-wordmark', text: 'ShikhonBD', attrs: { lang: 'en' } }),
+        el(d, 'p', { className: 'plat-brand-sub', text: 'Operator', attrs: { lang: 'en' } })));
 
-    if (this.token && this.key) {
-      const out = d.createElement('button');
-      out.type = 'button'; out.className = 'btn-ghost btn-small';
-      out.textContent = 'সেশন শেষ';
-      out.addEventListener('click', () => {
-        sessionStorage.removeItem('shikhon_platform_token');
-        sessionStorage.removeItem('shikhon_platform_key');
-        this.token = ''; this.key = ''; this.view = 'list'; this.render();
-      });
-      bar.append(out);
+    this.navButtons.clear();
+    if (signedIn) {
+      const nav = el(d, 'nav', { className: 'plat-nav', attrs: { 'aria-label': 'প্ল্যাটফর্ম' } });
+      const current = this.navSection();
+      for (const { key, label, glyph } of NAV) {
+        const b = el(d, 'button', {
+          className: 'plat-nav-item',
+          attrs: { type: 'button', 'aria-current': key === current ? 'page' : null },
+        }, icon(d, glyph, 'plat-nav-glyph'), el(d, 'span', { className: 'plat-nav-label', text: label }));
+        b.addEventListener('click', () => {
+          this.view = 'ops'; this.error = ''; this.render();
+          this.opsView?.showSection(key);
+        });
+        this.navButtons.set(key, b);
+        nav.append(b);
+      }
+      side.append(nav);
+
+      // The operator is not named here: the console holds a pasted
+      // credential, not a person, and decoding the token to guess one would be
+      // a new thing the console does.
+      side.append(el(d, 'div', { className: 'plat-sidebar-foot' },
+        el(d, 'span', { className: 'plat-who', text: 'অপারেটর' }),
+        button(d, {
+          label: 'সেশন শেষ', variant: 'ghost', size: 'sm', className: 'plat-signout',
+          onClick: () => {
+            sessionStorage.removeItem('shikhon_platform_token');
+            sessionStorage.removeItem('shikhon_platform_key');
+            // The operations view outlives shell re-renders (renderOps), so it
+            // must not outlive the session. It was built on the credential
+            // being signed out: a refusal it met is drawn with no retry, and
+            // a sidebar press only re-renders — kept, it would greet the next
+            // sign-in with "অনুমতি নেই" (or the last session's fleet, read
+            // with the old credential). The next visit builds a fresh view,
+            // which loads with the new one.
+            this.opsView = null; this.opsHost = null;
+            this.token = ''; this.key = ''; this.view = 'list'; this.render();
+          },
+        })));
     }
 
     // No theme toggle: the console is light only, like the app (Ata Ekta §5).
-    this.root.append(bar);
+    this.root.append(side);
 
     const main = d.createElement('main');
     main.className = 'platform-main';
@@ -461,9 +534,18 @@ export class Console_ {
     // browser, three full loads on a single page open. That was five queries
     // each, and before P10 each of those included the one-second
     // `/overview`.
-    if (this.opsHost && this.opsView) { main.append(this.opsHost); return; }
+    //
+    // The two R-7 entry points are appended on EVERY render, both branches:
+    // the re-attach branch used to return before them, so the first shell
+    // re-render — now every sidebar press — took the provisioning list and
+    // the go-live screen off the page.
+    if (this.opsHost && this.opsView) {
+      main.append(this.opsHost, this.secondaryBand());
+      return;
+    }
 
     const host = this.doc.createElement('div');
+    host.className = 'plat-ops';
     this.opsHost = host;
     main.append(host);
     this.opsView = new PlatformOpsView({
@@ -471,6 +553,7 @@ export class Console_ {
       doc: this.doc,
       call: <T,>(path: string, init?: RequestInit) =>
         this.call<T>(path.replace(/^\//, ''), init ?? {}),
+      onSection: (s) => this.setActiveNav(s),
       onOpenTenant: (id) => {
         this.view = 'detail';
         void this.loadDetail(id);
@@ -487,43 +570,57 @@ export class Console_ {
       },
     });
 
-    // The two R-7 surfaces stay reachable. Provisioning and go-live posture
-    // are real jobs; they are just not the day's first question.
-    const row = this.doc.createElement('div');
-    row.className = 'ui-button-row plat-secondary';
-    for (const [label, go] of [
-      ['প্রভিশনিং তালিকা', () => { this.view = 'list'; void this.loadList(); }],
-      ['গো-লাইভ অবস্থা', () => { this.view = 'readiness'; void this.loadReadiness(); }],
-    ] as Array<[string, () => void]>) {
-      const b = this.doc.createElement('button');
-      b.type = 'button'; b.className = 'ui-btn btn-ghost btn-small';
-      b.textContent = label;
-      b.addEventListener('click', go);
-      row.append(b);
+    main.append(this.secondaryBand());
+  }
+
+  /**
+   * The two R-7 surfaces, kept reachable from operations. Provisioning and
+   * go-live posture are real jobs; they are just not the day's first
+   * question, so they sit quietly in the last band.
+   */
+  private secondaryBand(): HTMLElement {
+    const d = this.doc;
+    return platBand(d, 'plat-secondary ui-button-row',
+      button(d, {
+        label: 'প্রভিশনিং তালিকা', variant: 'ghost', size: 'sm',
+        onClick: () => { this.view = 'list'; void this.loadList(); },
+      }),
+      button(d, {
+        label: 'গো-লাইভ অবস্থা', variant: 'ghost', size: 'sm',
+        onClick: () => { this.view = 'readiness'; void this.loadReadiness(); },
+      }));
+  }
+
+  /**
+   * Which sidebar row this view belongs to. The R-7 list, a school's
+   * provisioning page and the wizard are all institutions work; go-live
+   * posture is the fleet's.
+   */
+  private navSection(): Tab {
+    if (this.view === 'ops') return this.opsView?.section() ?? 'dashboard';
+    if (this.view === 'readiness') return 'dashboard';
+    return 'institutions';
+  }
+
+  /** Move the sidebar's current row without rebuilding the page under it. */
+  private setActiveNav(key: Tab): void {
+    for (const [k, b] of this.navButtons) {
+      if (k === key) b.setAttribute('aria-current', 'page');
+      else b.removeAttribute('aria-current');
     }
-    main.append(row);
   }
 
   private renderSignIn(main: HTMLElement): void {
     const d = this.doc;
-    const h = d.createElement('h1');
-    h.className = 'platform-title';
-    h.textContent = 'অপারেটর সাইন-ইন';
-    const p = d.createElement('p');
-    p.className = 'page-sub';
-    p.textContent = 'প্ল্যাটফর্ম টোকেন ও কী দিন। এগুলো শুধু এই সেশনে থাকে।';
-    main.append(h, p);
+    main.append(pageHeader(d, { title: 'অপারেটর সাইন-ইন', className: 'plat-bar' }));
 
-    const form = d.createElement('form');
-    form.className = 'card card-form';
+    const form = el(d, 'form', { className: 'ui-card-form plat-form' });
 
     const tokenField = this.field('অপারেটর টোকেন (super_admin JWT)', 'password', this.token);
     const keyField = this.field('PLATFORM_API_KEY', 'password', this.key);
     form.append(tokenField.wrap, keyField.wrap);
 
-    const go = d.createElement('button');
-    go.type = 'submit'; go.className = 'btn-primary'; go.textContent = 'প্রবেশ';
-    form.append(go);
+    form.append(button(d, { label: 'প্রবেশ', variant: 'primary', type: 'submit' }));
 
     if (this.error) form.append(errorState(d, this.error));
 
@@ -536,22 +633,16 @@ export class Console_ {
       sessionStorage.setItem('shikhon_platform_key', this.key);
       void this.loadList();
     });
-    main.append(form);
+    main.append(platBand(d, 'plat-form-band',
+      el(d, 'p', { className: 'plat-note', text: 'প্ল্যাটফর্ম টোকেন ও কী দিন। এগুলো শুধু এই সেশনে থাকে।' }),
+      form));
   }
 
   // ── The institution list ──────────────────────────────────────────────
 
   private renderList(main: HTMLElement): void {
     const d = this.doc;
-    const head = d.createElement('div');
-    head.className = 'platform-head';
-    const h = d.createElement('h1');
-    h.className = 'platform-title';
-    h.textContent = 'প্রতিষ্ঠানসমূহ';
-    const add = d.createElement('button');
-    add.type = 'button'; add.className = 'btn-primary btn-inline';
-    add.textContent = '+ নতুন প্রতিষ্ঠান';
-    add.addEventListener('click', () => {
+    const startNew = (): void => {
       this.step = 0; this.tenantId = null; this.activationCode = '';
       this.draft = {
         nameBn: '', nameEn: '', stream: 'bangla_medium', level: 'secondary',
@@ -560,25 +651,25 @@ export class Console_ {
         planCode: 'pilot', studentCap: 500, trialEndsOn: '',
       };
       this.view = 'wizard'; this.error = ''; this.render();
-    });
-    // R-8. The posture screen sits beside "new institution" because the
-    // operator who is about to onboard a school is exactly the person who
-    // needs to know whether its SMS will actually send.
-    const posture = d.createElement('button');
-    posture.type = 'button'; posture.className = 'btn-secondary btn-inline';
-    posture.textContent = 'গো-লাইভ অবস্থা';
-    posture.addEventListener('click', () => {
-      this.view = 'readiness'; this.error = ''; void this.loadReadiness();
-    });
-    const back = d.createElement('button');
-    back.type = 'button'; back.className = 'btn-ghost btn-inline';
-    back.textContent = '← অপারেশনস';
-    back.addEventListener('click', () => { this.view = 'ops'; this.render(); });
-    head.append(h, back, posture, add);
-    main.append(head);
+    };
+    main.append(pageHeader(d, {
+      title: 'প্রতিষ্ঠানসমূহ', className: 'plat-bar',
+      // R-8. The posture screen sits beside "new institution" because the
+      // operator who is about to onboard a school is exactly the person who
+      // needs to know whether its SMS will actually send.
+      actions: [button(d, {
+        label: 'গো-লাইভ অবস্থা', variant: 'secondary', size: 'sm',
+        onClick: () => { this.view = 'readiness'; this.error = ''; void this.loadReadiness(); },
+      })],
+      primary: button(d, {
+        label: 'নতুন প্রতিষ্ঠান', variant: 'primary', size: 'sm', onClick: startNew,
+      }),
+    }));
+    main.append(platBand(d, 'plat-back',
+      backLink(d, 'অপারেশনস', () => { this.view = 'ops'; this.render(); })));
 
     const searchForm = d.createElement('form');
-    searchForm.className = 'platform-search';
+    searchForm.className = 'platform-search plat-band';
     const si = d.createElement('input');
     si.type = 'search'; si.className = 'field-input';
     si.id = 'fleet-q';
@@ -622,18 +713,17 @@ export class Console_ {
     main.append(searchForm);
     main.append(this.attentionBar());
 
-    if (this.notice) {
-      const n = d.createElement('p');
-      n.className = 'status-chip'; n.setAttribute('aria-live', 'polite');
-      n.textContent = this.notice;
-      main.append(n);
+    if (this.notice) main.append(platBand(d, 'plat-flash', successNote(d, this.notice)));
+    if (this.loading) { main.append(platBand(d, 'plat-loading', skeleton(d, 4))); return; }
+    if (this.error) {
+      main.append(platBand(d, 'plat-flash', this.loadProblem(() => void this.loadList())));
+      return;
     }
-    if (this.loading) { main.append(skeleton(d, 4)); return; }
-    if (this.error) { main.append(errorState(d, this.error, () => void this.loadList())); return; }
     if (this.tenants.length === 0) {
-      main.append(emptyState(d, {
-        message: 'কোনো প্রতিষ্ঠান নেই। "নতুন প্রতিষ্ঠান" দিয়ে শুরু করুন।',
-      }));
+      main.append(platBand(d, '', emptyState(d, {
+        message: 'কোনো প্রতিষ্ঠান নেই। নতুন প্রতিষ্ঠান দিয়ে শুরু করুন।',
+        action: { label: 'নতুন প্রতিষ্ঠান', onClick: startNew },
+      })));
       return;
     }
 
@@ -645,17 +735,22 @@ export class Console_ {
     // table nobody can read — the horizontal scroll hides exactly the
     // columns (status, attention) that the screen exists to show.
     const table = d.createElement('div');
-    table.className = 'table-scroll fleet-wide';
+    table.className = 'ui-table-scroll fleet-wide';
     const t = d.createElement('table');
-    t.className = 'data-table fleet-table';
+    t.className = 'ui-table fleet-table';
     const thead = d.createElement('thead');
     const hr = d.createElement('tr');
 
     // §18's columns, and nothing student-level: the platform list carries
     // counts, never a child's name.
+    //
+    // Ten headers for the ten cells tenantRow() draws. The slug cell had no
+    // header, so from the third column on every header named its neighbour's
+    // cell — to a screen reader, the status read as "ধরন".
     const cols: Array<{ bn: string; sort?: string }> = [
       { bn: 'প্রতিষ্ঠান', sort: 'name' },
       { bn: 'ধরন' },
+      { bn: 'স্লাগ' },
       { bn: 'অবস্থা', sort: 'status' },
       { bn: 'প্ল্যান', sort: 'plan' },
       { bn: 'শিক্ষার্থী', sort: 'students' },
@@ -667,7 +762,13 @@ export class Console_ {
     for (const c of cols) {
       const th = d.createElement('th');
       th.scope = 'col';
-      if (!c.sort) { th.textContent = c.bn; hr.append(th); continue; }
+      if (!c.sort) {
+        // The action column's header is named for a reader, not drawn.
+        if (c.bn) th.textContent = c.bn;
+        else th.append(el(d, 'span', { className: 'ui-sr-only', text: 'ক্রিয়া' }));
+        hr.append(th);
+        continue;
+      }
       // A sortable header is a BUTTON, so it is reachable by keyboard and
       // announced as pressable. `aria-sort` on the cell is what a screen
       // reader uses to say which column the table is ordered by.
@@ -708,6 +809,17 @@ export class Console_ {
   }
 
   /**
+   * A failed load, as a state (§7). A refusal is B-30's canonical sentence
+   * with no retry — the way out is "সেশন শেষ" — and anything else is the
+   * error with "আবার চেষ্টা করুন".
+   */
+  private loadProblem(retry: () => void): HTMLElement {
+    return isDenied(this.errorCode)
+      ? permissionState(this.doc)
+      : errorState(this.doc, this.error, retry);
+  }
+
+  /**
    * The severity bar: what needs a person, and a way to see only that.
    *
    * The counts are the SERVER's, over the whole fleet. The console used to
@@ -736,7 +848,7 @@ export class Console_ {
       b.setAttribute('aria-pressed', on ? 'true' : 'false');
       // The count is INSIDE the label, so a screen reader hears "জরুরি ৫টি"
       // rather than a number floating beside a word.
-      b.textContent = `${label} ${bnNum(n)}টি`;
+      append(b, ...numText(d, `${label} ${bnNum(n)}টি`));
       b.addEventListener('click', () => {
         this.filterBand = on ? '' : key;
         this.fleet.page = 1;
@@ -771,28 +883,23 @@ export class Console_ {
     // Announced, because after pressing "next" the only thing that changed
     // for a screen-reader user is this sentence.
     status.setAttribute('aria-live', 'polite');
-    status.textContent = total === 0
+    append(status, ...numText(d, total === 0
       ? 'কোনো প্রতিষ্ঠান পাওয়া যায়নি'
-      : `${bnNum(from)}–${bnNum(to)} / মোট ${bnNum(total)}টি`;
+      : `${bnNum(from)}–${bnNum(to)} / মোট ${bnNum(total)}টি`));
     nav.append(status);
 
-    const step = (delta: number, label: string): HTMLElement => {
-      const b = d.createElement('button');
-      b.type = 'button'; b.className = 'btn-ghost btn-small';
-      b.textContent = label;
-      b.disabled = page + delta < 1 || page + delta > pages;
-      b.addEventListener('click', () => {
+    const step = (delta: number, label: string): HTMLElement => button(d, {
+      label, variant: 'secondary', size: 'sm',
+      disabled: page + delta < 1 || page + delta > pages,
+      onClick: () => {
         this.fleet.page = page + delta;
         void this.loadList();
-      });
-      return b;
-    };
-    nav.append(step(-1, '← আগের'),
-               (() => { const p = d.createElement('span');
-                        p.className = 'fleet-page-of';
-                        p.textContent = `পৃষ্ঠা ${bnNum(page)} / ${bnNum(pages)}`;
-                        return p; })(),
-               step(1, 'পরের →'));
+      },
+    });
+    nav.append(step(-1, 'আগের'),
+               el(d, 'span', { className: 'fleet-page-of' },
+                 ...numText(d, `পৃষ্ঠা ${bnNum(page)} / ${bnNum(pages)}`)),
+               step(1, 'পরের'));
     return nav;
   }
 
@@ -830,7 +937,7 @@ export class Console_ {
     facts.className = 'fleet-card-facts';
     const fact = (k: string, v: string): void => {
       const dt = d.createElement('dt'); dt.textContent = k;
-      const dd = d.createElement('dd'); dd.textContent = v;
+      const dd = el(d, 'dd', {}, ...numText(d, v));
       facts.append(dt, dd);
     };
     fact('অবস্থা', STATUS_BN[row.status] ?? row.status);
@@ -839,12 +946,10 @@ export class Console_ {
     fact('সক্রিয়', row.lastActiveAt ? bnDate(row.lastActiveAt) : 'কখনো নয়');
     li.append(facts);
 
-    const open = d.createElement('button');
-    open.type = 'button'; open.className = 'btn-secondary btn-small';
-    open.textContent = 'খুলুন';
-    open.setAttribute('aria-label', `${row.nameBn} খুলুন`);
-    open.addEventListener('click', () => { this.view = 'detail'; void this.loadDetail(row.id); });
-    li.append(open);
+    li.append(button(d, {
+      label: 'খুলুন', variant: 'secondary', size: 'sm', ariaLabel: `${row.nameBn} খুলুন`,
+      onClick: () => { this.view = 'detail'; void this.loadDetail(row.id); },
+    }));
     return li;
   }
 
@@ -857,7 +962,10 @@ export class Console_ {
   private severityChip(sev: string): HTMLElement {
     const d = this.doc;
     const c = d.createElement('span');
-    c.className = `status-chip fleet-sev fleet-sev-${sev}`;
+    // The sheet's chip tones — a word on a tint — in place of the console's
+    // own raw-hex severity colours.
+    const tone: Record<string, string> = { critical: 'danger', warning: 'warning', info: 'info' };
+    c.className = `status-chip ${tone[sev] ?? 'pending'}`;
     c.textContent = BAND_BN[sev] ?? sev;
     return c;
   }
@@ -865,19 +973,23 @@ export class Console_ {
   private tenantRow(row: TenantRow): HTMLElement {
     const d = this.doc;
     const tr = d.createElement('tr');
-    const cell = (text: string): HTMLElement => {
-      const td = d.createElement('td'); td.textContent = text; return td;
-    };
+    const cell = (text: string): HTMLElement => el(d, 'td', {}, ...numText(d, text));
     tr.append(cell(row.nameBn));
     // The derived TYPE, not the medium. This column is headed ধরন and used
     // to print the stream, which is how a college came to be listed as a
     // madrasa.
     tr.append(cell(institutionTypeLabel(row.stream, row.level)));
-    const slug = cell(row.slug); slug.className = 'mono'; tr.append(slug);
+    // An identifier: kept whole and monospaced, digits and all (R6's `.n`
+    // marks it; the console's .mono face keeps it legible as a slug).
+    const slug = el(d, 'td', { className: /[0-9]/.test(row.slug) ? 'mono n' : 'mono', text: row.slug });
+    tr.append(slug);
 
     const st = d.createElement('td');
     const chip = d.createElement('span');
-    chip.className = `status-chip status-${row.status}`;
+    const statusTone: Record<string, string> = {
+      active: 'success', trial: 'info', suspended: 'danger', archived: 'pending',
+    };
+    chip.className = `status-chip ${statusTone[row.status] ?? 'pending'}`;
     chip.textContent = STATUS_BN[row.status] ?? row.status;
     st.append(chip);
     tr.append(st);
@@ -895,14 +1007,13 @@ export class Console_ {
     tr.append(sv);
 
     const act = d.createElement('td');
-    const open = d.createElement('button');
-    open.type = 'button'; open.className = 'btn-ghost btn-small';
-    open.textContent = 'খুলুন';
-    // Twenty-five buttons all called "খুলুন" are twenty-five identical
-    // announcements to a screen reader.
-    open.setAttribute('aria-label', `${row.nameBn} খুলুন`);
-    open.addEventListener('click', () => { this.view = 'detail'; void this.loadDetail(row.id); });
-    act.append(open);
+    act.append(button(d, {
+      label: 'খুলুন', variant: 'secondary', size: 'sm',
+      // Twenty-five buttons all called "খুলুন" are twenty-five identical
+      // announcements to a screen reader.
+      ariaLabel: `${row.nameBn} খুলুন`,
+      onClick: () => { this.view = 'detail'; void this.loadDetail(row.id); },
+    }));
     tr.append(act);
     return tr;
   }
@@ -925,34 +1036,24 @@ export class Console_ {
   private renderReadiness(main: HTMLElement): void {
     const d = this.doc;
 
-    const back = d.createElement('button');
-    back.type = 'button'; back.className = 'btn-secondary';
-    back.textContent = '← তালিকায় ফিরুন';
-    back.addEventListener('click', () => {
+    main.append(pageHeader(d, { title: 'গো-লাইভ অবস্থা', className: 'plat-bar' }));
+    main.append(platBand(d, 'plat-back', backLink(d, 'তালিকায় ফিরুন', () => {
       this.view = 'list'; this.goLive = null; this.error = ''; void this.loadList();
-    });
-    main.append(back);
+    })));
 
-    const h = d.createElement('h1');
-    h.className = 'platform-title';
-    h.textContent = 'গো-লাইভ অবস্থা';
-    main.append(h);
-
-    if (this.loading) { main.append(skeleton(d, 6)); return; }
+    if (this.loading) { main.append(platBand(d, 'plat-loading', skeleton(d, 6))); return; }
     if (this.error) {
-      main.append(errorState(d, this.error, () => void this.loadReadiness()));
+      main.append(platBand(d, 'plat-flash', this.loadProblem(() => void this.loadReadiness())));
       return;
     }
     const g = this.goLive;
     if (!g) return;
 
-    const summary = d.createElement('p');
-    summary.className = 'page-sub';
-    summary.setAttribute('aria-live', 'polite');
-    summary.textContent = g.ready
-      ? 'সব আবশ্যক সেটিং প্রস্তুত — বাস্তব শিক্ষার্থীদের জন্য চালু করা যায়।'
-      : `${bnNum(g.blockingRemaining)} টি আবশ্যক সেটিং বাকি আছে।`;
-    main.append(summary);
+    const summary = el(d, 'p', { className: 'plat-note', attrs: { 'aria-live': 'polite' } },
+      ...numText(d, g.ready
+        ? 'সব আবশ্যক সেটিং প্রস্তুত — বাস্তব শিক্ষার্থীদের জন্য চালু করা যায়।'
+        : `${bnNum(g.blockingRemaining)} টি আবশ্যক সেটিং বাকি আছে।`));
+    main.append(platBand(d, 'plat-intro', summary));
 
     for (const [severity, heading] of [
       ['blocking', 'আবশ্যক'], ['advisory', 'ঐচ্ছিক'],
@@ -960,12 +1061,8 @@ export class Console_ {
       const rows = g.checks.filter((c) => c.severity === severity);
       if (rows.length === 0) continue;
 
-      const card = d.createElement('div');
-      card.className = 'card platform-state';
-      const ch = d.createElement('h2');
-      ch.className = 'section-heading';
-      ch.textContent = heading;
-      card.append(ch);
+      const block = el(d, 'div', { className: 'platform-state' },
+        sectionHeading(d, { title: heading, className: 'plat-label' }));
 
       const dl = d.createElement('dl');
       dl.className = 'detail-list';
@@ -973,49 +1070,55 @@ export class Console_ {
         const wrap = d.createElement('div');
         const dt = d.createElement('dt');
         dt.textContent = c.labelBn;
-        const dd = d.createElement('dd');
         // The glyph, the state word AND the reason — never colour alone
         // (F-812), and never a bare tick that leaves an operator guessing
         // which variable is missing.
-        dd.textContent = `${c.ready ? '✓' : '⚠'} ${c.detailBn}`;
-        dd.className = c.ready ? 'state-ok' : 'state-pending';
-        wrap.append(dt, dd);
+        wrap.append(dt, this.stateValue(c.ready, c.detailBn));
         dl.append(wrap);
       }
-      card.append(dl);
-      main.append(card);
+      block.append(dl);
+      main.append(block);
     }
 
     // The half of R-8 no environment variable can answer.
-    const note = d.createElement('div');
-    note.className = 'card platform-state';
-    const nh = d.createElement('h2');
-    nh.className = 'section-heading';
-    nh.textContent = 'এই পর্দা যা জানে না';
-    const np = d.createElement('p');
-    np.className = 'page-sub';
-    np.textContent = 'অ্যাগ্রিগেটরের চুক্তি, এমএফএস মার্চেন্ট চুক্তি, তথ্য কোথায় রাখা হবে '
-      + 'সেই সিদ্ধান্ত, এবং পাইলট স্কুলগুলো — এগুলো কনফিগারেশন নয়, তাই এখানে টিক দেওয়া যায় না। '
-      + 'docs/11-MASTER-PLAN.md §R-8 দেখুন।';
-    note.append(nh, np);
-    main.append(note);
+    main.append(el(d, 'div', { className: 'platform-state' },
+      sectionHeading(d, { title: 'এই পর্দা যা জানে না', className: 'plat-label' }),
+      el(d, 'p', { className: 'plat-note' }, ...numText(d,
+        'অ্যাগ্রিগেটরের চুক্তি, এমএফএস মার্চেন্ট চুক্তি, তথ্য কোথায় রাখা হবে '
+        + 'সেই সিদ্ধান্ত, এবং পাইলট স্কুলগুলো — এগুলো কনফিগারেশন নয়, তাই এখানে টিক দেওয়া যায় না। '
+        + 'docs/11-MASTER-PLAN.md §R-8 দেখুন।'))));
+  }
+
+  /**
+   * A checklist value: ready or not, as a glyph from the icon set AND a word
+   * for a reader, then the count or reason. The ✓ and ⚠ characters this used
+   * are emoji on some phones (Ata Ekta §7 — icons, never emoji); the words
+   * they carried for a screen reader are kept, spelled out.
+   */
+  private stateValue(ok: boolean, text: string): HTMLElement {
+    const d = this.doc;
+    return el(d, 'dd', { className: ok ? 'state-ok' : 'state-pending' },
+      icon(d, ok ? 'check' : 'alert-triangle', 'plat-state-glyph'),
+      el(d, 'span', { className: 'ui-sr-only', text: ok ? 'প্রস্তুত: ' : 'বাকি: ' }),
+      ...numText(d, text));
   }
 
   // ── One institution ───────────────────────────────────────────────────
 
   private renderDetail(main: HTMLElement): void {
     const d = this.doc;
-    const back = d.createElement('button');
-    back.type = 'button'; back.className = 'btn-secondary';
-    back.textContent = '← তালিকায় ফিরুন';
-    back.addEventListener('click', () => {
+    const det = this.detail;
+
+    // The bar names the school; while it loads, the section.
+    main.append(pageHeader(d, {
+      title: det && !this.loading ? det.tenant.nameBn : 'প্রতিষ্ঠান', className: 'plat-bar',
+    }));
+    const back = platBand(d, 'plat-back', backLink(d, 'তালিকায় ফিরুন', () => {
       this.view = 'list'; this.detail = null; this.notice = ''; void this.loadList();
-    });
+    }));
     main.append(back);
 
-    if (this.loading) { main.append(skeleton(d, 5)); return; }
-
-    const det = this.detail;
+    if (this.loading) { main.append(platBand(d, 'plat-loading', skeleton(d, 5))); return; }
 
     // An error takes over the screen ONLY when there is nothing to take over:
     // a failed LOAD has no content behind it. A failed SAVE does, and blanking
@@ -1024,27 +1127,22 @@ export class Console_ {
     // editing gone, and no way back except a reload.
     if (this.error && !det) {
       const id = this.tenantId;
-      main.append(errorState(d, this.error, () => { if (id) void this.loadDetail(id); }));
+      main.append(platBand(d, 'plat-flash',
+        this.loadProblem(() => { if (id) void this.loadDetail(id); })));
       return;
     }
     if (!det) return;
-    if (this.error) {
-      const p = d.createElement('p');
-      p.className = 'login-error';
-      p.setAttribute('role', 'alert');
-      p.textContent = this.error;
-      main.append(p);
-    }
 
-    const h = d.createElement('h1');
-    h.className = 'platform-title';
-    h.textContent = det.tenant.nameBn;
-    const sub = d.createElement('p');
-    sub.className = 'page-sub';
-    sub.textContent = `${det.tenant.slug} · ${institutionTypeLabel(det.tenant.stream, det.tenant.level)}`
+    back.append(el(d, 'p', { className: 'plat-note' }, ...numText(d,
+      `${det.tenant.slug} · ${institutionTypeLabel(det.tenant.stream, det.tenant.level)}`
       + ` · ${STREAM_BN[det.tenant.stream] ?? det.tenant.stream}`
-      + ` · ${STATUS_BN[det.tenant.status] ?? det.tenant.status}`;
-    main.append(h, sub);
+      + ` · ${STATUS_BN[det.tenant.status] ?? det.tenant.status}`)));
+
+    if (this.error) {
+      const p = el(d, 'p', { className: 'login-error', attrs: { role: 'alert' } },
+        ...numText(d, this.error));
+      main.append(platBand(d, 'plat-flash', p));
+    }
 
     main.append(this.stateChecklist(det.state, det.canActivate));
     main.append(this.healthPanel());
@@ -1053,12 +1151,7 @@ export class Console_ {
     main.append(this.accessPanel(det.tenant));
     main.append(this.statusActions(det.tenant, det.canActivate));
 
-    if (this.notice) {
-      const n = d.createElement('p');
-      n.className = 'status-chip'; n.setAttribute('aria-live', 'polite');
-      n.textContent = this.notice;
-      main.append(n);
-    }
+    if (this.notice) main.append(platBand(d, 'plat-flash', successNote(d, this.notice)));
   }
 
   /**
@@ -1068,12 +1161,8 @@ export class Console_ {
    */
   private stateChecklist(s: OnboardingState, canActivate: boolean): HTMLElement {
     const d = this.doc;
-    const wrap = d.createElement('div');
-    wrap.className = 'card platform-state';
-    const h = d.createElement('h2');
-    h.className = 'section-heading';
-    h.textContent = 'প্রস্তুতির অবস্থা';
-    wrap.append(h);
+    const wrap = el(d, 'div', { className: 'platform-state' },
+      sectionHeading(d, { title: 'প্রস্তুতির অবস্থা', className: 'plat-label' }));
 
     const rows: Array<[string, number, boolean, string]> = [
       ['শিক্ষাবর্ষ', s.years, s.years > 0, 'সক্রিয় করতে আবশ্যক'],
@@ -1098,21 +1187,18 @@ export class Console_ {
       const div = d.createElement('div');
       const dt = d.createElement('dt');
       dt.textContent = label;
-      const dd = d.createElement('dd');
       // A tick or a warning triangle, always paired with the count and the
       // note — never colour or a glyph alone (F-812).
-      dd.textContent = `${ok ? '✓' : '⚠'} ${bnNum(count)}${note ? ` · ${note}` : ''}`;
-      dd.className = ok ? 'state-ok' : 'state-pending';
-      div.append(dt, dd);
+      div.append(dt, this.stateValue(ok, `${bnNum(count)}${note ? ` · ${note}` : ''}`));
       list.append(div);
     }
     wrap.append(list);
 
     if (!canActivate) {
-      const p = d.createElement('p');
-      p.className = 'page-sub';
-      p.textContent = 'শিক্ষাবর্ষ, গ্রেডিং স্কেল ও একজন প্রশাসক — এই তিনটি ছাড়া সক্রিয় করা যাবে না।';
-      wrap.append(p);
+      wrap.append(el(d, 'p', {
+        className: 'plat-note',
+        text: 'শিক্ষাবর্ষ, গ্রেডিং স্কেল ও একজন প্রশাসক — এই তিনটি ছাড়া সক্রিয় করা যাবে না।',
+      }));
     }
     return wrap;
   }
@@ -1120,12 +1206,8 @@ export class Console_ {
   /** R-7.12: the school's door, in both forms, with the subdomain first. */
   private accessPanel(t: TenantRow): HTMLElement {
     const d = this.doc;
-    const wrap = d.createElement('div');
-    wrap.className = 'card platform-state';
-    const h = d.createElement('h2');
-    h.className = 'section-heading';
-    h.textContent = 'প্রতিষ্ঠানের ঠিকানা';
-    wrap.append(h);
+    const wrap = el(d, 'div', { className: 'platform-state' },
+      sectionHeading(d, { title: 'প্রতিষ্ঠানের ঠিকানা', className: 'plat-label' }));
 
     const host = location.host.replace(/^platform\./, '');
     // R-8 §9D. The install link is the address that WORKS, so it comes first.
@@ -1145,13 +1227,15 @@ export class Console_ {
     for (const [k, v] of rows) {
       const div = d.createElement('div');
       const dt = d.createElement('dt'); dt.textContent = k;
-      const dd = d.createElement('dd'); dd.className = 'mono'; dd.textContent = v;
+      // An address: kept whole in the monospaced face, `.n` because it
+      // carries digits (the tenant id, a port).
+      const dd = el(d, 'dd', { className: /[0-9০-৯]/.test(v) ? 'mono n' : 'mono', text: v });
       div.append(dt, dd); dl.append(div);
     }
     wrap.append(dl);
 
     const note = d.createElement('p');
-    note.className = 'page-sub';
+    note.className = 'plat-note';
     note.textContent = live
       ? 'দুটোই একই প্রতিষ্ঠানে নিয়ে যায়। পুরোনো ?tid= লিংক কাজ করতেই থাকবে।'
       : 'এখন কেবল ইনস্টল লিংকটি কাজ করে — সেটিই ভর্তি স্লিপে ছাপুন। '
@@ -1159,12 +1243,12 @@ export class Console_ {
     wrap.append(note);
 
     if (this.activationCode) {
-      const code = d.createElement('p');
-      code.className = 'platform-code';
-      code.textContent = `অ্যাক্টিভেশন কোড: ${this.activationCode}`;
-      const warn = d.createElement('p');
-      warn.className = 'page-sub';
-      warn.textContent = 'কোডটি একবারই দেখানো হয় — সংরক্ষণ করা হয় না। ৭২ ঘণ্টা পর মেয়াদ শেষ।';
+      // The code keeps its monospaced face (`.platform-code .n`): the
+      // difference between B and 8 has to survive being read down a phone.
+      const code = el(d, 'p', { className: 'platform-code' },
+        'অ্যাক্টিভেশন কোড: ', el(d, 'span', { className: 'n', text: this.activationCode }));
+      const warn = el(d, 'p', { className: 'plat-note' },
+        ...numText(d, 'কোডটি একবারই দেখানো হয় — সংরক্ষণ করা হয় না। ৭২ ঘণ্টা পর মেয়াদ শেষ।'));
       wrap.append(code, warn);
     }
     return wrap;
@@ -1181,20 +1265,12 @@ export class Console_ {
    */
   private healthPanel(): HTMLElement {
     const d = this.doc;
-    const wrap = d.createElement('div');
-    wrap.className = 'card platform-state';
-    wrap.dataset.panel = 'health';
-    const h = d.createElement('h2');
-    h.className = 'section-heading';
-    h.textContent = 'চলমান অবস্থা';
-    wrap.append(h);
+    const wrap = el(d, 'div', { className: 'platform-state', data: { panel: 'health' } },
+      sectionHeading(d, { title: 'চলমান অবস্থা', className: 'plat-label' }));
 
     const hh = this.health;
     if (!hh) {
-      const p = d.createElement('p');
-      p.className = 'att-sub';
-      p.textContent = 'তথ্য আনা যায়নি।';
-      wrap.append(p);
+      wrap.append(el(d, 'p', { className: 'plat-note', text: 'তথ্য আনা যায়নি।' }));
       return wrap;
     }
 
@@ -1202,9 +1278,8 @@ export class Console_ {
     list.className = 'detail-list';
     const row = (label: string, value: string, ok: boolean | null = null): void => {
       const div = d.createElement('div');
-      const dt = d.createElement('dt'); dt.textContent = label;
-      const dd = d.createElement('dd');
-      dd.textContent = value;
+      const dt = el(d, 'dt', {}, ...numText(d, label));
+      const dd = el(d, 'dd', {}, ...numText(d, value));
       if (ok !== null) dd.className = ok ? 'state-ok' : 'state-pending';
       div.append(dt, dd); list.append(div);
     };
@@ -1284,12 +1359,9 @@ export class Console_ {
     wrap.append(list);
 
     if (hh.errors.length > 0) {
-      const eh = d.createElement('p');
-      eh.className = 'att-sub';
       // Codes, not message bodies: a body is a school's words to a parent.
-      eh.textContent = 'সাম্প্রতিক কারণ: '
-        + hh.errors.map((e) => `${e.code} (${bnNum(e.count)})`).join(' · ');
-      wrap.append(eh);
+      wrap.append(el(d, 'p', { className: 'plat-note' }, ...numText(d, 'সাম্প্রতিক কারণ: '
+        + hh.errors.map((e) => `${e.code} (${bnNum(e.count)})`).join(' · '))));
     }
     return wrap;
   }
@@ -1316,15 +1388,11 @@ export class Console_ {
    */
   private identityEditor(t: TenantRow): HTMLElement {
     const d = this.doc;
-    const wrap = d.createElement('form');
-    wrap.className = 'card platform-state';
-    const h = d.createElement('h2');
-    h.className = 'section-heading';
-    h.textContent = 'প্রতিষ্ঠানের পরিচিতি';
-    wrap.append(h);
+    const wrap = el(d, 'form', { className: 'platform-state ui-card-form' },
+      sectionHeading(d, { title: 'প্রতিষ্ঠানের পরিচিতি', className: 'plat-label' }));
 
     const note = d.createElement('p');
-    note.className = 'page-sub';
+    note.className = 'plat-note';
     note.textContent = 'এই নাম প্রতিষ্ঠানের প্রতিটি ছাপা কাগজে যায়। '
       + 'স্লাগ বদলানো যায় না — ইনস্টল করা অ্যাপ ওটার ওপর নির্ভর করে।';
     wrap.append(note);
@@ -1352,11 +1420,9 @@ export class Console_ {
     }
     wrap.append(grid);
 
-    const save = d.createElement('button');
-    save.type = 'submit';
-    save.className = 'btn-primary btn-inline';
-    save.textContent = 'পরিচিতি সংরক্ষণ';
-    wrap.append(save);
+    // Secondary: this page has one primary, and it is "সক্রিয় করুন".
+    const save = button(d, { label: 'পরিচিতি সংরক্ষণ', variant: 'secondary', type: 'submit' });
+    wrap.append(el(d, 'div', { className: 'ui-button-row' }, save));
 
     wrap.addEventListener('submit', (e) => {
       e.preventDefault();
@@ -1393,15 +1459,11 @@ export class Console_ {
 
     private planEditor(t: TenantRow): HTMLElement {
     const d = this.doc;
-    const wrap = d.createElement('div');
-    wrap.className = 'card platform-state';
-    const h = d.createElement('h2');
-    h.className = 'section-heading';
-    h.textContent = 'প্ল্যান ও সীমা';
-    wrap.append(h);
+    const wrap = el(d, 'div', { className: 'platform-state' },
+      sectionHeading(d, { title: 'প্ল্যান ও সীমা', className: 'plat-label' }));
 
     const form = d.createElement('div');
-    form.className = 'card-form';
+    form.className = 'ui-card-form';
     const plan = this.field('প্ল্যান কোড', 'text', t.planCode ?? '');
     const cap = this.field('শিক্ষার্থীর সীমা *', 'number', String(t.studentCap ?? 0));
     const trial = this.field('ট্রায়াল শেষের তারিখ', 'date', t.trialEndsOn ?? '');
@@ -1413,18 +1475,17 @@ export class Console_ {
     form.append(plan.wrap, cap.wrap, trial.wrap, why.wrap);
 
     const note = d.createElement('p');
-    note.className = 'page-sub';
+    note.className = 'plat-note';
     note.textContent = 'সীমা সার্ভারে প্রয়োগ হয় — বর্তমান শিক্ষার্থী সংখ্যার নিচে নামানো যাবে না।';
     form.append(note);
 
     const row = d.createElement('div');
     row.className = 'action-row';
-    const save = d.createElement('button');
-    save.type = 'button';
-    save.className = 'btn-primary btn-inline';
-    save.dataset.action = 'save-plan';
-    save.textContent = this.busy ? 'অপেক্ষা করুন…' : 'সংরক্ষণ করুন';
-    save.disabled = this.busy;
+    // Secondary: this page has one primary, and it is "সক্রিয় করুন".
+    const save = button(d, {
+      label: this.busy ? 'অপেক্ষা করুন…' : 'সংরক্ষণ করুন', variant: 'secondary',
+      disabled: this.busy, attrs: { 'data-action': 'save-plan' },
+    });
     save.addEventListener('click', async () => {
       if (why.input.value.trim().length < 3) {
         this.error = 'কারণ লিখুন — কারণ ছাড়া প্ল্যান বদলানো যায় না।';
@@ -1439,7 +1500,7 @@ export class Console_ {
           body: JSON.stringify({
             tenantId: t.id,
             planCode: plan.input.value.trim(),
-            studentCap: Number(cap.input.value),
+            studentCap: figure(cap.input.value),
             trialEndsOn: trial.input.value || '',
             reason: why.input.value.trim(),
           }),
@@ -1459,7 +1520,7 @@ export class Console_ {
   private statusActions(t: TenantRow, canActivate: boolean): HTMLElement {
     const d = this.doc;
     const row = d.createElement('div');
-    row.className = 'action-row';
+    row.className = 'action-row plat-band plat-status-actions';
 
     // The way back into the wizard. Placed with the status actions because it
     // is the other thing an operator does from this screen, and labelled by
@@ -1502,12 +1563,16 @@ export class Console_ {
       'প্রতিষ্ঠান এই কারণটিই দেখতে পাবে। কোনো তথ্য মুছে যাবে না।');
     row.append(why.wrap);
 
+    // One primary on the page: the first activation offered. "পুনরায় চালু"
+    // beside it does the same thing and is drawn as the alternative.
+    let primaryUsed = false;
     const set = (status: string, label: string, enabled: boolean): void => {
-      const b = d.createElement('button');
-      b.type = 'button';
-      b.className = status === 'active' ? 'btn-primary btn-inline' : 'btn-secondary';
-      b.textContent = label;
-      b.disabled = !enabled || this.busy;
+      const primary = status === 'active' && !primaryUsed;
+      if (primary) primaryUsed = true;
+      const b = button(d, {
+        label, variant: primary ? 'primary' : 'secondary',
+        disabled: !enabled || this.busy,
+      });
       b.addEventListener('click', () => {
         if (why.input.value.trim().length < 3) {
           this.error = 'কারণ লিখুন — কারণ ছাড়া প্রতিষ্ঠানের অবস্থা বদলানো যায় না।';
@@ -1548,30 +1613,21 @@ export class Console_ {
   private renderWizard(main: HTMLElement): void {
     const d = this.doc;
 
-    const cancel = d.createElement('button');
-    cancel.type = 'button'; cancel.className = 'btn-secondary';
-    cancel.textContent = '← বাতিল করে তালিকায়';
-    cancel.addEventListener('click', () => {
-      this.view = this.tenantId ? 'detail' : 'list';
-      this.error = '';
-      if (this.tenantId) void this.loadDetail(this.tenantId); else void this.loadList();
-    });
-    main.append(cancel);
+    // The bar says which step, in words and a number; the rail under the way
+    // back says which are done and which remain.
+    main.append(pageHeader(d, {
+      title: `ধাপ ${bnNum(this.step + 1)} — ${STEPS[this.step]}`, className: 'plat-bar',
+    }));
+    main.append(platBand(d, 'plat-back plat-wizard-rail',
+      backLink(d, 'বাতিল করে তালিকায়', () => {
+        this.view = this.tenantId ? 'detail' : 'list';
+        this.error = '';
+        if (this.tenantId) void this.loadDetail(this.tenantId); else void this.loadList();
+      }),
+      this.progress()));
 
-    main.append(this.progress());
-
-    const h = d.createElement('h1');
-    h.className = 'platform-title';
-    h.textContent = `ধাপ ${bnNum(this.step + 1)} — ${STEPS[this.step]}`;
-    main.append(h);
-
-    if (this.error) main.append(errorState(d, this.error));
-    if (this.notice) {
-      const n = d.createElement('p');
-      n.className = 'status-chip'; n.setAttribute('aria-live', 'polite');
-      n.textContent = this.notice;
-      main.append(n);
-    }
+    if (this.error) main.append(platBand(d, 'plat-flash', errorState(d, this.error)));
+    if (this.notice) main.append(platBand(d, 'plat-flash', successNote(d, this.notice)));
 
     switch (this.step) {
       case 0: return this.screenInstitution(main);
@@ -1602,89 +1658,86 @@ export class Console_ {
       li.className = i === this.step ? 'wizard-step is-current'
         : done ? 'wizard-step is-done' : 'wizard-step';
       // The state is in the text as well as the class: a tick, the current
-      // marker, or nothing. Never colour alone.
-      li.textContent = `${done ? '✓ ' : ''}${bnNum(i + 1)}. ${label}`;
+      // marker, or nothing. Never colour alone. The tick is the icon set's
+      // (never a ✓ character, which a phone may draw as an emoji) and says
+      // "সম্পন্ন" to a reader.
+      if (done) {
+        li.append(icon(d, 'check', 'plat-step-glyph'),
+          el(d, 'span', { className: 'ui-sr-only', text: 'সম্পন্ন: ' }));
+      }
+      append(li, ...numText(d, `${bnNum(i + 1)}. ${label}`));
       if (i === this.step) li.setAttribute('aria-current', 'step');
       nav.append(li);
     });
     return nav;
   }
 
+  /**
+   * A labelled input — the shared field (14 Components §03), so label,
+   * helper and error are associated for a reader. Same signature and shape as
+   * before, so no screen changes. No `required` attribute: the forms here
+   * validate themselves, and a native required would block a submit before
+   * that validation could say why. The " *" stays in the label's words.
+   */
   private field(label: string, type: string, value: string, hint = ''): {
     wrap: HTMLElement; input: HTMLInputElement;
   } {
-    const d = this.doc;
-    const wrap = d.createElement('label');
-    wrap.className = 'field';
-    const span = d.createElement('span');
-    span.textContent = label;
-    const input = d.createElement('input');
-    input.type = type; input.className = 'field-input'; input.value = value;
-    wrap.append(span, input);
-    if (hint) {
-      const p = d.createElement('span');
-      p.className = 'field-hint'; p.textContent = hint;
-      wrap.append(p);
-    }
-    return { wrap, input };
+    const f = uiField(this.doc, {
+      label, name: uid('pf'), kind: type as FieldKind, value, helper: hint || undefined,
+    });
+    return { wrap: f.root, input: f.input as HTMLInputElement };
   }
 
   private select(label: string, options: Record<string, string>, value: string): {
     wrap: HTMLElement; input: HTMLSelectElement;
   } {
-    const d = this.doc;
-    const wrap = d.createElement('label');
-    wrap.className = 'field';
-    const span = d.createElement('span');
-    span.textContent = label;
-    const sel = d.createElement('select');
-    sel.className = 'field-input';
-    for (const [v, t] of Object.entries(options)) {
-      const o = d.createElement('option');
-      o.value = v; o.textContent = t;
-      if (v === value) o.selected = true;
-      sel.append(o);
-    }
-    wrap.append(span, sel);
-    return { wrap, input: sel };
+    const f = uiField(this.doc, {
+      label, name: uid('pf'), kind: 'select', value,
+      options: Object.entries(options).map(([v, t]) => ({ value: v, label: t })),
+    });
+    return { wrap: f.root, input: f.input as HTMLSelectElement };
   }
 
+  /**
+   * A step's buttons, in their own band under the form. `nextVariant` lets a
+   * screen that already shows its one primary elsewhere (screen 7, once an
+   * account exists) draw "next" as the alternative.
+   */
   private nav(main: HTMLElement, onNext: () => void | Promise<void>, nextLabel = 'পরবর্তী →',
-              skippable = false): void {
+              skippable = false, nextVariant: 'primary' | 'secondary' = 'primary'): void {
     const d = this.doc;
     const row = d.createElement('div');
-    row.className = 'action-row';
+    row.className = 'action-row plat-band plat-actions';
 
     if (this.step > 0) {
-      const back = d.createElement('button');
-      back.type = 'button'; back.className = 'btn-secondary';
-      back.textContent = '← আগের';
-      back.disabled = this.busy;
-      back.addEventListener('click', () => { this.step--; this.error = ''; this.notice = ''; this.render(); });
-      row.append(back);
+      row.append(button(d, {
+        label: '← আগের', variant: 'secondary', disabled: this.busy,
+        onClick: () => { this.step--; this.error = ''; this.notice = ''; this.render(); },
+      }));
     }
     if (skippable) {
-      const skip = d.createElement('button');
-      skip.type = 'button'; skip.className = 'btn-ghost btn-small';
-      skip.textContent = 'এই ধাপ বাদ দিন';
-      skip.disabled = this.busy;
-      skip.addEventListener('click', () => { this.step++; this.error = ''; this.notice = ''; this.render(); });
-      row.append(skip);
+      row.append(button(d, {
+        label: 'এই ধাপ বাদ দিন', variant: 'ghost', size: 'sm', disabled: this.busy,
+        onClick: () => { this.step++; this.error = ''; this.notice = ''; this.render(); },
+      }));
     }
-    const next = d.createElement('button');
-    next.type = 'button'; next.className = 'btn-primary btn-inline';
-    next.textContent = this.busy ? 'অপেক্ষা করুন…' : nextLabel;
-    next.disabled = this.busy;
-    next.addEventListener('click', () => { void onNext(); });
-    row.append(next);
+    row.append(button(d, {
+      label: this.busy ? 'অপেক্ষা করুন…' : nextLabel, variant: nextVariant,
+      disabled: this.busy,
+      onClick: () => { void onNext(); },
+    }));
     main.append(row);
+  }
+
+  /** A wizard screen's form, as a band. */
+  private screenBand(): HTMLElement {
+    return platBand(this.doc, 'ui-card-form plat-form-band');
   }
 
   // Screen 1 — institution identity. Nothing is written yet.
   private screenInstitution(main: HTMLElement): void {
     const d = this.doc;
-    const form = d.createElement('div');
-    form.className = 'card card-form';
+    const form = this.screenBand();
     const nameBn = this.field('বাংলা নাম *', 'text', this.draft.nameBn);
     const nameEn = this.field('ইংরেজি নাম *', 'text', this.draft.nameEn,
       'স্লাগ এখান থেকেই তৈরি হবে');
@@ -1757,15 +1810,15 @@ export class Console_ {
   // Screen 2 — slug, weekend, shifts. Still nothing written.
   private screenSlug(main: HTMLElement): void {
     const d = this.doc;
-    const form = d.createElement('div');
-    form.className = 'card card-form';
+    const form = this.screenBand();
     const slug = this.field('স্লাগ *', 'text', this.draft.slug || slugify(this.draft.nameEn),
       'এটিই প্রতিষ্ঠানের ওয়েব ঠিকানা হবে — ছাপা হয়ে গেলে আর বদলানো যাবে না');
     form.append(slug.wrap);
 
     const weekend = d.createElement('fieldset');
-    weekend.className = 'field';
+    weekend.className = 'ui-fieldset plat-weekend';
     const legend = d.createElement('legend');
+    legend.className = 'ui-field-label';
     legend.textContent = 'সাপ্তাহিক ছুটি *';
     weekend.append(legend);
     const DAYS = ['রবি', 'সোম', 'মঙ্গল', 'বুধ', 'বৃহঃ', 'শুক্র', 'শনি'];
@@ -1811,8 +1864,7 @@ export class Console_ {
    */
   private screenPlan(main: HTMLElement): void {
     const d = this.doc;
-    const form = d.createElement('div');
-    form.className = 'card card-form';
+    const form = this.screenBand();
     const plan = this.field('প্ল্যান কোড', 'text', this.draft.planCode);
     const cap = this.field('শিক্ষার্থীর সীমা *', 'number', String(this.draft.studentCap),
       'সার্ভারে প্রয়োগ হয় — সীমার বেশি আমদানি বাতিল হবে');
@@ -1820,23 +1872,20 @@ export class Console_ {
     form.append(plan.wrap, cap.wrap, trial.wrap);
 
     const note = d.createElement('p');
-    note.className = 'page-sub';
+    note.className = 'plat-note';
     note.textContent = 'এই ধাপে প্রতিষ্ঠানটি তৈরি হবে। এরপর যেকোনো সময় থেমে আবার শুরু করা যাবে।';
     form.append(note);
     main.append(form);
 
     if (this.tenantId) {
-      const done = d.createElement('p');
-      done.className = 'status-chip';
-      done.textContent = 'প্রতিষ্ঠান তৈরি হয়ে গেছে — পরের ধাপে যান।';
-      main.append(done);
+      form.append(successNote(d, 'প্রতিষ্ঠান তৈরি হয়ে গেছে — পরের ধাপে যান।'));
       this.nav(main, () => { this.step = 3; this.error = ''; this.render(); });
       return;
     }
 
     this.nav(main, async () => {
       this.draft.planCode = plan.input.value.trim() || 'pilot';
-      this.draft.studentCap = Number(cap.input.value) || 0;
+      this.draft.studentCap = figure(cap.input.value) || 0;
       this.draft.trialEndsOn = trial.input.value;
       if (this.draft.studentCap <= 0) {
         this.error = 'শিক্ষার্থীর সীমা শূন্যের বেশি হতে হবে।'; this.render(); return;
@@ -1879,15 +1928,14 @@ export class Console_ {
   // Screen 4 — branding. Skippable: migration 039 already seeded the name.
   private screenBranding(main: HTMLElement): void {
     const d = this.doc;
-    const form = d.createElement('div');
-    form.className = 'card card-form';
+    const form = this.screenBand();
     const primary = this.field('প্রধান রং', 'text', '#1B5E20', 'হেক্স, যেমন #1B5E20');
     const head = this.field('প্রধান শিক্ষকের নাম', 'text', '', 'ছাপা কাগজে স্বাক্ষরের নিচে যাবে');
     const phone = this.field('ফোন', 'text', '');
     form.append(primary.wrap, head.wrap, phone.wrap);
 
     const note = d.createElement('p');
-    note.className = 'page-sub';
+    note.className = 'plat-note';
     note.textContent = 'লোগো ও সিল প্রতিষ্ঠান নিজেই পরে দিতে পারবে। '
       + 'এই ধাপ বাদ দিলেও কাগজে প্রতিষ্ঠানের নিজের নামই ছাপা হবে।';
     form.append(note);
@@ -1919,15 +1967,14 @@ export class Console_ {
   private screenAcademic(main: HTMLElement): void {
     const d = this.doc;
     const year = String(new Date().getUTCFullYear());
-    const form = d.createElement('div');
-    form.className = 'card card-form';
+    const form = this.screenBand();
     const label = this.field('শিক্ষাবর্ষ *', 'text', year);
     const starts = this.field('শুরু *', 'date', `${year}-01-01`);
     const ends = this.field('শেষ *', 'date', `${year}-12-31`);
     form.append(label.wrap, starts.wrap, ends.wrap);
 
     const note = d.createElement('p');
-    note.className = 'page-sub';
+    note.className = 'plat-note';
     note.textContent = 'শিক্ষাবর্ষের সঙ্গে টার্ম, গ্রেডিং স্কেল, ঘণ্টাসূচি, বিষয় ও ফি খাত তৈরি হবে। '
       + 'গ্রেডিং স্কেল ছাড়া বছরের প্রথম ফলাফল প্রকাশ ব্যর্থ হয় — তাই এটি বাদ দেওয়া যায় না।';
     form.append(note);
@@ -1950,19 +1997,16 @@ export class Console_ {
   private screenStructure(main: HTMLElement): void {
     const d = this.doc;
     const [lo, hi] = LEVEL_RANGE[this.draft.level] ?? [1, 10];
-    const form = d.createElement('div');
-    form.className = 'card card-form';
+    const form = this.screenBand();
     const min = this.field('সর্বনিম্ন শ্রেণি *', 'number', String(lo));
     const max = this.field('সর্বোচ্চ শ্রেণি *', 'number', String(hi));
     const per = this.field('প্রতি শ্রেণিতে শাখা', 'number', '1',
       'ক, খ, গ… — পরে যোগ করা যাবে');
     form.append(min.wrap, max.wrap, per.wrap);
 
-    const note = d.createElement('p');
-    note.className = 'page-sub';
-    note.textContent = `${LEVEL_BN[this.draft.level]} স্তরের জন্য সাধারণত `
-      + `${bnNum(lo)}–${bnNum(hi)} শ্রেণি। ভিন্ন হলে বদলে নিন।`;
-    form.append(note);
+    form.append(el(d, 'p', { className: 'plat-note' }, ...numText(d,
+      `${LEVEL_BN[this.draft.level]} স্তরের জন্য সাধারণত `
+      + `${bnNum(lo)}–${bnNum(hi)} শ্রেণি। ভিন্ন হলে বদলে নিন।`)));
 
     // R-8 §11. Provisioning seeds a subject list, and for classes 11–12 that
     // list is ours: shikhonBD's default reference set, with codes we assigned
@@ -1985,7 +2029,7 @@ export class Console_ {
 
     this.nav(main, async () => {
       const y = (this as unknown as { _year?: { label: string; starts: string; ends: string } })._year;
-      const minL = Number(min.input.value), maxL = Number(max.input.value);
+      const minL = figure(min.input.value), maxL = figure(max.input.value);
       if (!Number.isInteger(minL) || !Number.isInteger(maxL) || minL < 1 || maxL > 12 || minL > maxL) {
         this.error = 'শ্রেণির পরিসর ১–১২ এবং ক্রমানুসারে হতে হবে।'; this.render(); return;
       }
@@ -1997,7 +2041,7 @@ export class Console_ {
             tenantId: this.tenantId,
             yearLabel: y?.label, startsOn: y?.starts, endsOn: y?.ends,
             minLevel: minL, maxLevel: maxL,
-            sectionsPerClass: Number(per.input.value) || 0,
+            sectionsPerClass: figure(per.input.value) || 0,
           }),
         });
         // Showing the counts verbatim is how an operator knows the grading
@@ -2028,30 +2072,25 @@ export class Console_ {
     // What this run has already created. An operator who has just made the
     // principal should see that before being asked for another name.
     if (this.adminsMade.length > 0) {
-      const made = d.createElement('div');
-      made.className = 'card platform-state';
-      const mh = d.createElement('h2');
-      mh.className = 'section-heading';
-      mh.textContent = 'তৈরি হয়েছে';
-      made.append(mh);
+      const made = el(d, 'div', { className: 'platform-state' },
+        sectionHeading(d, { title: 'তৈরি হয়েছে', className: 'plat-label' }));
       const mlist = d.createElement('dl');
       mlist.className = 'detail-list';
       for (const a of this.adminsMade) {
         const div = d.createElement('div');
         const dt = d.createElement('dt'); dt.textContent = a.nameBn + ' · ' + a.roleBn;
-        const dd = d.createElement('dd');
         // The code sits WITH the name. Two codes and two people is exactly the
-        // situation in which one gets handed to the wrong person.
-        dd.textContent = a.code;
-        dd.className = 'mono state-ok';
+        // situation in which one gets handed to the wrong person. Monospaced
+        // and whole, `.n` for its digits.
+        const dd = el(d, 'dd', {
+          className: /[0-9]/.test(a.code) ? 'mono n state-ok' : 'mono state-ok', text: a.code,
+        });
         div.append(dt, dd); mlist.append(div);
       }
       made.append(mlist);
-      const warn = d.createElement('p');
-      warn.className = 'page-sub';
-      warn.textContent = 'কোডগুলো এখনই লিখে নিন — সার্ভারে সংরক্ষণ করা হয় না, '
-        + 'এই পাতা ছাড়লে আর দেখা যাবে না। ৭২ ঘণ্টা পর মেয়াদ শেষ।';
-      made.append(warn);
+      made.append(el(d, 'p', { className: 'plat-note' }, ...numText(d,
+        'কোডগুলো এখনই লিখে নিন — সার্ভারে সংরক্ষণ করা হয় না, '
+        + 'এই পাতা ছাড়লে আর দেখা যাবে না। ৭২ ঘণ্টা পর মেয়াদ শেষ।')));
       main.append(made);
     }
 
@@ -2060,22 +2099,15 @@ export class Console_ {
     // principal by mistyping one digit was possible before this.
     if (this.adminConflict) {
       const c = this.adminConflict;
-      const warn = d.createElement('div');
-      warn.className = 'card platform-state';
-      warn.dataset.conflict = 'admin-exists';
-      const wh = d.createElement('h2');
-      wh.className = 'section-heading';
-      wh.textContent = 'এই নম্বরটি আগে থেকেই আছে';
-      const wp = d.createElement('p');
-      wp.className = 'inline-notice';
-      wp.textContent = c.message;
-      const detail = d.createElement('p');
-      detail.className = 'att-sub';
+      const warn = el(d, 'div', { className: 'platform-state', data: { conflict: 'admin-exists' } },
+        sectionHeading(d, { title: 'এই নম্বরটি আগে থেকেই আছে', className: 'plat-label' }));
+      const wp = el(d, 'p', { className: 'inline-notice' }, ...numText(d, c.message));
       const roleNames = c.existingRoles.length > 0
         ? c.existingRoles.map((r) => ADMIN_ROLE_BN[r] ?? r).join(' · ')
         : 'কোনো ভূমিকা নেই';
-      detail.textContent = `${c.existingName} — বর্তমান ভূমিকা: ${roleNames}`;
-      warn.append(wh, wp, detail);
+      const detail = el(d, 'p', { className: 'plat-note' },
+        ...numText(d, `${c.existingName} — বর্তমান ভূমিকা: ${roleNames}`));
+      warn.append(wp, detail);
 
       // R-8 §9A, second pass. The panel named the person and their current
       // role but never the consequence, and "confirm?" without a stated
@@ -2095,28 +2127,26 @@ export class Console_ {
 
       const row = d.createElement('div');
       row.className = 'action-row';
-      const yes = d.createElement('button');
-      yes.type = 'button';
-      yes.className = 'btn-primary btn-inline';
-      yes.dataset.action = 'confirm-existing-admin';
-      yes.textContent = c.alreadyHasRole
-        ? 'হ্যাঁ — নতুন কোড দিন'
-        : `হ্যাঁ — ${ADMIN_ROLE_BN[c.requestedRole] ?? c.requestedRole} ভূমিকা দিন`;
-      yes.disabled = this.busy;
-      yes.addEventListener('click', () => { void create(true); });
-      const no = d.createElement('button');
-      no.type = 'button';
-      no.className = 'btn-secondary';
-      no.dataset.action = 'cancel-existing-admin';
-      no.textContent = 'না — নম্বর ঠিক করি';
-      no.addEventListener('click', () => { this.adminConflict = null; this.render(); });
+      // While this decision is open it is the screen's one primary.
+      const yes = button(d, {
+        label: c.alreadyHasRole
+          ? 'হ্যাঁ — নতুন কোড দিন'
+          : `হ্যাঁ — ${ADMIN_ROLE_BN[c.requestedRole] ?? c.requestedRole} ভূমিকা দিন`,
+        variant: 'primary', disabled: this.busy,
+        attrs: { 'data-action': 'confirm-existing-admin' },
+        onClick: () => { void create(true); },
+      });
+      const no = button(d, {
+        label: 'না — নম্বর ঠিক করি', variant: 'secondary',
+        attrs: { 'data-action': 'cancel-existing-admin' },
+        onClick: () => { this.adminConflict = null; this.render(); },
+      });
       row.append(yes, no);
       warn.append(row);
       main.append(warn);
     }
 
-    const form = d.createElement('div');
-    form.className = 'card card-form';
+    const form = this.screenBand();
     const nameBn = this.field('নাম (বাংলা) *', 'text', '');
     const phone = this.field('মোবাইল *', 'text', '', '+৮৮০১… ফরম্যাটে');
     const ROLES: Record<string, string> = {
@@ -2132,7 +2162,7 @@ export class Console_ {
     form.append(nameBn.wrap, phone.wrap, role.wrap);
 
     const note = d.createElement('p');
-    note.className = 'page-sub';
+    note.className = 'plat-note';
     note.textContent = 'অ্যাক্টিভেশন কোড একবারই দেখানো হবে। কোডটি সংরক্ষণ করা হয় না — '
       + 'সরাসরি বা ফোনে দিন, ইমেইলে নয়।';
     form.append(note);
@@ -2198,24 +2228,23 @@ export class Console_ {
     };
 
     const made = this.adminsMade.length > 0;
+    const conflict = this.adminConflict !== null;
+    // One primary at a time: the conflict's "yes" while it is open; else
+    // "next" once an account exists; else "create".
     this.nav(main, () => create(), made
-      ? 'আরেকজন তৈরি করুন' : 'অ্যাকাউন্ট তৈরি করুন');
+      ? 'আরেকজন তৈরি করুন' : 'অ্যাকাউন্ট তৈরি করুন', false,
+      made || conflict ? 'secondary' : 'primary');
     const row = main.lastElementChild;
     (row?.lastElementChild as HTMLElement | null)?.setAttribute('data-action', 'create-admin');
 
     if (made) {
       // Only offered once an account exists, because a school cannot be
       // activated without one — `canActivate` gates on exactly this.
-      const done = d.createElement('button');
-      done.type = 'button';
-      done.className = 'btn-primary btn-inline';
-      done.textContent = 'পরবর্তী →';
-      done.disabled = this.busy;
-      done.dataset.action = 'admins-done';
-      done.addEventListener('click', () => {
-        this.step = 7; this.error = ''; this.notice = ''; this.render();
-      });
-      row?.append(done);
+      row?.append(button(d, {
+        label: 'পরবর্তী →', variant: conflict ? 'secondary' : 'primary',
+        disabled: this.busy, attrs: { 'data-action': 'admins-done' },
+        onClick: () => { this.step = 7; this.error = ''; this.notice = ''; this.render(); },
+      }));
     }
   }
 
@@ -2247,44 +2276,39 @@ export class Console_ {
     state._imp = state._imp ?? {};
     const prior = state._imp[kind];
 
-    const form = d.createElement('div');
-    form.className = 'card card-form';
-    const label = d.createElement('label');
-    label.className = 'field';
-    const span = d.createElement('span');
-    span.textContent = kind === 'teacher' ? 'শিক্ষকের CSV' : 'শিক্ষার্থীর CSV';
-    const file = d.createElement('input');
-    file.type = 'file'; file.accept = '.csv,text/csv'; file.className = 'field-input';
-    label.append(span, file);
-    form.append(label);
-
-    const hint = d.createElement('p');
-    hint.className = 'page-sub';
-    hint.textContent = kind === 'teacher'
-      ? 'কলাম: নাম, আইডি, মোবাইল — ইংরেজি বা বাংলা হেডার চলবে। '
-        + 'সেকশন/বিষয় বণ্টন পরে, প্রতিষ্ঠানের নিজের পর্দা থেকে।'
-      : 'কলাম: রোল, নাম, শ্রেণি, শাখা, অভিভাবকের মোবাইল। '
-        + 'একই মোবাইলের দুই শিক্ষার্থী একজন অভিভাবকের দুই সন্তান হিসেবে যুক্ত হবে।';
-    form.append(hint);
+    const form = this.screenBand();
+    // The shared file control (14 Components §03): a real <input type=file>
+    // behind a labelled button, with the picked file named under it.
+    const upload = fileUpload(d, {
+      label: kind === 'teacher' ? 'শিক্ষকের CSV বেছে নিন' : 'শিক্ষার্থীর CSV বেছে নিন',
+      name: `${kind}-csv`, accept: '.csv,text/csv',
+      helper: kind === 'teacher'
+        ? 'কলাম: নাম, আইডি, মোবাইল — ইংরেজি বা বাংলা হেডার চলবে। '
+          + 'সেকশন/বিষয় বণ্টন পরে, প্রতিষ্ঠানের নিজের পর্দা থেকে।'
+        : 'কলাম: রোল, নাম, শ্রেণি, শাখা, অভিভাবকের মোবাইল। '
+          + 'একই মোবাইলের দুই শিক্ষার্থী একজন অভিভাবকের দুই সন্তান হিসেবে যুক্ত হবে।',
+      onFiles: () => { /* read on "যাচাই করুন", as before */ },
+    });
+    const file = upload.input;
+    form.append(upload.root);
     main.append(form);
 
     if (prior) {
-      const summary = d.createElement('p');
-      summary.className = 'status-chip';
-      summary.setAttribute('aria-live', 'polite');
-      summary.textContent = `পড়া হয়েছে ${bnNum(prior.read)} · ঠিক ${bnNum(prior.valid)}`
-        + ` · বাদ ${bnNum(prior.rejected)}`;
-      main.append(summary);
+      const summary = el(d, 'p', {
+        className: 'status-chip pending', attrs: { 'aria-live': 'polite' },
+      }, ...numText(d, `পড়া হয়েছে ${bnNum(prior.read)} · ঠিক ${bnNum(prior.valid)}`
+        + ` · বাদ ${bnNum(prior.rejected)}`));
+      form.append(summary);
 
       if (prior.errorCsv) {
         // Built by the server so the file the operator opens is
         // byte-identical to the one the server judged.
         const dl = d.createElement('a');
-        dl.className = 'btn-secondary';
+        dl.className = 'btn-secondary plat-download';
         dl.href = `data:text/csv;charset=utf-8,${encodeURIComponent(prior.errorCsv)}`;
         dl.download = `${kind}-errors.csv`;
-        dl.textContent = 'ভুলের তালিকা নামান';
-        main.append(dl);
+        dl.append(icon(d, 'download', 'btn-glyph'), el(d, 'span', { text: 'ভুলের তালিকা নামান' }));
+        form.append(dl);
       }
     }
 
@@ -2295,29 +2319,27 @@ export class Console_ {
     };
 
     const row = d.createElement('div');
-    row.className = 'action-row';
+    row.className = 'action-row plat-band plat-actions';
 
-    const back = d.createElement('button');
-    back.type = 'button'; back.className = 'btn-secondary';
-    back.textContent = '← আগের';
-    back.disabled = this.busy;
-    back.addEventListener('click', () => { this.step--; this.error = ''; this.render(); });
-    row.append(back);
+    row.append(button(d, {
+      label: '← আগের', variant: 'secondary', disabled: this.busy,
+      onClick: () => { this.step--; this.error = ''; this.render(); },
+    }));
 
-    const skip = d.createElement('button');
-    skip.type = 'button'; skip.className = 'btn-ghost btn-small';
-    skip.textContent = 'এই ধাপ বাদ দিন';
-    skip.disabled = this.busy;
-    skip.addEventListener('click', () => {
-      if (this.step === 8) { this.finish(); return; }
-      this.step++; this.error = ''; this.notice = ''; this.render();
+    row.append(button(d, {
+      label: 'এই ধাপ বাদ দিন', variant: 'ghost', size: 'sm', disabled: this.busy,
+      onClick: () => {
+        if (this.step === 8) { this.finish(); return; }
+        this.step++; this.error = ''; this.notice = ''; this.render();
+      },
+    }));
+
+    // Checking is the step's action until there is something checked to
+    // import; then importing is, and checking again is the alternative.
+    const canCommit = Boolean(prior && prior.valid > 0);
+    const check = button(d, {
+      label: 'যাচাই করুন', variant: canCommit ? 'secondary' : 'primary', disabled: this.busy,
     });
-    row.append(skip);
-
-    const check = d.createElement('button');
-    check.type = 'button'; check.className = 'btn-secondary';
-    check.textContent = 'যাচাই করুন';
-    check.disabled = this.busy;
     check.addEventListener('click', async () => {
       const csv = await readFile();
       if (csv === null) return;
@@ -2344,14 +2366,14 @@ export class Console_ {
     });
     row.append(check);
 
-    if (prior && prior.valid > 0) {
-      const commit = d.createElement('button');
-      commit.type = 'button'; commit.className = 'btn-primary btn-inline';
+    if (prior && canCommit) {
       // The count is ON the button. §10.2 — never a silent truncation.
-      commit.textContent = prior.rejected > 0
-        ? `${bnNum(prior.valid)}টি ঠিক সারি আমদানি করুন, ${bnNum(prior.rejected)}টি বাদ`
-        : `${bnNum(prior.valid)}টি আমদানি করুন`;
-      commit.disabled = this.busy;
+      const commit = button(d, {
+        label: prior.rejected > 0
+          ? `${bnNum(prior.valid)}টি ঠিক সারি আমদানি করুন, ${bnNum(prior.rejected)}টি বাদ`
+          : `${bnNum(prior.valid)}টি আমদানি করুন`,
+        variant: 'primary', disabled: this.busy,
+      });
       commit.addEventListener('click', async () => {
         // Re-selecting is still allowed: a picked file wins, so an operator who
         // deliberately chooses a corrected file gets the corrected file.

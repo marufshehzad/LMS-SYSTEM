@@ -331,16 +331,27 @@ describe('B-108 §16 — the Bangla numeral face', () => {
       'ShikhonBnNum must come before Hind Siliguri, or Hind Siliguri keeps the digits');
   });
 
-  test('every carried text stack that is still in use reaches it through --font-bn', () => {
-    // Checked only for the carried families a rule still reads; the alias layer
-    // defines a name only when something references it.
-    const inUse = ['--font-body', '--font-heading']
-      .filter((t) => new RegExp(`var\\(${t}\\)`).test(CSS));
-    assert.ok(inUse.length > 0, 'expected at least one carried text stack to be in use');
-    for (const t of inUse) {
+  test('every text stack a rule reads reaches it, or is the design numeral face', () => {
+    // The carried --font-body / --font-heading are no longer read by any rule —
+    // the screens were restyled onto --font-bn directly — so the guarantee is
+    // stated over what IS read: every `font-family: var(--x)` in the sheet must
+    // be --font-bn (which names ShikhonBnNum first), the design's own numeral
+    // face for `.n` (--font-num / its alias --font-bn-num), or an alias that
+    // resolves to --font-bn. A new stack that skips the face fails here.
+    const read = [...new Set([...CSS.matchAll(/font-family:\s*var\((--[a-z0-9-]+)\)/g)].map((m) => m[1]))];
+    assert.ok(read.includes('--font-bn'), 'the text stack must actually be read by a rule');
+    const allowed = new Set(['--font-bn', '--font-num', '--font-bn-num']);
+    for (const t of read) {
+      if (allowed.has(t)) continue;
       const m = new RegExp(`${t}:\\s*([^;]+);`).exec(ROOT_TOKENS);
-      assert.ok(m, `${t} is used by a carried rule but never defined`);
+      assert.ok(m, `${t} is read by a rule but never defined`);
       assert.match(m[1], /var\(--font-bn\)|ShikhonBnNum/, `${t} does not reach the numeral face`);
+    }
+    // --font-bn-num must really be the numeral face, not a letter stack.
+    const alias = /--font-bn-num:\s*([^;]+);/.exec(ROOT_TOKENS);
+    if (read.includes('--font-bn-num')) {
+      assert.ok(alias, '--font-bn-num is read but never defined');
+      assert.match(alias![1], /var\(--font-num\)/);
     }
   });
 

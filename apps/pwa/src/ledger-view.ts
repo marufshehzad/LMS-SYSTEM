@@ -2,20 +2,39 @@
  * Ledger (লেজার ও পুনর্মিলন) — PRD §4 double-entry ledger view.
  *
  * Reads GET /api/v1/finance/ledger when authenticated as accountant-level;
- * falls back to demo data otherwise. Shows the chart of accounts, recent
- * balanced batches (DR/CR pairs) and the running totals per MFS provider —
- * this is the surface that proves receipts + ledger posting are actually
- * happening, since the writes live inside the webhook processor.
+ * falls back to demo data otherwise. This is the surface that proves receipts
+ * + ledger posting are actually happening, since the writes live inside the
+ * webhook processor.
+ *
+ * Ata Ekta (07 Finance §04), top to bottom:
+ *   - the header: "লেজার", and a danger chip counting the MFS channels whose
+ *     reconciliation does not match — only when one does not;
+ *   - one flush panel: a four-cell strip (ডেবিট · ক্রেডিট · মিলেছে · অমিল),
+ *     one flat table of the recent entries' lines, and — when something does
+ *     not match — a danger-tint note saying in one sentence per channel how
+ *     much did not match and where;
+ *   - under it, "MFS পুনর্মিলন": one row per channel with its posted and
+ *     reconciled amounts and a মিলেছে/অমিল status, matched channels included.
+ *     The design does not draw it; the strip's totals replaced the old
+ *     per-channel cards, and without it a matched channel's figures would
+ *     leave the screen;
+ *   - the chart of accounts below that, which the design does not draw either
+ *     but which is this screen's data and stays.
+ *
+ * Every figure is one the payload carries or a sum of rows on this screen.
+ * The design's receipt counts, settlement dates, per-row match chips and CSV
+ * export have no source here and are not imitated.
  */
-import { formatBdt } from '../../../packages/ui-core/src/format.ts';
+import {
+  formatBdt, formatCount, formatDayMonth, toBanglaDigits, todayLocalIso,
+} from '../../../packages/ui-core/src/format.ts';
 import type { Auth } from './auth.ts';
 import {
-  pageHeader, sectionHeading, card, dataTable, statRow, statCard, listSkeleton,
-  permissionState, permissionMessage,
+  pageHeader, sectionHeading, dataTable, statRow, statCard, statusBadge, listSkeleton,
+  permissionState, permissionMessage, el, numText, uid,
 } from './ui/index.ts';
 import { errorState } from './view-states.ts';
 import { isDenied } from './http-status.ts';
-import { bnDate } from './view-states.ts';
 
 /** The account types this chart uses, in words rather than in English keys. */
 const ACCOUNT_TYPE_BN: Record<string, string> = {
@@ -46,6 +65,16 @@ interface LedgerPayload {
   reconciliation: { provider: string; posted: string; reconciled: string }[];
 }
 
+/** One line of one batch — a row of the entries table. */
+interface EntryRow {
+  key: string;
+  entryDate: string;
+  memo: string;
+  accountCode: string;
+  debit: string;
+  credit: string;
+}
+
 /**
  * R-8 audit — the THIRD private money formatter found in this pass, and on the
  * surface where it mattered most: a double-entry ledger whose debits and
@@ -54,6 +83,19 @@ interface LedgerPayload {
  * One formatter now, in ui-core.
  */
 const taka = formatBdt;
+
+/**
+ * An amount as whole paisa. Sums and differences of money are done in
+ * integers, so ৳ 0.10 + ৳ 0.20 is ৳ 0.30 and a matched channel never shows a
+ * ৳ 0.00 "mismatch" from float noise.
+ */
+function paisa(amount: string): number {
+  const n = Number(amount);
+  return Number.isFinite(n) ? Math.round(n * 100) : 0;
+}
+
+/** Paisa back to the money formatter. */
+const takaOf = (p: number): string => taka(p / 100);
 
 export interface LedgerViewOptions {
   root: HTMLElement;
@@ -71,6 +113,10 @@ export class LedgerView {
 
   constructor(options: LedgerViewOptions) {
     this.o = options;
+    // The loading state is drawn now, not after the answer: the shell empties
+    // the view before mounting, so until this the screen stayed blank for the
+    // whole round trip and the skeleton below was never seen.
+    this.render();
     void this.load();
   }
 
@@ -106,9 +152,21 @@ export class LedgerView {
     const root = this.o.root;
     root.textContent = '';
 
+    // A channel is unmatched when what was posted and what was reconciled
+    // differ. Only a loaded ledger has any, so the refusal, error and loading
+    // renders show the title alone.
+    const recon = this.data?.reconciliation ?? [];
+    const unmatched = recon.filter((r) => paisa(r.posted) !== paisa(r.reconciled));
+
     root.append(pageHeader(d, {
-      title: 'লেজার ও পুনর্মিলন',
-      subtitle: 'দ্বৈত-এন্ট্রি হিসাব — bKash/Nagad পুনর্মিলন সহ',
+      title: 'লেজার',
+      actions: this.data && unmatched.length
+        ? [statusBadge(d, {
+          state: 'unmatched',
+          label: `${formatCount(unmatched.length, 'bn')} অমিল`,
+          tone: 'danger',
+        })]
+        : undefined,
     }));
 
     if (this.denied) {
@@ -121,30 +179,170 @@ export class LedgerView {
     if (this.error) { root.append(errorState(d, this.error, () => void this.load())); return; }
     if (this.loading || !this.data) { root.append(listSkeleton(d, 4)); return; }
 
-    // ── MFS reconciliation: the money-in view ──
-    // Stat cards, because each provider is one figure with one verdict, and
-    // that is what a stat card is for. Cards that did this by hand had their
-    // own `.recon-card` class and their own margins.
-    root.append(sectionHeading(d, { title: 'MFS পুনর্মিলন' }));
-    root.append(statRow(d, ...this.data.reconciliation.map((r) => {
-      const matched = Number(r.reconciled) === Number(r.posted);
-      return statCard(d, {
-        label: r.provider,
-        value: taka(r.posted),
-        glyph: 'wallet',
-        tone: matched ? 'success' : 'warn',
-        // Never the tint alone: a school reconciling money must be able to
-        // tell "all matched" from "some matched" without seeing colour.
-        note: matched ? 'সম্পূর্ণ মিলেছে' : `${taka(r.reconciled)} মিলেছে — বাকিটা মেলেনি`,
-      });
+    const data = this.data;
+
+    // ── Recent entries, one row per line ──
+    // The design reads double entry as one table: each line is a debit or a
+    // credit, and a batch's lines sit next to each other. The line index is in
+    // the key because a batch may post two lines to the same account.
+    const entries: EntryRow[] = data.batches.flatMap((b) => b.lines.map((l, i) => ({
+      key: `${b.batchId}-${i}-${l.accountCode}`,
+      entryDate: b.entryDate,
+      memo: b.memo,
+      accountCode: l.accountCode,
+      debit: l.debit,
+      credit: l.credit,
     })));
+    const nameOf = new Map(data.accounts.map((a) => [a.code, a.nameBn]));
+
+    const headingId = uid('ledger');
+    const panel = el(d, 'section', {
+      className: 'ledger-panel', attrs: { 'aria-labelledby': headingId },
+    }, el(d, 'h2', {
+      className: 'ui-sr-only', text: 'সারাংশ ও সাম্প্রতিক এন্ট্রি', attrs: { id: headingId },
+    }));
+    root.append(panel);
+
+    // ── The strip: what the entries below add up to, and what matched ──
+    // ডেবিট and ক্রেডিট are the sums of the lines in the table under them —
+    // the note says so, because the server sends the recent batches, not the
+    // whole ledger. মিলেছে and অমিল are money, from the reconciliation the
+    // payload carries per channel. Colour only where the figure means
+    // something, and always with the word beside it.
+    if (entries.length || recon.length) {
+      const debit = entries.reduce((s, e) => s + paisa(e.debit), 0);
+      const credit = entries.reduce((s, e) => s + paisa(e.credit), 0);
+      const matched = recon.reduce((s, r) => s + paisa(r.reconciled), 0);
+      const gap = unmatched.reduce((s, r) => s + Math.abs(paisa(r.posted) - paisa(r.reconciled)), 0);
+      const noRecon = 'এখনো কোনো MFS লেনদেন নেই';
+      panel.append(el(d, 'div', { className: 'ledger-stats' }, statRow(d,
+        statCard(d, { label: 'ডেবিট', value: takaOf(debit), note: 'নিচের এন্ট্রিগুলোর যোগফল' }),
+        statCard(d, { label: 'ক্রেডিট', value: takaOf(credit), note: 'নিচের এন্ট্রিগুলোর যোগফল' }),
+        statCard(d, {
+          label: 'মিলেছে',
+          value: takaOf(matched),
+          tone: matched > 0 ? 'success' : undefined,
+          note: recon.length ? 'MFS লেনদেনে' : noRecon,
+        }),
+        statCard(d, {
+          label: 'অমিল',
+          value: takaOf(gap),
+          tone: gap > 0 ? 'danger' : undefined,
+          note: unmatched.length
+            ? unmatched.map((r) => r.provider).join(' · ')
+            : recon.length ? 'সব মাধ্যমে মিলেছে' : noRecon,
+        }),
+      )));
+    }
+
+    // Day and month, as the design writes it. The year joins only when an
+    // entry is not from this year, so a January screen never passes last
+    // December off as this one.
+    const thisYear = todayLocalIso().slice(0, 4);
+    const withYear = entries.some((e) => e.entryDate.slice(0, 4) !== thisYear);
+    const day = (iso: string): string => {
+      const short = formatDayMonth(iso, 'bn');
+      return withYear && /^\d{4}-/.test(iso) ? `${short} ${toBanglaDigits(iso.slice(0, 4))}` : short;
+    };
+    // On a phone the two amounts sit on one meta line with no header row
+    // above them, so each carries its word. `aria-hidden`: a reader already
+    // hears the column name from the list's own hidden prefix. The desktop
+    // table hides the word — its header says it. A line posts to one side
+    // only; the empty side is `is-none`, a dash in the table, and left off the
+    // phone's meta line, where "ক্রেডিট —" would be a third item saying nothing.
+    const amount = (word: string, value: string): HTMLElement => {
+      const has = paisa(value) > 0;
+      return el(d, 'span', { className: has ? 'ledger-amt' : 'ledger-amt is-none' },
+        el(d, 'span', { className: 'ledger-dir', text: `${word} `, attrs: { 'aria-hidden': 'true' } }),
+        ...(has ? numText(d, taka(value)) : ['—']));
+    };
+
+    panel.append(dataTable(d, {
+      caption: 'সাম্প্রতিক এন্ট্রি — ডেবিট ও ক্রেডিট',
+      rows: entries,
+      rowKey: (e) => e.key,
+      empty: {
+        glyph: 'book',
+        message: 'এখনো কোনো এন্ট্রি নেই।',
+        detail: 'আদায় লেখা হলে এখানে তার ডেবিট ও ক্রেডিট দেখা যাবে।',
+      },
+      columns: [
+        { key: 'date', header: 'তারিখ', mobile: 'subtitle', width: 'minmax(0, 1fr)',
+          cell: (e) => el(d, 'time', { attrs: { datetime: e.entryDate } }, ...numText(d, day(e.entryDate))) },
+        { key: 'memo', header: 'বিবরণ', mobile: 'title', width: 'minmax(0, 2fr)',
+          cell: (e) => e.memo || '—' },
+        { key: 'acct', header: 'হিসাব', mobile: 'meta', width: 'minmax(0, 1.4fr)',
+          cell: (e) => nameOf.get(e.accountCode) || e.accountCode },
+        { key: 'dr', header: 'ডেবিট', mobile: 'meta', numeric: true, width: 'minmax(0, 1.1fr)',
+          cell: (e) => amount('ডেবিট', e.debit) },
+        { key: 'cr', header: 'ক্রেডিট', mobile: 'meta', numeric: true, width: 'minmax(0, 1.1fr)',
+          cell: (e) => amount('ক্রেডিট', e.credit) },
+      ],
+    }));
+
+    // ── What did not match, in words ──
+    // The design's promise: not only how many, but how much and through which
+    // channel. One sentence per channel. The server sends no settlement date
+    // or receipt count, so the sentence does not invent one.
+    if (unmatched.length) {
+      panel.append(el(d, 'div', { className: 'ledger-mismatch', attrs: { role: 'note' } },
+        ...unmatched.map((r) => {
+          const diff = paisa(r.posted) - paisa(r.reconciled);
+          const sentence = diff > 0
+            ? `${r.provider}-এ ${takaOf(diff)} এখনো মেলেনি — পোস্ট হয়েছে ${taka(r.posted)}, মিলেছে ${taka(r.reconciled)}। মিলিয়ে দেখুন।`
+            : `${r.provider}-এ পোস্ট হওয়া অঙ্কের চেয়ে ${takaOf(-diff)} বেশি মিলেছে — পোস্ট হয়েছে ${taka(r.posted)}, মিলেছে ${taka(r.reconciled)}। মিলিয়ে দেখুন।`;
+          return el(d, 'p', { className: 'ledger-mismatch-text' }, ...numText(d, sentence));
+        })));
+    }
+
+    // ── Every channel, matched or not ──
+    // The strip gives the totals and the note speaks only of what did not
+    // match; this is where each channel's own posted and reconciled amounts
+    // stay visible, a fully matched one included. Neither figure can be read
+    // off the chart of accounts below: a balance also counts hand-entered
+    // collections, and Upay, bank and cheque have no account of their own.
+    // On a phone the two amounts share a meta line with no header row, so
+    // each carries its word, as in the entries table. The taka sign and its
+    // figure are one unit, so a wrapping meta line breaks before the amount,
+    // never between "৳" and the digits.
+    const figure = (word: string, value: string): HTMLElement =>
+      el(d, 'span', { className: 'ledger-amt' },
+        el(d, 'span', { className: 'ledger-dir', text: `${word} `, attrs: { 'aria-hidden': 'true' } }),
+        el(d, 'span', { className: 'ledger-fig' }, ...numText(d, taka(value))));
+    root.append(sectionHeading(d, { title: 'MFS পুনর্মিলন' }));
+    root.append(dataTable(d, {
+      caption: 'MFS পুনর্মিলন — মাধ্যম অনুযায়ী',
+      className: 'ledger-recon',
+      rows: recon,
+      rowKey: (r) => r.provider,
+      empty: {
+        glyph: 'wallet',
+        message: 'এখনো কোনো MFS লেনদেন নেই।',
+        detail: 'bKash, Nagad বা Rocket-এ টাকা এলে এখানে প্রতিটি মাধ্যমের পোস্ট হওয়া ও মেলানো অঙ্ক দেখা যাবে।',
+      },
+      columns: [
+        { key: 'provider', header: 'মাধ্যম', mobile: 'title', width: 'minmax(0, 1.4fr)',
+          cell: (r) => r.provider },
+        { key: 'posted', header: 'পোস্ট হয়েছে', mobile: 'meta', numeric: true, width: 'minmax(0, 1.2fr)',
+          cell: (r) => figure('পোস্ট হয়েছে', r.posted) },
+        { key: 'reconciled', header: 'মিলেছে', mobile: 'meta', numeric: true, width: 'minmax(0, 1.2fr)',
+          cell: (r) => figure('মিলেছে', r.reconciled) },
+        { key: 'state', header: 'অবস্থা', mobile: 'status', width: 'minmax(0, 1fr)',
+          cell: (r) => (paisa(r.posted) === paisa(r.reconciled)
+            ? statusBadge(d, { state: 'matched', label: 'মিলেছে', tone: 'success' })
+            : statusBadge(d, { state: 'unmatched', label: 'অমিল', tone: 'danger' })) },
+      ],
+    }));
 
     // ── Chart of accounts ──
+    // Not drawn in 07 Finance §04, but it is this screen's data: it stays,
+    // under the designed panel.
     root.append(sectionHeading(d, { title: 'হিসাব-তালিকা' }));
     root.append(dataTable(d, {
       caption: 'হিসাব-তালিকা',
-      rows: this.data.accounts,
+      rows: data.accounts,
       rowKey: (a) => a.code,
+      empty: { glyph: 'book', message: 'হিসাব-তালিকায় এখনো কোনো হিসাব নেই।' },
       columns: [
         { key: 'code', header: 'কোড', mobile: 'meta', cell: (a) => a.code,
           width: 'minmax(0, 1.2fr)' },
@@ -153,36 +351,9 @@ export class LedgerView {
         { key: 'type', header: 'ধরন', mobile: 'subtitle',
           cell: (a) => ACCOUNT_TYPE_BN[a.type] ?? a.type, width: 'minmax(0, 1fr)' },
         { key: 'bal', header: 'ব্যালেন্স', mobile: 'meta', numeric: true,
-          cell: (a) => taka(a.balance), width: 'minmax(0, 1.2fr)' },
+          cell: (a) => el(d, 'span', {}, ...numText(d, taka(a.balance))), width: 'minmax(0, 1.2fr)' },
       ],
     }));
-
-    // ── Recent entries ──
-    // One table per batch: double entry is READ as a table, and the fact that
-    // the two columns sum to the same number is the whole point of the layout.
-    root.append(sectionHeading(d, { title: 'সাম্প্রতিক এন্ট্রি' }));
-    for (const b of this.data.batches) {
-      root.append(card(d, {
-        title: b.memo,
-        subtitle: bnDate(b.entryDate),
-        glyph: 'book',
-        headingLevel: 3,
-      }, dataTable(d, {
-        caption: `${b.memo} — ডেবিট ও ক্রেডিট`,
-        rows: b.lines,
-        rowKey: (l) => `${b.batchId}-${l.accountCode}`,
-        columns: [
-          { key: 'acct', header: 'হিসাব', mobile: 'title', cell: (l) => l.accountCode,
-            width: 'minmax(0, 2fr)' },
-          { key: 'dr', header: 'ডেবিট', mobile: 'meta', numeric: true,
-            cell: (l) => (Number(l.debit) > 0 ? taka(l.debit) : '—'),
-            width: 'minmax(0, 1.2fr)' },
-          { key: 'cr', header: 'ক্রেডিট', mobile: 'meta', numeric: true,
-            cell: (l) => (Number(l.credit) > 0 ? taka(l.credit) : '—'),
-            width: 'minmax(0, 1.2fr)' },
-        ],
-      })));
-    }
   }
 
 }

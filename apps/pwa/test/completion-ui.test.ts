@@ -272,9 +272,32 @@ describe('guardian management', () => {
   test('a 403 is the whole answer — no empty state underneath it', async () => {
     mount([], true, { status: 403 });
     await settle();
-    assert.match(text(), /অনুমতি নেই/);
+    // B-30: the canonical refusal, asserted through the function so the
+    // wording cannot drift into a sixth version of the same sentence.
+    assert.ok(text().includes(permissionMessage('অভিভাবকের তথ্য')), text());
+    assert.ok(root().querySelector('.ui-state-denied[role="alert"]'),
+      'the refusal arrives after the drawer is open, so it is announced');
     assert.doesNotMatch(text(), /যুক্ত নেই/,
       '"you may not see this" and "there is nothing here" are different claims');
+  });
+
+  test('a refused change is announced, and nothing is left under it', async () => {
+    const auth = mount([LINK()]);
+    await settle();
+    (auth as unknown as { authedFetch: unknown }).authedFetch = async () =>
+      new Response(JSON.stringify({
+        error: 'forbidden', message: 'this endpoint requires one of: principal',
+      }), { status: 403 });
+    const boxes = [...root().querySelectorAll('input[type=checkbox]')] as HTMLInputElement[];
+    boxes[1].checked = false;
+    fire(boxes[1], 'change');
+    await settle(); await settle();
+    const refusal = root().querySelector('.ui-state-denied[role="alert"]');
+    assert.ok(refusal, 'the checkbox that had focus is gone; the refusal must be read out');
+    assert.ok(refusal!.textContent?.includes(permissionMessage()), refusal!.textContent ?? '');
+    assert.doesNotMatch(text(), /requires one of/, 'no English role codes on the screen');
+    assert.equal(byLabel(/আবার চেষ্টা/), undefined, 'no retry on a refusal');
+    assert.equal(root().querySelectorAll('input[type=checkbox]').length, 0, 'nothing under it');
   });
 
   test('offline says so and offers a retry', async () => {

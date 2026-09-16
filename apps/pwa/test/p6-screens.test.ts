@@ -98,9 +98,22 @@ describe('P6 — every screen has a page header', () => {
     await settle();
     assert.ok(root().querySelector('.page-header'));
     // Five hand-rolled `.login-input`/`.section-picker` controls with no
-    // visible labels became five `field()`s that carry them.
-    assert.equal(root().querySelectorAll('.ui-field').length, 5);
+    // visible labels became five `field()`s that carry them. Ata Ekta 02
+    // Teacher §07 then drew the task type as four tiles, so four remain
+    // `field()`s and the fifth is a named group of real buttons.
+    assert.equal(root().querySelectorAll('.ui-field').length, 4);
     assert.equal(root().querySelectorAll('.login-input, .ai-field').length, 0);
+    const group = root().querySelector('[role="group"]:has(> button.sikhok-task)') as HTMLElement;
+    assert.ok(group, 'the task choice is a group');
+    assert.ok((group.getAttribute('aria-label') ?? '').trim(), 'and the group is named, as the select was labelled');
+    const tiles = [...group.querySelectorAll(':scope > button.sikhok-task[type="button"]')] as HTMLButtonElement[];
+    assert.equal(tiles.length, 4);
+    for (const t of tiles) assert.ok((t.textContent ?? '').trim(), 'every tile says in words what it makes');
+    // One chosen, and the choice is announced — as a select's would be.
+    const pressed = () => tiles.flatMap((t, i) => (t.getAttribute('aria-pressed') === 'true' ? [i] : []));
+    assert.deepEqual(pressed(), [0]);
+    tiles[1].click();
+    assert.deepEqual(pressed(), [1], 'choosing another tile moves the one chosen');
   });
 });
 

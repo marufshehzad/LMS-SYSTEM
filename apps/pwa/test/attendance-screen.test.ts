@@ -16,7 +16,7 @@
  * driving the real engine through jsdom would test IndexedDB rather than the
  * rendering, which is the thing that was missing.
  */
-import { test, describe, before, beforeEach } from 'node:test';
+import { test, describe, before, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -42,6 +42,12 @@ before(() => {
     { value: dom.window.localStorage, configurable: true });
   g.addEventListener = dom.window.addEventListener.bind(dom.window);
   g.removeEventListener = dom.window.removeEventListener.bind(dom.window);
+});
+
+afterEach(() => {
+  // A confirm sheet mounts on body; one left open would aria-hide the next test.
+  for (const s of doc().querySelectorAll('.ui-scrim')) s.remove();
+  for (const s of doc().querySelectorAll('.ui-toast-host')) s.textContent = '';
 });
 
 beforeEach(() => {
@@ -130,6 +136,15 @@ function mount(opts: {
 
 const settle = () => new Promise((r) => setTimeout(r, 10));
 const text = () => host().textContent ?? '';
+const act = (action: string) => doc().querySelector<HTMLButtonElement>(`[data-action="${action}"]`);
+/** Mark everyone present, review, and return the confirm sheet's submit button. */
+function reviewAll(): HTMLButtonElement {
+  act('mark-all')!.click();
+  act('review')!.click();
+  const save = doc().querySelector<HTMLButtonElement>('.att-confirm [data-action="save"]');
+  assert.ok(save, 'review with everyone marked opens the confirm sheet');
+  return save;
+}
 
 /* ── tests ────────────────────────────────────────────────────────────── */
 
@@ -143,7 +158,7 @@ describe('P3 — the screen never invents a class', () => {
     await settle();
     assert.doesNotMatch(text(), /৯-ক/);
     assert.match(text(), /কোনো সেকশন নির্ধারিত নেই/);
-    assert.equal(host().querySelector('.tile'), null, 'no grid without a class');
+    assert.equal(host().querySelector('.att-row'), null, 'no register without a class');
   });
 
   test('the section label matches the one the roster screen shows', async () => {
@@ -161,7 +176,7 @@ describe('P3 — the screen never invents a class', () => {
     mount({ outbox });
     await settle();
     const screen = host();
-    assert.ok(screen.querySelectorAll('.tile').length === 4);
+    assert.ok(screen.querySelectorAll('.att-row').length === 4);
     // Proven through the save payload below; here, that the year is not the
     // literal that used to be sent.
     assert.doesNotMatch(text(), /yr-2026/);
@@ -206,14 +221,14 @@ describe('P3 — the states a teacher can be in', () => {
     // classroom with no signal must still be able to take the register.
     mount();
     await settle();
-    assert.equal(host().querySelectorAll('.tile').length, 4);
+    assert.equal(host().querySelectorAll('.att-row').length, 4);
 
     host().textContent = '';
     setOnline(false);
     mount({ routes: { '/api/v1/academics/sections': { throws: true },
                       '/api/v1/academics/roster': { throws: true } } });
     await settle();
-    assert.equal(host().querySelectorAll('.tile').length, 4,
+    assert.equal(host().querySelectorAll('.att-row').length, 4,
       'the cached roster did not survive');
     assert.match(text(), /এখন অফলাইন/);
   });
@@ -224,22 +239,27 @@ describe('P3 — the seven facts, in words', () => {
     // §"Do not rely on color alone." Every one of these is a word.
     mount();
     await settle();
-    const facts = [...host().querySelectorAll('.att-fact')].map((f) => f.textContent ?? '');
-    assert.ok(facts.some((f) => f.includes('নবম শ্রেণি — ক')), 'section missing');
-    assert.ok(facts.some((f) => f.includes('সেপ্টেম্বর')), 'date missing');
-    assert.ok(facts.some((f) => /৪ জন/.test(f)), 'student count missing');
-    assert.ok(facts.some((f) => f.includes('হাতে চিহ্নিত')), 'marked count missing');
+    const pickers = host().querySelector('.att-pickers');
+    assert.ok(pickers, 'no picker strip');
+    const selected = pickers.querySelector('select')!;
+    assert.equal(selected.selectedOptions[0]?.textContent, 'নবম শ্রেণি — ক', 'section missing');
+    assert.equal(act('mark-all')?.textContent, '৪ জনকে উপস্থিত ধরুন', 'student count missing');
+    assert.match(host().querySelector('.att-progress')?.textContent ?? '', /০ \/ ৪ জন চিহ্নিত/,
+      'marked count missing');
+    // The date is seen before anything is submitted: every submit passes the sheet.
+    reviewAll();
+    assert.match(doc().querySelector('.att-confirm-sub')?.textContent ?? '', /১ সেপ্টেম্বর/, 'date missing');
   });
 
   test('"marked" counts what the teacher touched, not what defaults to present', async () => {
-    // AttendanceGrid starts every student at `present`, so a count of tiles
-    // with a status is the class size from the first frame — a reassuring
-    // lie. The label says হাতে চিহ্নিত for the same reason.
+    // AttendanceGrid starts every student at `present` internally, so a count
+    // of rows with a status is the class size from the first frame — a
+    // reassuring lie. The progress strip counts only marked students.
     mount();
     await settle();
-    const marked = [...host().querySelectorAll('.att-fact')]
-      .find((f) => (f.textContent ?? '').includes('হাতে চিহ্নিত'));
-    assert.match(marked?.textContent ?? '', /০ \/ ৪/, 'should start at zero touched');
+    assert.match(host().querySelector('.att-progress')?.textContent ?? '', /০ \/ ৪ জন চিহ্নিত/,
+      'should start at zero marked');
+    assert.equal(host().querySelectorAll('.att-row[data-status="unset"]').length, 4);
   });
 
   test('offline is stated on this screen, not only in the shell banner', async () => {
@@ -292,32 +312,91 @@ describe('P3 — queued, failed, and the retry that did not exist', () => {
 });
 
 describe('P3 — saving', () => {
-  test('THE ONE THAT MATTERS — two taps enqueue one register', async () => {
+  test('THE ONE THAT MATTERS — three taps enqueue one register', async () => {
     // §17. On a slow phone the save button used to enqueue two sessions with
     // two different opIds for the same register.
     const outbox = stubOutbox();
     mount({ outbox });
     await settle();
-    const save = host().querySelector<HTMLButtonElement>('[data-action="save"]')!;
+    const save = reviewAll();
+    assert.equal(outbox.enqueued, 0, 'opening the confirm sheet enqueues nothing');
     save.click();
     save.click();
     save.click();
     await settle();
     assert.equal(outbox.enqueued, 1, `three taps enqueued ${outbox.enqueued} registers`);
+    assert.equal(doc().querySelector('.att-confirm'), null, 'the sheet closes on success');
   });
 
   test('the save button reports busy while it is in flight', async () => {
+    // In flight = until the register is durable on the device. The sheet
+    // holds, busy, through a slow enqueue; the network flush that follows
+    // runs in the background and never keeps the sheet open.
     const outbox = stubOutbox();
     let release!: () => void;
-    outbox.flush = () => new Promise((r) => { release = () => r(undefined); });
+    const enqueue = outbox.enqueue.bind(outbox);
+    outbox.enqueue = (input) => new Promise((r) => { release = () => r(enqueue(input)); });
     mount({ outbox });
     await settle();
-    const save = host().querySelector<HTMLButtonElement>('[data-action="save"]')!;
+    const save = reviewAll();
     save.click();
     await new Promise((r) => setTimeout(r, 1));
     assert.equal(save.getAttribute('aria-busy'), 'true');
     assert.equal(save.disabled, true);
+    assert.ok(doc().querySelector('.att-confirm'), 'the sheet stays up while the enqueue is pending');
     release();
+    await settle();
+    assert.equal(doc().querySelector('.att-confirm'), null, 'and closes once the register is safe');
+  });
+
+  test('a stalled flush never holds the sheet open', async () => {
+    const outbox = stubOutbox();
+    outbox.flush = () => new Promise(() => { /* the tower is down */ });
+    mount({ outbox });
+    await settle();
+    reviewAll().click();
+    await settle();
+    assert.equal(outbox.enqueued, 1);
+    assert.equal(doc().querySelector('.att-confirm'), null);
+  });
+
+  test('the saved message is announced where a screen reader can hear it', async () => {
+    // While the sheet is open every body child is aria-hidden, the toast host
+    // included. The sheet must close BEFORE the message is written.
+    mount();
+    await settle();
+    // Mutation records arrive in the order the DOM changed, so this sees
+    // whether the toast was written before or after the sheet (and the
+    // aria-hidden it put on the page) was removed.
+    const hiddenWhenWritten: boolean[] = [];
+    let sheetOpen = true;
+    const mo = new dom.window.MutationObserver((records) => {
+      for (const r of records) {
+        for (const n of r.removedNodes) {
+          if ((n as Element).classList?.contains('ui-scrim')) sheetOpen = false;
+        }
+        for (const n of r.addedNodes) {
+          const e = n as Element;
+          if (e.classList?.contains('ui-toast') && e.closest('.ui-toast-host')) {
+            hiddenWhenWritten.push(sheetOpen);
+          }
+        }
+      }
+    });
+    const save = reviewAll();
+    mo.observe(doc().body, { childList: true, subtree: true });
+    save.click();
+    await settle();
+    mo.disconnect();
+    assert.deepEqual(hiddenWhenWritten, [false],
+      'the toast was written while the page was still aria-hidden behind the sheet');
+    const t = doc().querySelector('.ui-toast-host .ui-toast');
+    assert.match(t?.textContent ?? '', /হাজিরা সংরক্ষিত/);
+    const live = t!.closest('[aria-live]');
+    assert.ok(live, 'the message is inside a live region');
+    assert.equal(t!.closest('[aria-hidden="true"]'), null,
+      'the live region is not inside an aria-hidden subtree');
+    assert.equal(doc().querySelector('.att-confirm'), null);
   });
 
   test('saving offline says the data is on the device, not that it was sent', async () => {
@@ -327,7 +406,7 @@ describe('P3 — saving', () => {
     setOnline(false);
     mount();
     await settle();
-    host().querySelector<HTMLButtonElement>('[data-action="save"]')!.click();
+    reviewAll().click();
     await settle();
     const toast = doc().querySelector('.ui-toast');
     assert.match(toast?.textContent ?? '', /এই যন্ত্রে সংরক্ষিত/);
@@ -336,38 +415,71 @@ describe('P3 — saving', () => {
 
   test('an enqueue that genuinely fails is reported, and the marks stay', async () => {
     // IndexedDB refusing is rare and fatal to this register — so it is said
-    // plainly rather than swallowed, and the grid is not cleared.
+    // plainly rather than swallowed, and the register is not cleared.
     const outbox = stubOutbox();
     outbox.failNextEnqueue = true;
     mount({ outbox });
     await settle();
-    host().querySelector<HTMLButtonElement>('[data-action="save"]')!.click();
+    const save = reviewAll();
+    save.click();
     await settle();
     assert.match(doc().querySelector('.ui-toast')?.textContent ?? '', /সংরক্ষণ করা যায়নি/);
-    assert.equal(host().querySelectorAll('.tile').length, 4, 'the marks were cleared');
+    assert.equal(host().querySelectorAll('.att-row').length, 4, 'the marks were cleared');
+    assert.equal(host().querySelectorAll('.att-row[data-status="present"]').length, 4,
+      'the marks were cleared');
+    assert.ok(doc().querySelector('.att-confirm'), 'the sheet stays open to try again');
+    assert.equal(save.disabled, false, 'and its button is usable again');
+    // The page behind the sheet is aria-hidden, so the failure is also said
+    // inside the sheet, and focus is back on the control — not on <body>.
+    const alert = doc().querySelector('.att-confirm [role="alert"]');
+    assert.match(alert?.textContent ?? '', /হাজিরা সংরক্ষণ করা যায়নি/);
+    assert.equal(doc().activeElement, save, 'focus returns to "জমা দিন" inside the sheet');
+  });
+
+  test('only the students the teacher marked are sent', async () => {
+    const sent: unknown[] = [];
+    const outbox = stubOutbox();
+    const enqueue = outbox.enqueue.bind(outbox);
+    outbox.enqueue = async (input) => { sent.push(input.payload); return enqueue(input); };
+    mount({ outbox });
+    await settle();
+    // Mark one student through the switch, then submit anyway.
+    const hit = host().querySelector<HTMLButtonElement>('.att-row[data-student-id="b"] .att-row-hit')!;
+    hit.click();
+    host().querySelector<HTMLButtonElement>('.att-row[data-student-id="b"] .att-opt[data-status="absent"]')!.click();
+    act('review')!.click();
+    act('submit-anyway')!.click();
+    doc().querySelector<HTMLButtonElement>('.att-confirm [data-action="save"]')!.click();
+    await settle();
+    assert.equal(outbox.enqueued, 1);
+    const payload = sent[0] as { records: Array<{ studentId: string; status: string }> };
+    assert.deepEqual(payload.records, [{ studentId: 'b', status: 'absent' }]);
   });
 });
 
-describe('P3 — every tile has a real accessible name', () => {
-  test('THE ONE THAT MATTERS — no tile is ever announced as "undefined"', async () => {
+describe('P3 — every row has a real accessible name', () => {
+  test('THE ONE THAT MATTERS — no row is ever announced as "undefined"', async () => {
     // The roster returns `fullName: { bn, en }`. Declaring `{ nameBn }` and
     // reading `r.nameBn` compiles, produces `undefined` at runtime, and looks
-    // perfect on screen — the tile shows a roll number and a status glyph, and
-    // the name only reaches `title` and `aria-label`. A screen reader
-    // announced "রোল 1, undefined, উপস্থিত" for every child in the class.
+    // perfect on screen. A screen reader announced "রোল 1, undefined, উপস্থিত"
+    // for every child in the class. Names are visible now, so the same
+    // defect would also be printed.
     mount();
     await settle();
-    const tiles = [...host().querySelectorAll('.tile')];
-    assert.equal(tiles.length, 4);
-    for (const t of tiles) {
+    const rows = [...host().querySelectorAll('.att-row-hit')];
+    assert.equal(rows.length, 4);
+    for (const t of rows) {
       const label = t.getAttribute('aria-label') ?? '';
-      assert.doesNotMatch(label, /undefined|null/, `tile announced: ${label}`);
-      assert.match(label, /রোল/, 'every tile names its roll');
+      assert.doesNotMatch(label, /undefined|null/, `row announced: ${label}`);
+      assert.match(label, /রোল/, 'every row names its roll');
+      const name = t.querySelector('.att-name')?.textContent ?? '';
+      assert.ok(name.trim().length > 0, 'the visible name is empty');
+      assert.doesNotMatch(name, /undefined|null/, `row shows: ${name}`);
     }
-    assert.match(tiles[0].getAttribute('aria-label') ?? '', /সাদিয়া ইসলাম/);
+    assert.match(rows[0].getAttribute('aria-label') ?? '', /সাদিয়া ইসলাম/);
     // English-only and name-less rows still get something sayable.
-    assert.match(tiles[2].getAttribute('aria-label') ?? '', /Rafi Hasan/);
-    assert.match(tiles[3].getAttribute('aria-label') ?? '', /রোল ৪|রোল 4/);
+    assert.match(rows[2].getAttribute('aria-label') ?? '', /Rafi Hasan/);
+    assert.match(rows[3].getAttribute('aria-label') ?? '', /রোল ৪|রোল 4/);
   });
 });
 
@@ -375,10 +487,10 @@ describe('P3 — the page says its title once', () => {
   test('the wrapper owns the heading; the grid does not repeat it', async () => {
     // Both rendered `<h1>হাজিরা</h1>` in the first cut, and printed the date
     // twice — the duplication between a page header and its content that §5
-    // forbids.
-    mount();
+    // forbids. Sync state stays visible on the screen, in its sync line.
+    mount({ outbox: stubOutbox({ pending: 1 }) });
     await settle();
     assert.equal(host().querySelectorAll('h1').length, 1);
-    assert.ok(host().querySelector('.sync-chip'), 'the chip still belongs to the grid');
+    assert.ok(host().querySelector('.att-sync-line'), 'sync state is still on the screen');
   });
 });

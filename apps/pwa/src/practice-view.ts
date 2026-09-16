@@ -12,8 +12,30 @@
  * outbox, where the server re-marks it authoritatively. If the two ever
  * disagreed, the server's verdict is the one that counts; the local one
  * exists purely so a student on a bus isn't staring at a spinner.
+ *
+ * Drawn in 14 Components §08 (Ata Ekta): one white card holding, in order,
+ * the dot rail, the meta row (question number + five difficulty dots), the
+ * stem, the answer (option rows or one box), then — after checking — the
+ * verdict, the explanation box and the two small actions.
  */
 import { formatCount } from '../../../packages/ui-core/src/format.ts';
+import { button } from './ui/button.ts';
+import { append, numClass, numText, uid } from './ui/dom.ts';
+import { emptyState } from './view-states.ts';
+
+/**
+ * Put `text` into `node` with every number in the numeral face (R6): the
+ * whole element carries `n` when the text is only a figure ("১৩"), otherwise
+ * each number gets its own `<span class="n">` and the words keep the text
+ * face. Text nodes only — questions are school data, never markup — so
+ * `textContent` is exactly `text`.
+ */
+function setNumText(d: Document, node: HTMLElement, base: string, text: string): void {
+  const cls = numClass(base, text);
+  node.className = cls;
+  if (cls.split(' ').includes('n')) node.textContent = text;
+  else append(node, ...numText(d, text));
+}
 
 export interface PracticeOption {
   id: string;
@@ -135,35 +157,46 @@ export class PracticeView {
 
     const q = this.current;
     if (!q) {
-      const done = d.createElement('p');
-      done.className = 'page-sub empty';
-      done.textContent = 'এই পাঠে কোনো অনুশীলন নেই।';
-      root.append(done);
+      // 14 Components §08 footnote: with no practice the section says so in
+      // one sentence. Built with the shared empty state (R10) so it reads as
+      // every other empty screen does.
+      root.append(emptyState(d, { message: 'এই পাঠে কোনো অনুশীলন নেই।' }));
       return;
     }
+
+    // The card is the drawn white frame; everything below sits inside it,
+    // the dot rail included. Not `.card`: that class shadows on hover, and a
+    // practice card is not clickable (shadows are for floating things only).
+    const card = d.createElement('div');
+    card.className = 'prac-card';
 
     // Progress dots — solved / attempted / untouched, so the student sees
     // shape of the set at a glance rather than just "3 of 6".
     const rail = d.createElement('div');
     rail.className = 'prac-rail';
+    // role=img: an aria-label on a role-less div is ignored by most screen
+    // readers, so the rail's name was never actually spoken. Both numbers in
+    // Bangla, as the eye reads them.
+    rail.setAttribute('role', 'img');
     rail.setAttribute('aria-label',
-      `প্রশ্ন ${q.questionNo}, মোট ${this.o.questions.length}`);
+      `প্রশ্ন ${formatCount(q.questionNo, 'bn')}, মোট ${formatCount(this.o.questions.length, 'bn')}`);
     this.o.questions.forEach((item, i) => {
       const dot = d.createElement('span');
       dot.className = 'prac-dot';
       dot.dataset.state = this.solved.has(item.id) ? 'solved'
         : i === this.index ? 'current' : 'todo';
+      // The sheet colours by class: the current dot in accent even once it
+      // is solved (as drawn after a correct verdict), solved ones in ok.
+      if (i === this.index) dot.classList.add('is-current');
+      else if (this.solved.has(item.id)) dot.classList.add('is-done');
       rail.append(dot);
     });
-    root.append(rail);
-
-    const card = d.createElement('div');
-    card.className = 'card prac-card';
+    card.append(rail);
 
     const meta = d.createElement('div');
     meta.className = 'prac-meta';
     const num = d.createElement('span');
-    num.textContent = `প্রশ্ন ${formatCount(q.questionNo, 'bn')}`;
+    append(num, ...numText(d, `প্রশ্ন ${formatCount(q.questionNo, 'bn')}`));
     const diff = d.createElement('span');
     diff.className = 'prac-difficulty';
     diff.textContent = '●'.repeat(q.difficulty) + '○'.repeat(5 - q.difficulty);
@@ -173,15 +206,19 @@ export class PracticeView {
     meta.append(num, diff);
     card.append(meta);
 
+    // The stem names the answer controls below it, so a screen reader that
+    // lands on an option or the answer box hears the question with it.
+    const stemId = uid('prac-stem');
     const stem = d.createElement('p');
-    stem.className = 'prac-stem';
-    stem.textContent = q.stemBn;
+    setNumText(d, stem, 'prac-stem', q.stemBn);
+    stem.id = stemId;
     card.append(stem);
 
     if (q.kind === 'mcq' || q.kind === 'true_false') {
       const list = d.createElement('div');
       list.className = 'prac-options';
       list.setAttribute('role', 'radiogroup');
+      list.setAttribute('aria-labelledby', stemId);
       for (const opt of q.options) {
         const btn = d.createElement('button');
         btn.type = 'button';
@@ -197,27 +234,31 @@ export class PracticeView {
         mark.className = 'prac-mark';
         mark.setAttribute('aria-hidden', 'true');
         const label = d.createElement('span');
-        label.className = 'prac-option-text';
-        label.textContent = opt.textBn;
+        setNumText(d, label, 'prac-option-text', opt.textBn);
 
         if (this.revealed) {
           // After answering, show BOTH what they chose and what was right —
           // marking only the wrong answer teaches nothing.
           if (opt.isCorrect) {
             btn.dataset.state = 'correct';
+            btn.classList.add('is-correct');
             mark.textContent = '✓';
             // Spoken as well as shown, so the state does not depend on sight.
             btn.setAttribute('aria-label', `${opt.textBn} — সঠিক উত্তর`);
           } else if (opt.id === this.selectedId) {
             btn.dataset.state = 'wrong';
+            btn.classList.add('is-wrong');
             mark.textContent = '✗';
             btn.setAttribute('aria-label', `${opt.textBn} — তোমার উত্তর, ভুল`);
           } else {
-            mark.textContent = '';
+            // Drawn: an option that was neither chosen nor right keeps its
+            // empty ring after checking, rather than losing its mark.
+            mark.textContent = '○';
           }
         } else if (this.selectedId === opt.id) {
           mark.textContent = '●';
           btn.dataset.state = 'selected';
+          btn.classList.add('is-chosen');
         } else {
           mark.textContent = '○';
         }
@@ -234,8 +275,11 @@ export class PracticeView {
     } else {
       const input = d.createElement('input');
       input.type = q.kind === 'numeric' ? 'number' : 'text';
-      input.className = 'field-input prac-input';
+      // `ui-input` is ui/field.ts's control: the sheet's box, its focus ring
+      // and its disabled look for the revealed state. Drawn in the number face.
+      input.className = q.kind === 'numeric' ? 'ui-input prac-input n is-num' : 'ui-input prac-input n';
       input.placeholder = q.kind === 'numeric' ? 'উত্তর লেখো' : 'সংক্ষেপে লেখো';
+      input.setAttribute('aria-labelledby', stemId);
       input.value = this.typed;
       input.disabled = this.revealed;
       if (q.kind === 'numeric') input.step = 'any';
@@ -247,16 +291,19 @@ export class PracticeView {
       const verdict = d.createElement('div');
       verdict.className = 'prac-verdict';
       verdict.dataset.correct = String(this.wasCorrect);
+      // A short answer is marked by the teacher, so `wasCorrect` is always
+      // false there — it takes no tone and must never turn red.
+      if (q.kind !== 'short_answer') verdict.classList.add(this.wasCorrect ? 'is-correct' : 'is-wrong');
       verdict.setAttribute('role', 'status');
+      // The words carry right and wrong; the colour only repeats them.
       verdict.textContent = q.kind === 'short_answer'
         ? 'উত্তর জমা হয়েছে — শিক্ষক যাচাই করবেন'
-        : this.wasCorrect ? '✓ ঠিক হয়েছে!' : '✗ আবার ভাবো';
+        : this.wasCorrect ? 'ঠিক হয়েছে' : 'আবার ভাবো';
       card.append(verdict);
 
       if (q.explanationBn) {
         const exp = d.createElement('p');
-        exp.className = 'prac-explanation';
-        exp.textContent = q.explanationBn;
+        setNumText(d, exp, 'prac-explanation', q.explanationBn);
         card.append(exp);
       }
     }
@@ -264,28 +311,31 @@ export class PracticeView {
     const actions = d.createElement('div');
     actions.className = 'prac-actions';
     if (!this.revealed) {
-      const check = d.createElement('button');
-      check.type = 'button';
-      check.className = 'btn-primary';
-      check.textContent = 'যাচাই করো';
-      check.disabled = !this.selectedId && !this.typed.trim();
-      check.addEventListener('click', () => { void this.check(); });
-      actions.append(check);
+      // Full width, label flush left (btn-block), as drawn before checking.
+      actions.append(button(d, {
+        label: 'যাচাই করো',
+        variant: 'primary',
+        block: true,
+        disabled: !this.selectedId && !this.typed.trim(),
+        onClick: () => { void this.check(); },
+      }));
     } else {
+      // Two small buttons side by side at their own width; one primary.
       if (!this.wasCorrect && q.kind !== 'short_answer') {
-        const again = d.createElement('button');
-        again.type = 'button';
-        again.className = 'btn-secondary prac-retry';
-        again.textContent = 'আবার চেষ্টা করো';
-        again.addEventListener('click', () => { this.retry(); });
-        actions.append(again);
+        actions.append(button(d, {
+          label: 'আবার চেষ্টা করো',
+          variant: 'secondary',
+          size: 'sm',
+          className: 'prac-retry',
+          onClick: () => { this.retry(); },
+        }));
       }
-      const next = d.createElement('button');
-      next.type = 'button';
-      next.className = 'btn-primary';
-      next.textContent = this.index >= this.o.questions.length - 1 ? 'শেষ করো' : 'পরের প্রশ্ন →';
-      next.addEventListener('click', () => { this.next(); });
-      actions.append(next);
+      actions.append(button(d, {
+        label: this.index >= this.o.questions.length - 1 ? 'শেষ করো' : 'পরের প্রশ্ন →',
+        variant: 'primary',
+        size: 'sm',
+        onClick: () => { this.next(); },
+      }));
     }
     card.append(actions);
     root.append(card);

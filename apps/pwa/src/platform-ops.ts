@@ -28,10 +28,11 @@
 import {
   pageHeader, sectionHeading, card, button, buttonRow, dataTable, statusBadge,
   statRow, statCard, field, setFieldError, clearFieldError, tabs, openDrawer,
-  setOverlayBody, listSkeleton, el, append, type OverlayHandle, type Field,
+  listSkeleton, permissionState, humanError, list, listItem, avatar, numText,
+  el, append, type OverlayHandle, type Field, type Child,
 } from './ui/index.ts';
 import {
-  emptyState, errorState, successNote, confirmDialog, bnNum, bnDate, bnDateTime,
+  emptyState, errorState, successNote, confirmDialog, bnDate, bnDateTime,
 } from './view-states.ts';
 import { formatBdt, formatCount, todayLocalIso } from '../../../packages/ui-core/src/format.ts';
 
@@ -286,10 +287,15 @@ export function attentionQueue(rows: TenantOverview[], now = Date.now()): Attent
         labelBn: 'স্থগিত — কেউ প্রবেশ করতে পারছেন না' });
     }
     if (t.billingState === 'limited') {
+      // Said the way 10 Platform Console says it — "বকেয়া — ১২ দিন পার" —
+      // because how long a bill has gone unpaid is what decides the call.
+      const late = t.nextDueOn ? overdueDays(t.nextDueOn, now) : 0;
       out.push({ tenantId: t.id, nameBn: t.nameBn, kind: 'overdue', weight: 95,
-        labelBn: t.nextDueOn
-          ? `বকেয়া — শেষ তারিখ ছিল ${bnDate(t.nextDueOn)}`
-          : 'বকেয়া' });
+        labelBn: late > 0
+          ? `বকেয়া — ${bn(late)} দিন পার`
+          : t.nextDueOn
+            ? `বকেয়া — শেষ তারিখ ছিল ${bnDate(t.nextDueOn)}`
+            : 'বকেয়া' });
     } else if (t.billingState === 'grace_period') {
       out.push({ tenantId: t.id, nameBn: t.nameBn, kind: 'grace', weight: 70,
         labelBn: t.graceUntil
@@ -341,9 +347,107 @@ export interface OpsViewOptions {
   onOpenTenant(id: string): void;
   /** Start the R-7 creation wizard. */
   onNewTenant(): void;
+  /**
+   * The section on screen changed.  (Ata Ekta, 10 Platform Console)
+   *
+   * The console's black sidebar owns the nav highlight now; this view no
+   * longer draws its own tab strip. Called on a nav press and when a school
+   * is opened — a school's page lives under প্রতিষ্ঠান, whichever section it
+   * was opened from.
+   */
+  onSection?(s: Tab): void;
 }
 
-type Tab = 'dashboard' | 'institutions' | 'plans' | 'operators';
+export type Tab = 'dashboard' | 'institutions' | 'plans' | 'operators';
+
+// ── Presentation helpers (Ata Ekta) ────────────────────────────────────
+
+/**
+ * A band. 10 Platform Console draws its content as full-bleed white bands
+ * under the bar — a 1px line between them — rather than cards in a gutter.
+ * Exported so the R-7 screens in platform.ts speak the same vocabulary.
+ */
+export function platBand(doc: Document, className: string, ...children: Child[]): HTMLElement {
+  return el(doc, 'div', {
+    className: ['plat-band', className].filter(Boolean).join(' '),
+  }, ...children);
+}
+
+/** The code the platform API put on a refusal, or ''. */
+export function errorCodeOf(err: unknown): string {
+  return String((err as { code?: unknown } | null)?.code ?? '');
+}
+
+/**
+ * A refusal is a state, not an error to retry (§7 denied).
+ *
+ * platform-svc answers a bad key, a non-operator token and a revoked
+ * credential alike with 403 `forbidden`, and an expired token with 401. A
+ * retry button under either teaches an operator to hammer a locked door; the
+ * way out is the sidebar's "সেশন শেষ".
+ */
+export function isDenied(code: string): boolean {
+  return code === 'forbidden' || code === 'unauthorized';
+}
+
+/**
+ * The sentence an error state shows (§7 error: plain Bangla).
+ *
+ * The server's own words when it wrote them for a person — platform-svc's
+ * validation messages are Bangla. A request that never reached a server is
+ * said as that, not as the browser's "Failed to fetch". An English message
+ * (`tenantId must be a uuid`, `platform console is not configured…`) keeps
+ * its information but no longer leads: the Bangla sentence is the title and
+ * the server's words are the detail line under it.
+ */
+export function plainError(err: unknown, fallback: string): string {
+  const raw = String((err as { message?: unknown } | null)?.message ?? '').trim();
+  if (err instanceof TypeError && /fetch|network|load failed/i.test(raw)) {
+    return humanError('offline');
+  }
+  if (!raw) return fallback;
+  if (/[ঀ-৿]/.test(raw)) return raw;
+  return `${fallback} ${raw}`;
+}
+
+/** Whole days since an ISO date, or 0 when it has not passed or cannot be read. */
+function overdueDays(iso: string, now = Date.now()): number {
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return 0;
+  return Math.max(0, Math.floor((now - at) / DAY_MS));
+}
+
+/**
+ * The one word the fleet table's অবস্থা chip says.  (Ata Ekta, screen ০২)
+ *
+ * The drawn table has no billing column and no cap column: a school's worst
+ * condition is the chip, and the cap shows in the শিক্ষার্থী cell itself. So
+ * this reads, in the order an operator acts on them, every fact the removed
+ * columns carried — lock-out, arrears, read-only, a full or nearly full roll,
+ * a school nobody has filled in, a grace window, a trial — before it falls
+ * back to the ops state. First match wins.
+ */
+function fleetState(t: TenantOverview): { state: string; label: string } {
+  const cap = t.studentCap || 0;
+  if (t.access === 'none') return { state: 'overdue', label: 'বন্ধ' };
+  if (t.billingState === 'limited') return { state: 'overdue', label: 'বকেয়া' };
+  if (t.access === 'read_only') return { state: 'partial', label: 'শুধু পড়া' };
+  if (cap > 0 && t.studentCount >= cap) return { state: 'overdue', label: 'সীমা পূর্ণ' };
+  if (cap > 0 && t.studentCount >= cap * 0.9) return { state: 'partial', label: 'সীমার কাছে' };
+  if (t.studentCount === 0 && t.userCount <= 1) return { state: 'partial', label: 'সেটআপ বাকি' };
+  if (t.billingState === 'grace_period') return { state: 'partial', label: 'ছাড়ের মেয়াদে' };
+  if (t.billingState === 'trial') return { state: 'invited', label: 'ট্রায়াল' };
+  return OPS_BN[t.opsState] ?? { label: t.opsState, state: 'draft' };
+}
+
+/** A zeroed summary: an honest ০ before the server answers, never a page's count. */
+const ZERO_SUMMARY: FleetSummary = {
+  total: 0, attention: { critical: 0, warning: 0, info: 0 },
+  access: { full: 0, readOnly: 0, none: 0 },
+  billing: { trial: 0, active: 0, grace: 0, overdue: 0 },
+  usage: { students: 0, users: 0, classes: 0, sections: 0, paid: 0 },
+  quiet: 0, neverActive: 0, planUsage: {},
+};
 
 export class PlatformOpsView {
   private readonly o: OpsViewOptions;
@@ -353,9 +457,12 @@ export class PlatformOpsView {
   private plans: PlanRow[] = [];
   private loading = true;
   private error = '';
+  /** The API's code for `error` — how a refusal is told from a failure. */
+  private errorCode = '';
   private notice = '';
   private search = '';
   private filter = 'all';
+  /** The plan or operator drawer, when one is open. */
   private drawer: OverlayHandle | null = null;
   private openId: string | null = null;
   private ops: Operations | null = null;
@@ -388,9 +495,25 @@ export class PlatformOpsView {
     void this.load();
   }
 
+  // ── the shell's handles ──────────────────────────────────────────────
+
+  /** The section the sidebar should mark. A school's page is under প্রতিষ্ঠান. */
+  public section(): Tab {
+    return this.openId ? 'institutions' : this.tab;
+  }
+
+  /** A nav press in the sidebar. Leaves any open school and shows the section. */
+  public showSection(s: Tab): void {
+    this.tab = s;
+    this.openId = null;
+    this.ops = null;
+    this.o.onSection?.(s);
+    this.render();
+  }
+
   // ── data ─────────────────────────────────────────────────────────────
   private async load(): Promise<void> {
-    this.loading = true; this.error = ''; this.render();
+    this.loading = true; this.error = ''; this.errorCode = ''; this.render();
     try {
       // The page, the fleet-wide counts, the catalogue and the audit feed.
       // `/overview` is gone from this path: it returned every school on every
@@ -429,17 +552,30 @@ export class PlatformOpsView {
       this.feed = feed.entries;
       this.operators = ops.operators;
     } catch (err) {
-      this.error = (err as Error).message || 'তালিকা আনা যায়নি।';
+      this.error = plainError(err, 'তালিকা আনা যায়নি।');
+      this.errorCode = errorCodeOf(err);
     }
     this.loading = false;
     this.render();
   }
 
-  private async openDetail(id: string): Promise<void> {
+  /**
+   * Open one school — a page inside the shell (10 Platform Console, screen
+   * ০৩), with the sidebar's প্রতিষ্ঠান row marked. It used to be a drawer;
+   * every request and every confirmation is the same.
+   *
+   * `focus` moves focus to the school's name, which is what a drawer opening
+   * did for its first control: the row pressed to get here is gone, and focus
+   * left on <body> would start a keyboard user from the top of the page.
+   */
+  private async openDetail(id: string, focus = true): Promise<void> {
     this.openId = id;
     this.detailTab = 'overview';
     this.ops = null;
-    this.renderDrawer();
+    this.error = ''; this.errorCode = '';
+    this.o.onSection?.('institutions');
+    this.render();
+    if (focus) this.o.root.querySelector<HTMLElement>('.plat-bar h1')?.focus();
     try {
       const [r, a] = await Promise.all([
         this.o.call<{
@@ -452,38 +588,57 @@ export class PlatformOpsView {
         this.o.call<{ entries: AuditRow[] }>(
           `/audit?tenantId=${encodeURIComponent(id)}`).catch(() => ({ entries: [] })),
       ]);
+      // The operator may have left while this was loading; a late answer must
+      // not pull the page back or re-mark the sidebar.
+      if (this.openId !== id) return;
       this.ops = r.operations;
       this.effective = r.services;
       this.payments = r.payments;
       this.audit = a.entries;
     } catch (err) {
-      this.error = (err as Error).message || 'তথ্য আনা যায়নি।';
+      if (this.openId !== id) return;
+      this.error = plainError(err, 'তথ্য আনা যায়নি।');
+      this.errorCode = errorCodeOf(err);
     }
-    this.renderDrawer();
+    this.render();
+    // The re-render replaced the name that had focus; put it back, unless the
+    // operator has already moved on to something that is still on the page.
+    const active = this.o.doc.activeElement;
+    if (focus && (!active || active === this.o.doc.body || !active.isConnected)) {
+      this.o.root.querySelector<HTMLElement>('.plat-bar h1')?.focus();
+    }
+  }
+
+  /** Back to the section the school was opened from. */
+  private closeDetail(): void {
+    this.openId = null;
+    this.ops = null;
+    this.o.onSection?.(this.tab);
+    this.render();
   }
 
   /**
    * Every operations POST goes through here.
    *
-   * The endpoint returns the school's state AFTER the change, so the drawer
+   * The endpoint returns the school's state AFTER the change, so the page
    * renders the consequence rather than re-fetching and possibly showing a
    * state one request out of date.
    */
   private async act(path: string, body: Record<string, unknown>, done: string): Promise<void> {
     if (this.busy) return;
     this.busy = true;
-    this.renderDrawer();
+    this.render();
     try {
       await this.o.call(path, { method: 'POST', body: JSON.stringify(body) });
       this.notice = done;
       this.busy = false;
-      // Both surfaces move: the drawer shows the new state, and the row
-      // behind it stops disagreeing with the drawer in front of it.
-      await Promise.all([this.load(), this.openDetail(String(body.tenantId))]);
+      // Both surfaces move: the school's page shows the new state, and the
+      // row in the list stops disagreeing with it.
+      await Promise.all([this.load(), this.openDetail(String(body.tenantId), false)]);
     } catch (err) {
       this.busy = false;
-      this.error = (err as Error).message || 'কাজটি সম্পন্ন হয়নি।';
-      this.renderDrawer();
+      this.error = plainError(err, 'কাজটি সম্পন্ন হয়নি।');
+      this.errorCode = errorCodeOf(err);
       this.render();
     }
   }
@@ -494,40 +649,11 @@ export class PlatformOpsView {
     const root = this.o.root;
     root.replaceChildren();
 
-    root.append(pageHeader(d, {
-      title: 'প্ল্যাটফর্ম অপারেশনস',
-      subtitle: this.loading
-        ? 'লোড হচ্ছে…'
-        // The fleet, not the page. `rows.length` is 25 now.
-        : `${bn(this.summary?.total ?? this.page.total)}টি প্রতিষ্ঠান পরিচালনায়`,
-      actions: [
-        button(d, {
-          label: 'নতুন প্রতিষ্ঠান', variant: 'primary', glyph: 'star',
-          onClick: () => this.o.onNewTenant(),
-        }),
-        button(d, {
-          label: 'হালনাগাদ', variant: 'ghost', glyph: 'refresh',
-          onClick: () => { void this.load(); },
-        }),
-      ],
-    }));
+    if (this.openId) { this.renderDetail(root); return; }
 
-    if (this.notice) root.append(successNote(d, this.notice));
-    if (this.error) root.append(errorState(d, this.error, () => { void this.load(); }));
-    if (this.loading) { root.append(listSkeleton(d, 5)); return; }
-
-    root.append(tabs(d, {
-      label: 'অপারেশনস',
-      active: this.tab,
-      items: [
-        { id: 'dashboard', label: 'ড্যাশবোর্ড' },
-        { id: 'institutions', label: 'প্রতিষ্ঠান',
-          count: this.summary?.total ?? this.page.total },
-        { id: 'plans', label: 'প্ল্যান', count: this.plans.length },
-        { id: 'operators', label: 'অপারেটর', count: this.operators.length },
-      ],
-      onSelect: (id) => { this.tab = id as Tab; this.render(); },
-    }));
+    root.append(this.bar());
+    if (this.flash(root, () => { void this.load(); })) return;
+    if (this.loading) { root.append(platBand(d, 'plat-loading', listSkeleton(d, 5))); return; }
 
     if (this.tab === 'dashboard') this.renderDashboard(root);
     else if (this.tab === 'plans') this.renderPlans(root);
@@ -535,10 +661,73 @@ export class PlatformOpsView {
     else this.renderList(root);
   }
 
+  /**
+   * The bar (10 Platform Console `bar()`): the section's name on the left, its
+   * one action on the right. No subtitle — the drawing has none, and the fleet
+   * count it used to carry is the first figure on the dashboard.
+   */
+  private bar(): HTMLElement {
+    const d = this.o.doc;
+    if (this.tab === 'dashboard') {
+      return pageHeader(d, {
+        className: 'plat-bar', title: 'ফ্লিট',
+        actions: [
+          el(d, 'span', { className: 'plat-date' }, ...numText(d, bnDate(todayLocalIso()))),
+          button(d, {
+            label: 'হালনাগাদ', variant: 'ghost', size: 'sm', glyph: 'refresh',
+            onClick: () => { void this.load(); },
+          }),
+        ],
+      });
+    }
+    if (this.tab === 'plans') {
+      return pageHeader(d, {
+        className: 'plat-bar', title: 'প্ল্যান',
+        primary: button(d, {
+          label: 'নতুন প্ল্যান', variant: 'primary', size: 'sm',
+          onClick: () => this.planForm(null),
+        }),
+      });
+    }
+    if (this.tab === 'operators') {
+      return pageHeader(d, {
+        className: 'plat-bar', title: 'অপারেটর',
+        primary: button(d, {
+          label: 'অপারেটরের নাম যোগ করুন', variant: 'primary', size: 'sm',
+          onClick: () => this.operatorForm(null),
+        }),
+      });
+    }
+    return pageHeader(d, {
+      className: 'plat-bar', title: 'প্রতিষ্ঠান',
+      primary: button(d, {
+        label: 'নতুন প্রতিষ্ঠান', variant: 'primary', size: 'sm',
+        onClick: () => this.o.onNewTenant(),
+      }),
+    });
+  }
+
+  /**
+   * The notice and the error, each in its own band under the bar. Returns
+   * true when the screen is a refusal and nothing below it can be shown.
+   */
+  private flash(root: HTMLElement, retry: () => void): boolean {
+    const d = this.o.doc;
+    if (this.notice) root.append(platBand(d, 'plat-flash', successNote(d, this.notice)));
+    if (!this.error) return false;
+    if (isDenied(this.errorCode)) {
+      // B-30's canonical refusal, and no retry.
+      root.append(platBand(d, 'plat-flash', permissionState(d)));
+      return true;
+    }
+    root.append(platBand(d, 'plat-flash', errorState(d, this.error, retry)));
+    return false;
+  }
+
   // ── 3. the plan catalogue (§16) ──────────────────────────────────────
   //
   // A plan is not a property of one school. Editing one from inside a
-  // school's drawer would read as though it only touched that school, and it
+  // school's page would read as though it only touched that school, and it
   // touches every school on it — so it lives here, and the number of schools
   // affected is on the button that does it.
 /**
@@ -549,59 +738,50 @@ export class PlatformOpsView {
    * screen only says whose it is. That is the whole of what B-39 asked for —
    * "even a small table with a name per issued credential" — and deliberately
    * not a login system, which would make the console worth stealing.
+   *
+   * Ata Ekta (screen ০৪, lower half): an inset header band, then one row per
+   * operator — initial, name over a detail line, and a word-chip.
    */
   private renderOperators(root: HTMLElement): void {
     const d = this.o.doc;
 
-    root.append(sectionHeading(d, { title: 'অপারেটর' }));
-    root.append(card(d, {
-      title: 'কারা এই প্ল্যাটফর্ম চালান', glyph: 'users', headingLevel: 3,
-    }, el(d, 'p', {
-      className: 'ui-card-note',
+    root.append(platBand(d, 'plat-intro', el(d, 'p', {
+      className: 'plat-note',
       text: 'প্রতিটি ইস্যু করা ক্রেডেনশিয়ালের একটি নাম। এখানে কোনো পাসওয়ার্ড '
           + 'বা টোকেন রাখা হয় না — শুধু কার ক্রেডেনশিয়াল এবং এখনো চালু কি না। '
           + 'প্রত্যাহার করলে পরের অনুরোধেই কনসোল বন্ধ হয়ে যাবে।',
     })));
 
-    const active = this.operators.filter((x) => x.status === 'active').length;
-    root.append(statRow(d,
-      statCard(d, { label: 'চালু', value: bn(active), glyph: 'check-square',
-                    tone: 'success' }),
-      statCard(d, { label: 'প্রত্যাহৃত',
-                    value: bn(this.operators.length - active),
-                    glyph: 'lock', tone: 'warn' }),
-    ));
+    root.append(el(d, 'div', { className: 'plat-band-inset' },
+      sectionHeading(d, { title: 'অপারেটরের তালিকা', className: 'plat-label' })));
 
-    root.append(dataTable(d, {
-      caption: 'অপারেটরের তালিকা',
-      rows: this.operators,
-      rowKey: (r) => r.id,
-      empty: {
+    if (this.operators.length === 0) {
+      root.append(platBand(d, '', emptyState(d, {
         glyph: 'users',
         message: 'কোনো অপারেটরের নাম রাখা হয়নি। নাম ছাড়া অডিটে "নাম নেই" দেখাবে।',
-      },
-      columns: [
-        { key: 'name', header: 'নাম', mobile: 'title', width: 'minmax(0, 1.5fr)',
-          cell: (r) => r.fullName },
-        { key: 'email', header: 'ইমেইল', mobile: 'subtitle', width: 'minmax(0, 1.5fr)',
-          cell: (r) => r.email ?? '—' },
-        { key: 'status', header: 'অবস্থা', mobile: 'meta', width: '120px',
-          // Never colour alone: the state is a WORD.
-          cell: (r) => r.status === 'active' ? 'চালু' : 'প্রত্যাহৃত' },
-        { key: 'actions', header: 'কাজ', mobile: 'meta', width: '100px',
-          cell: (r) => `${bn(r.actions)}টি` },
-        { key: 'seen', header: 'সর্বশেষ', mobile: 'meta', width: '160px',
-          // "কখনো নয়" is a real answer: a credential issued and never used is
-          // one worth asking about.
-          cell: (r) => r.lastSeenAt ? bnDateTime(r.lastSeenAt) : 'কখনো নয়' },
-      ],
-      onRowClick: (r) => this.operatorForm(r),
-    }));
+        action: { label: 'অপারেটরের নাম যোগ করুন', onClick: () => this.operatorForm(null) },
+      })));
+      return;
+    }
 
-    root.append(button(d, {
-      label: '+ অপারেটরের নাম যোগ করুন', variant: 'secondary', glyph: 'star',
-      onClick: () => this.operatorForm(null),
+    const rows = list(d, 'অপারেটরের তালিকা', ...this.operators.map((r) => {
+      const li = listItem(d, {
+        title: r.fullName,
+        // "কখনো নয়" is a real answer: a credential issued and never used is
+        // one worth asking about.
+        subtitle: `${r.email ?? '—'} · ${bn(r.actions)}টি কাজ · সর্বশেষ `
+          + (r.lastSeenAt ? bnDateTime(r.lastSeenAt) : 'কখনো নয়'),
+        // Never colour alone: the state is a WORD.
+        status: statusBadge(d, r.status === 'active'
+          ? { state: 'active', label: 'চালু' }
+          : { state: 'draft', label: 'প্রত্যাহৃত' }),
+        onClick: () => this.operatorForm(r),
+      });
+      li.querySelector('.ui-list-hit')?.prepend(avatar(d, { name: r.fullName, size: 'sm' }));
+      return li;
     }));
+    rows.classList.add('plat-operators');
+    root.append(rows);
   }
 
   /**
@@ -645,7 +825,8 @@ export class PlatformOpsView {
         this.closeDrawer();
         await this.load();
       } catch (err) {
-        this.error = (err as Error).message;
+        this.error = plainError(err, 'অপারেটর সংরক্ষণ করা যায়নি।');
+        this.errorCode = errorCodeOf(err);
         this.render();
       }
     };
@@ -669,50 +850,58 @@ export class PlatformOpsView {
     });
   }
 
-    private renderPlans(root: HTMLElement): void {
+  /**
+   * The catalogue as drawn (screen ০৪): one cell per plan, side by side —
+   * name, price, and a line of what it buys. The whole cell opens the plan.
+   *
+   * The cell is a button holding spans, not a card: a heading inside a button
+   * is invalid content and drops out of heading navigation.
+   */
+  private renderPlans(root: HTMLElement): void {
     const d = this.o.doc;
     // From the summary: counting `this.rows` would count one page, and the
     // number beside a plan is what an operator checks before retiring it.
     const usedBy = (code: string) => this.summary?.planUsage[code] ?? 0;
 
-    root.append(sectionHeading(d, {
-      title: 'প্ল্যান',
-      action: button(d, {
-        label: 'নতুন প্ল্যান', variant: 'secondary', glyph: 'layers',
-        onClick: () => this.planForm(null),
-      }),
-    }));
-
-    root.append(card(d, { title: 'প্ল্যান কী ঠিক করে', glyph: 'layers', headingLevel: 3 },
-      el(d, 'p', {
-        className: 'ui-card-note',
-        text: 'প্ল্যান ঠিক করে মূল্য, শিক্ষার্থীর সর্বোচ্চ সংখ্যা, কোন সেবাগুলো কেনা আছে, '
-          + 'এবং বিল দেরি হলে কত দিন ছাড় পাওয়া যাবে। প্ল্যান বদলালে সেই প্ল্যানের '
-          + 'প্রতিটি প্রতিষ্ঠানে সঙ্গে সঙ্গে কার্যকর হয়।',
+    if (this.plans.length === 0) {
+      root.append(platBand(d, '', emptyState(d, {
+        glyph: 'layers',
+        message: 'কোনো প্ল্যান নেই — প্রতিষ্ঠান যুক্ত করতে অন্তত একটি প্ল্যান লাগবে।',
+        action: { label: 'নতুন প্ল্যান', onClick: () => this.planForm(null) },
       })));
+    } else {
+      const grid = el(d, 'ul', {
+        className: 'plat-plan-grid', attrs: { 'aria-label': 'প্ল্যানের তালিকা' },
+      });
+      for (const p of this.plans) {
+        const price = Number(p.priceBdt) === 0
+          ? 'বিনামূল্যে'
+          : `${formatBdt(p.priceBdt)} / ${CYCLE_BN[p.billingCycle] ?? p.billingCycle}`;
+        const meta = `${bn(p.studentCap)} শিক্ষার্থী · `
+          + `${bn(Object.values(p.services).filter(Boolean).length)}টি সেবা · `
+          + `${bn(usedBy(p.code))}টি প্রতিষ্ঠান`;
+        const cell = el(d, 'button', {
+          className: p.isActive ? 'plat-plan' : 'plat-plan is-retired',
+          attrs: { type: 'button' },
+        },
+          el(d, 'span', { className: 'plat-plan-head' },
+            el(d, 'span', { className: 'plat-plan-name' }, ...numText(d, p.nameBn)),
+            // A retired plan says so in a word, not only by being greyer.
+            p.isActive ? null : statusBadge(d, { state: 'draft', label: 'বন্ধ' })),
+          el(d, 'span', { className: 'plat-plan-price' }, ...numText(d, price)),
+          el(d, 'span', { className: 'plat-plan-meta' }, ...numText(d, meta)));
+        cell.addEventListener('click', () => this.planForm(p));
+        grid.append(el(d, 'li', { className: 'plat-plan-cell' }, cell));
+      }
+      root.append(grid);
+    }
 
-    root.append(dataTable(d, {
-      caption: 'প্ল্যানের তালিকা',
-      rows: this.plans,
-      rowKey: (p) => p.code,
-      onRowClick: (p) => this.planForm(p),
-      columns: [
-        { key: 'name', header: 'প্ল্যান', mobile: 'title',
-          cell: (p) => p.nameBn, width: 'minmax(0, 1.4fr)' },
-        { key: 'price', header: 'মূল্য', mobile: 'subtitle', numeric: true, width: '180px',
-          cell: (p) => `${formatBdt(p.priceBdt)} / ${CYCLE_BN[p.billingCycle] ?? p.billingCycle}` },
-        { key: 'cap', header: 'সীমা', mobile: 'meta', numeric: true, width: '110px',
-          cell: (p) => bn(p.studentCap) },
-        { key: 'svc', header: 'সেবা', mobile: 'meta', numeric: true, width: '110px',
-          cell: (p) => `${bn(Object.values(p.services).filter(Boolean).length)}টি` },
-        { key: 'used', header: 'প্রতিষ্ঠান', mobile: 'meta', numeric: true, width: '120px',
-          cell: (p) => `${bn(usedBy(p.code))}টি` },
-        { key: 'state', header: 'অবস্থা', mobile: 'status', width: '130px',
-          cell: (p) => statusBadge(d, p.isActive
-            ? { state: 'paid', label: 'চালু' }
-            : { state: 'draft', label: 'বন্ধ' }) },
-      ],
-    }));
+    root.append(platBand(d, 'plat-intro', el(d, 'p', {
+      className: 'plat-note',
+      text: 'প্ল্যান ঠিক করে মূল্য, শিক্ষার্থীর সর্বোচ্চ সংখ্যা, কোন সেবাগুলো কেনা আছে, '
+        + 'এবং বিল দেরি হলে কত দিন ছাড় পাওয়া যাবে। প্ল্যান বদলালে সেই প্ল্যানের '
+        + 'প্রতিটি প্রতিষ্ঠানে সঙ্গে সঙ্গে কার্যকর হয়।',
+    })));
   }
 
   /**
@@ -796,12 +985,10 @@ export class PlatformOpsView {
     if (existing && affected > 0) {
       append(form, card(d, {
         title: 'এই বদল কাদের ছোঁবে', glyph: 'alert-triangle', tone: 'warn', headingLevel: 3,
-      }, el(d, 'p', {
-        className: 'ui-card-note',
-        text: `এখন ${bn(affected)}টি প্রতিষ্ঠান এই প্ল্যানে আছে। মূল্য, সীমা বা সেবা `
+      }, el(d, 'p', { className: 'ui-card-note' },
+        ...numText(d, `এখন ${bn(affected)}টি প্রতিষ্ঠান এই প্ল্যানে আছে। মূল্য, সীমা বা সেবা `
           + 'বদলালে সঙ্গে সঙ্গে সবার ক্ষেত্রে কার্যকর হবে — প্ল্যান থেকে বাদ দেওয়া '
-          + 'সেবা তখনই বন্ধ হয়ে যাবে।',
-      })));
+          + 'সেবা তখনই বন্ধ হয়ে যাবে।'))));
     }
 
     const drawer = openDrawer(d, {
@@ -876,115 +1063,40 @@ export class PlatformOpsView {
       await this.load();
     } catch (err) {
       this.busy = false;
-      this.error = (err as Error).message || 'প্ল্যান সংরক্ষণ করা যায়নি।';
+      this.error = plainError(err, 'প্ল্যান সংরক্ষণ করা যায়নি।');
+      this.errorCode = errorCodeOf(err);
       this.render();
     }
   }
 
   // ── 1. dashboard ─────────────────────────────────────────────────────
+  /**
+   * Screen ০১ as drawn: four figures, then the schools that need a person,
+   * each with its reason in words and a way in. The fleet's other figures
+   * and the team's recent actions follow as further bands — the drawing does
+   * not show them, and dropping them would lose what an operator reads here.
+   */
   private renderDashboard(root: HTMLElement): void {
     const d = this.o.doc;
     // Every number here is the SERVER's, over the whole fleet. They used to
     // be `this.rows.filter(...).length` over a full download of the fleet,
     // which is the reason the list could not be paginated: a page of
     // twenty-five would have reported twenty-five schools as the country.
-    const s = this.summary;
-    const zero: FleetSummary = {
-      total: 0, attention: { critical: 0, warning: 0, info: 0 },
-      access: { full: 0, readOnly: 0, none: 0 },
-      billing: { trial: 0, active: 0, grace: 0, overdue: 0 },
-      usage: { students: 0, users: 0, classes: 0, sections: 0, paid: 0 },
-      quiet: 0, neverActive: 0, planUsage: {},
-    };
-    const f = s ?? zero;
+    const f = this.summary ?? ZERO_SUMMARY;
+    const needing = f.attention.critical + f.attention.warning;
 
-    root.append(sectionHeading(d, { title: 'প্রতিষ্ঠান' }));
-    root.append(statRow(d,
-      statCard(d, { label: 'মোট', value: bn(f.total), glyph: 'layers' }),
+    // Tone is on the FIGURE and means something (R5): the active count in
+    // --ok, the schools needing a person in --danger when there are any. The
+    // suspended count is quiet ink, as drawn — a word beside every one.
+    root.append(platBand(d, 'plat-stats', statRow(d,
+      statCard(d, { label: 'প্রতিষ্ঠান', value: bn(f.total) }),
+      statCard(d, { label: 'সক্রিয়', value: bn(f.access.full), tone: 'success' }),
       statCard(d, {
-        label: 'পূর্ণ সক্রিয়', value: bn(f.access.full),
-        glyph: 'check-square', tone: 'success',
+        label: 'নজর দরকার', value: bn(needing),
+        tone: needing > 0 ? 'danger' : undefined,
       }),
-      statCard(d, {
-        label: 'শুধু পড়া', value: bn(f.access.readOnly),
-        glyph: 'lock', tone: 'warn',
-        note: 'সীমিত বা রক্ষণাবেক্ষণে',
-      }),
-      statCard(d, {
-        label: 'স্থগিত', value: bn(f.access.none),
-        glyph: 'alert-triangle',
-        tone: f.access.none > 0 ? 'accent2' : 'success',
-      }),
-    ));
-
-    root.append(sectionHeading(d, { title: 'বাণিজ্যিক অবস্থা' }));
-    root.append(statRow(d,
-      statCard(d, {
-        label: 'ট্রায়ালে', value: bn(f.billing.trial),
-        glyph: 'clock', tone: 'info',
-      }),
-      statCard(d, {
-        label: 'পরিশোধিত', value: bn(f.billing.active),
-        glyph: 'wallet', tone: 'success',
-      }),
-      statCard(d, {
-        label: 'ছাড়ের মেয়াদে', value: bn(f.billing.grace),
-        glyph: 'clock', tone: 'warn',
-      }),
-      statCard(d, {
-        label: 'বকেয়া', value: bn(f.billing.overdue),
-        glyph: 'alert-triangle',
-        tone: f.billing.overdue > 0 ? 'accent2' : 'success',
-      }),
-    ));
-
-    root.append(sectionHeading(d, { title: 'ব্যবহার' }));
-    // Summed in the database. These three were `this.rows.reduce(...)`, and
-    // a reduce over one page of twenty-five would have reported a fraction
-    // of the country's students as its total.
-    const students = f.usage.students;
-    const users = f.usage.users;
-    const collected = f.usage.paid;
-    root.append(statRow(d,
-      statCard(d, { label: 'মোট শিক্ষার্থী', value: bn(students), glyph: 'users' }),
-      statCard(d, { label: 'সক্রিয় ব্যবহারকারী', value: bn(users), glyph: 'user', tone: 'info' }),
-      statCard(d, {
-        label: 'মোট আদায়', value: formatBdt(collected), glyph: 'trending-up', tone: 'success',
-        note: 'রেকর্ড করা সব পেমেন্ট',
-      }),
-    ));
-
-    // §1's "recently onboarded" and "recently inactive". Counts, not alerts:
-    // neither is a thing to DO today, and both are things a team running
-    // forty schools is asked about weekly. The dormant card carries a note
-    // saying what it counts, because "নিষ্ক্রিয়" on its own could mean four
-    // different things.
-    // `neverActive` is the server's count of schools nobody has ever signed
-    // into — the same population `isDormant` describes, computed over the
-    // fleet rather than over a page. `fresh` stays a page-level number and
-    // is labelled as such below, because "created in the last 30 days" is
-    // not something the summary carries yet.
-    const fresh = this.rows.filter((t) => isRecent(t)).length;
-    const dormant = f.neverActive;
-    const quiet = f.quiet;
-    root.append(statRow(d,
-      statCard(d, {
-        label: 'নতুন যুক্ত', value: bn(fresh), glyph: 'star', tone: 'info',
-        note: `গত ${bn(ONBOARDING_WINDOW_DAYS)} দিনে তৈরি`,
-      }),
-      statCard(d, {
-        label: 'অসম্পূর্ণ সেটআপ', value: bn(dormant),
-        glyph: 'clock', tone: dormant > 0 ? 'warn' : undefined,
-        note: 'তৈরির পর কোনো শিক্ষার্থী যোগ হয়নি',
-      }),
-      // Set up, invoiced, and not being opened — the quieter and more
-      // expensive failure, and the one nobody complains about.
-      statCard(d, {
-        label: 'অনেকদিন কেউ ঢোকেনি', value: bn(quiet),
-        glyph: 'wifi-off', tone: quiet > 0 ? 'warn' : undefined,
-        note: 'গত ' + bn(QUIET_DAYS) + ' দিনে কেউ প্রবেশ করেননি',
-      }),
-    ));
+      statCard(d, { label: 'স্থগিত', value: bn(f.access.none), tone: 'accent2' }),
+    )));
 
     // ── the attention queue ──
     //
@@ -993,53 +1105,105 @@ export class PlatformOpsView {
     // human reason for each one, which is the part a database column cannot
     // give. Selection and explanation, split where each is better.
     const queue = attentionQueue(this.queueRows);
-    const needing = f.attention.critical + f.attention.warning;
-    root.append(sectionHeading(d, {
-      title: 'যা নজর দেওয়া দরকার',
-      action: needing > 0
-        ? statusBadge(d, { state: 'pending', label: `${bn(needing)}টি` })
-        : undefined,
-    }));
+    const attn = platBand(d, 'plat-attn-band',
+      sectionHeading(d, { title: 'নজর দরকার', className: 'plat-label' }));
     if (queue.length === 0) {
-      root.append(card(d, {
-        title: 'সব ঠিক আছে', glyph: 'check-square', tone: 'success', headingLevel: 3,
-      }, el(d, 'p', {
-        className: 'ui-card-note',
-        text: 'কোনো প্রতিষ্ঠানে বকেয়া নেই, কোনোটি স্থগিত নেই, এবং কেউ সীমার কাছাকাছি নয়।',
-      })));
+      attn.append(el(d, 'p', {
+        className: 'plat-note',
+        text: 'সব ঠিক আছে — কোনো প্রতিষ্ঠানে বকেয়া নেই, কোনোটি স্থগিত নেই, '
+          + 'এবং কেউ সীমার কাছাকাছি নয়।',
+      }));
     } else {
       // Shown in full only up to a point. Past QUEUE_LIMIT the operator is
       // scrolling, not working, and the rows below the fold are by
       // construction the least urgent ones. The remainder is stated, never
       // silently dropped.
       const shown = queue.slice(0, QUEUE_LIMIT);
-      root.append(dataTable(d, {
-        caption: 'যেসব প্রতিষ্ঠানে ব্যবস্থা নেওয়া দরকার',
-        rows: shown,
-        rowKey: (a) => `${a.tenantId}-${a.kind}`,
-        // Every row goes to the school it is about. An alert that does not
-        // reach the thing it is about is a notification, not an alert.
-        onRowClick: (a) => { void this.openDetail(a.tenantId); },
-        columns: [
-          { key: 'name', header: 'প্রতিষ্ঠান', mobile: 'title', cell: (a) => a.nameBn,
-            width: 'minmax(0, 1.8fr)' },
-          { key: 'what', header: 'কী', mobile: 'subtitle', cell: (a) => a.labelBn,
-            width: 'minmax(0, 3fr)' },
-          { key: 'kind', header: 'ধরন', mobile: 'status', width: '150px',
-            cell: (a) => statusBadge(d, {
-              state: a.weight >= 90 ? 'overdue' : a.weight >= 70 ? 'partial' : 'pending',
-              label: ATTENTION_BN[a.kind] ?? a.kind,
-            }) },
-        ],
+      const rows = list(d, 'যেসব প্রতিষ্ঠানে ব্যবস্থা নেওয়া দরকার', ...shown.map((a) => {
+        const li = listItem(d, {
+          title: a.nameBn,
+          subtitle: a.labelBn,
+          className: 'plat-attn-row',
+          // Every row goes to the school it is about. An alert that does not
+          // reach the thing it is about is a notification, not an alert.
+          status: button(d, {
+            label: 'খুলুন', variant: 'secondary', size: 'sm',
+            ariaLabel: `${a.nameBn} খুলুন`,
+            onClick: () => { void this.openDetail(a.tenantId); },
+          }),
+        });
+        // Money and lock-outs outrank a cap warning. The bar beside the row
+        // and the colour of the reason say which; the reason says it in words.
+        li.dataset.level = a.weight >= 90 ? 'danger' : 'warn';
+        return li;
       }));
+      rows.classList.add('plat-attn');
+      attn.append(rows);
       if (queue.length > shown.length) {
-        root.append(el(d, 'p', {
-          className: 'ui-card-note',
-          text: `আরও ${bn(queue.length - shown.length)}টি কম জরুরি বিষয় আছে — `
-            + 'প্রতিষ্ঠান তালিকায় ছেঁকে দেখুন।',
-        }));
+        attn.append(el(d, 'p', { className: 'plat-note plat-more' },
+          ...numText(d, `আরও ${bn(queue.length - shown.length)}টি কম জরুরি বিষয় আছে — `
+            + 'প্রতিষ্ঠান তালিকায় ছেঁকে দেখুন।')));
       }
     }
+    root.append(attn);
+
+    root.append(platBand(d, 'plat-stats',
+      sectionHeading(d, { title: 'বাণিজ্যিক অবস্থা', className: 'plat-label' }),
+      statRow(d,
+        statCard(d, { label: 'ট্রায়ালে', value: bn(f.billing.trial) }),
+        statCard(d, { label: 'পরিশোধিত', value: bn(f.billing.active), tone: 'success' }),
+        statCard(d, { label: 'ছাড়ের মেয়াদে', value: bn(f.billing.grace) }),
+        statCard(d, {
+          label: 'বকেয়া', value: bn(f.billing.overdue),
+          tone: f.billing.overdue > 0 ? 'danger' : undefined,
+        }),
+      )));
+
+    // Summed in the database. These three were `this.rows.reduce(...)`, and
+    // a reduce over one page of twenty-five would have reported a fraction
+    // of the country's students as its total.
+    root.append(platBand(d, 'plat-stats',
+      sectionHeading(d, { title: 'ব্যবহার', className: 'plat-label' }),
+      statRow(d,
+        statCard(d, { label: 'মোট শিক্ষার্থী', value: bn(f.usage.students) }),
+        statCard(d, { label: 'সক্রিয় ব্যবহারকারী', value: bn(f.usage.users) }),
+        statCard(d, {
+          label: 'মোট আদায়', value: formatBdt(f.usage.paid),
+          note: 'রেকর্ড করা সব পেমেন্ট',
+        }),
+      )));
+
+    // §1's "recently onboarded" and "recently inactive". Counts, not alerts:
+    // neither is a thing to DO today, and both are things a team running
+    // forty schools is asked about weekly. Each carries a note saying what it
+    // counts, because "নিষ্ক্রিয়" on its own could mean four different things.
+    // `neverActive` is the server's count of schools nobody has ever signed
+    // into, computed over the fleet rather than over a page. `fresh` stays a
+    // page-level number, because "created in the last 30 days" is not
+    // something the summary carries yet.
+    const fresh = this.rows.filter((t) => isRecent(t)).length;
+    root.append(platBand(d, 'plat-stats',
+      sectionHeading(d, { title: 'সক্রিয়তা', className: 'plat-label' }),
+      statRow(d,
+        statCard(d, {
+          label: 'শুধু পড়া', value: bn(f.access.readOnly),
+          note: 'সীমিত বা রক্ষণাবেক্ষণে',
+        }),
+        statCard(d, {
+          label: 'নতুন যুক্ত', value: bn(fresh),
+          note: `গত ${bn(ONBOARDING_WINDOW_DAYS)} দিনে তৈরি`,
+        }),
+        statCard(d, {
+          label: 'অসম্পূর্ণ সেটআপ', value: bn(f.neverActive),
+          note: 'তৈরির পর কোনো শিক্ষার্থী যোগ হয়নি',
+        }),
+        // Set up, invoiced, and not being opened — the quieter and more
+        // expensive failure, and the one nobody complains about.
+        statCard(d, {
+          label: 'অনেকদিন কেউ ঢোকেনি', value: bn(f.quiet),
+          note: 'গত ' + bn(QUIET_DAYS) + ' দিনে কেউ প্রবেশ করেননি',
+        }),
+      )));
 
     this.renderFeed(root);
   }
@@ -1063,72 +1227,61 @@ export class PlatformOpsView {
     const nameOf = new Map(this.rows.map((t) => [t.id, t.nameBn]));
     const shown = this.feed.slice(0, FEED_LIMIT);
 
-    root.append(sectionHeading(d, { title: 'সাম্প্রতিক কার্যক্রম' }));
-    root.append(card(d, { title: 'shikhonBD দল যা করেছে', glyph: 'clock', headingLevel: 3 },
+    const band = platBand(d, 'plat-feed',
+      sectionHeading(d, { title: 'সাম্প্রতিক কার্যক্রম', className: 'plat-label' }),
       el(d, 'p', {
-        className: 'ui-card-note',
-        text: 'প্ল্যাটফর্ম থেকে করা সব পরিবর্তন, নতুনটি আগে। এই তালিকা মোছা যায় না।',
-      })));
-    root.append(dataTable(d, {
-      caption: 'প্ল্যাটফর্ম থেকে করা সাম্প্রতিক পরিবর্তন',
-      rows: shown,
-      rowKey: (r) => r.id,
-      columns: [
-        { key: 'when', header: 'কখন', mobile: 'title', width: '180px',
-          cell: (r) => bnDateTime(r.at) },
-        // A platform-wide act — a plan change — belongs to no one school, and
-        // saying so is more honest than leaving the cell empty.
-        { key: 'who', header: 'প্রতিষ্ঠান', mobile: 'subtitle', width: 'minmax(0, 1.5fr)',
-          cell: (r) => r.tenantId
-            ? (nameOf.get(r.tenantId) ?? 'অন্য একটি প্রতিষ্ঠান')
-            : 'সব প্রতিষ্ঠান' },
-        // B-39, closed. This column could not exist before P10-5: the actor
-        // was a JWT subject with no row behind it, so the tab showed what,
-        // why and when and never who. "নাম নেই" is the honest answer for a
-        // credential nobody has named yet — better than a uuid, and better
-        // than an empty cell that reads as "nobody".
-        { key: 'actor', header: 'কে', mobile: 'meta', width: 'minmax(0, 1fr)',
-          cell: (r) => r.actor
-            ? (r.actorRevoked ? `${r.actor} (প্রত্যাহৃত)` : r.actor)
-            : 'নাম নেই' },
-        { key: 'why', header: 'কারণ', mobile: 'meta', width: 'minmax(0, 2fr)',
-          cell: (r) => r.reason ?? '—' },
-        { key: 'what', header: 'কী হয়েছিল', mobile: 'meta', width: 'minmax(0, 2fr)',
-          cell: (r) => r.statement ?? '—' },
-      ],
-    }));
-    if (this.feed.length > shown.length) {
-      root.append(el(d, 'p', {
-        className: 'ui-card-note',
-        text: `আরও ${bn(this.feed.length - shown.length)}টি পুরোনো পরিবর্তন আছে — `
-          + 'প্রতিটি প্রতিষ্ঠানের "ইতিহাস" ট্যাবে সেই প্রতিষ্ঠানের পুরো তালিকা আছে।',
+        className: 'plat-note',
+        text: 'shikhonBD দল প্ল্যাটফর্ম থেকে যা বদলেছে, নতুনটি আগে। এই তালিকা মোছা যায় না।',
+      }),
+      dataTable(d, {
+        caption: 'প্ল্যাটফর্ম থেকে করা সাম্প্রতিক পরিবর্তন',
+        rows: shown,
+        rowKey: (r) => r.id,
+        columns: [
+          { key: 'when', header: 'কখন', mobile: 'title', width: '180px',
+            cell: (r) => bnDateTime(r.at) },
+          // A platform-wide act — a plan change — belongs to no one school, and
+          // saying so is more honest than leaving the cell empty.
+          { key: 'who', header: 'প্রতিষ্ঠান', mobile: 'subtitle', width: 'minmax(0, 1.5fr)',
+            cell: (r) => r.tenantId
+              ? (nameOf.get(r.tenantId) ?? 'অন্য একটি প্রতিষ্ঠান')
+              : 'সব প্রতিষ্ঠান' },
+          // B-39, closed. This column could not exist before P10-5: the actor
+          // was a JWT subject with no row behind it, so the tab showed what,
+          // why and when and never who. "নাম নেই" is the honest answer for a
+          // credential nobody has named yet — better than a uuid, and better
+          // than an empty cell that reads as "nobody".
+          { key: 'actor', header: 'কে', mobile: 'meta', width: 'minmax(0, 1fr)',
+            cell: (r) => r.actor
+              ? (r.actorRevoked ? `${r.actor} (প্রত্যাহৃত)` : r.actor)
+              : 'নাম নেই' },
+          { key: 'why', header: 'কারণ', mobile: 'meta', width: 'minmax(0, 2fr)',
+            cell: (r) => r.reason ?? '—' },
+          { key: 'what', header: 'কী হয়েছিল', mobile: 'meta', width: 'minmax(0, 2fr)',
+            cell: (r) => r.statement ?? '—' },
+        ],
       }));
+    if (this.feed.length > shown.length) {
+      band.append(el(d, 'p', { className: 'plat-note plat-more' },
+        ...numText(d, `আরও ${bn(this.feed.length - shown.length)}টি পুরোনো পরিবর্তন আছে — `
+          + 'প্রতিটি প্রতিষ্ঠানের "ইতিহাস" ট্যাবে সেই প্রতিষ্ঠানের পুরো তালিকা আছে।')));
     }
+    root.append(band);
   }
 
   // ── 2. the master list ───────────────────────────────────────────────
+  /**
+   * Screen ০২: the filter chips on an inset band, then the table, full
+   * bleed. The search box and the sort control the drawing does not show
+   * sit in one band between them — both are server queries an operator with
+   * 258 schools cannot work without.
+   */
   private renderList(root: HTMLElement): void {
     const d = this.o.doc;
 
-    const search = field(d, {
-      label: 'খুঁজুন', name: 'q', kind: 'search',
-      value: this.search,
-      placeholder: 'নাম, স্লাগ বা জেলা',
-      onInput: (v) => {
-        this.search = v;
-        // Debounced: a keystroke is a database query now, not a filter over
-        // an array that is already in memory.
-        if (this.searchTimer !== null) clearTimeout(this.searchTimer);
-        this.searchTimer = setTimeout(() => {
-          this.page.page = 1;
-          void this.load();
-        }, 250) as unknown as number;
-      },
-    });
-    append(root, search.root);
-
-    root.append(tabs(d, {
+    root.append(el(d, 'div', { className: 'plat-band-inset plat-filter-band' }, tabs(d, {
       label: 'ছাঁকনি',
+      className: 'plat-filters',
       active: this.filter,
       // The counts are the SERVER's, over the whole fleet, and the tab that
       // shows them asks for exactly those rows. A tab counted in the browser
@@ -1146,16 +1299,32 @@ export class PlatformOpsView {
       ],
       // Changing a tab is a new QUERY now, not a re-filter of what is held.
       onSelect: (id) => { this.filter = id; this.page.page = 1; void this.load(); },
-    }));
+    })));
+
+    const search = field(d, {
+      label: 'খুঁজুন', name: 'q', kind: 'search',
+      value: this.search,
+      placeholder: 'নাম, স্লাগ বা জেলা',
+      onInput: (v) => {
+        this.search = v;
+        // Debounced: a keystroke is a database query now, not a filter over
+        // an array that is already in memory.
+        if (this.searchTimer !== null) clearTimeout(this.searchTimer);
+        this.searchTimer = setTimeout(() => {
+          this.page.page = 1;
+          void this.load();
+        }, 250) as unknown as number;
+      },
+    });
 
     // ── Sorting ──
     //
     // A labelled SELECT rather than clickable column headers, for two
-    // reasons: this table renders as a list of cards below 1024px, where
-    // there are no headers to click at all, and a select is one tab stop
-    // with a name a screen reader reads — where twelve sortable headers are
-    // twelve stops that each announce a column name and leave the reader to
-    // infer that it sorts.
+    // reasons: this table renders as a list below 1024px, where there are no
+    // headers to click at all, and a select is one tab stop with a name a
+    // screen reader reads — where twelve sortable headers are twelve stops
+    // that each announce a column name and leave the reader to infer that it
+    // sorts.
     const sortRow = el(d, 'div', { className: 'plat-sort' });
     const sortSel = field(d, {
       label: 'সাজান', name: 'sort', kind: 'select',
@@ -1183,9 +1352,9 @@ export class PlatformOpsView {
         void this.load();
       },
     }));
-    root.append(sortRow);
+    root.append(platBand(d, 'plat-tools', search.root, sortRow));
 
-    const host = el(d, 'div', { className: 'plat-table-host' });
+    const host = el(d, 'div', { className: 'plat-table-host plat-fleet' });
     root.append(host);
     this.tableHost = host;
     this.repaintTable();
@@ -1208,12 +1377,10 @@ export class PlatformOpsView {
 
     const from = total === 0 ? 0 : (page - 1) * size + 1;
     const to = Math.min(page * size, total);
-    const count = el(d, 'p', {
-      className: 'plat-pager-count',
-      text: total === 0
+    const count = el(d, 'p', { className: 'plat-pager-count' },
+      ...numText(d, total === 0
         ? 'কোনো প্রতিষ্ঠান পাওয়া যায়নি'
-        : `${bn(from)}–${bn(to)} / মোট ${bn(total)}টি`,
-    });
+        : `${bn(from)}–${bn(to)} / মোট ${bn(total)}টি`));
     // After pressing "next" the only thing that changed for a screen-reader
     // user is this sentence, so it has to announce itself.
     count.setAttribute('aria-live', 'polite');
@@ -1221,7 +1388,7 @@ export class PlatformOpsView {
 
     const step = (delta: number, label: string): HTMLElement => {
       const b = button(d, {
-        label, variant: 'ghost',
+        label, variant: 'secondary', size: 'sm',
         onClick: () => { this.page.page = page + delta; void this.load(); },
       });
       if (page + delta < 1 || page + delta > pages) {
@@ -1229,12 +1396,10 @@ export class PlatformOpsView {
       }
       return b;
     };
-    nav.append(step(-1, '← আগের'));
-    nav.append(el(d, 'span', {
-      className: 'plat-pager-of',
-      text: `পৃষ্ঠা ${bn(page)} / ${bn(pages)}`,
-    }));
-    nav.append(step(1, 'পরের →'));
+    nav.append(step(-1, 'আগের'));
+    nav.append(el(d, 'span', { className: 'plat-pager-of' },
+      ...numText(d, `পৃষ্ঠা ${bn(page)} / ${bn(pages)}`)));
+    nav.append(step(1, 'পরের'));
     return nav;
   }
 
@@ -1268,6 +1433,7 @@ export class PlatformOpsView {
     if (!host) return;
     host.replaceChildren();
 
+    const unfiltered = !this.search && this.filter === 'all';
     host.append(dataTable(d, {
       caption: 'প্রতিষ্ঠানের তালিকা',
       rows: this.visible(),
@@ -1277,117 +1443,165 @@ export class PlatformOpsView {
         glyph: 'search',
         message: this.search
           ? 'এই নামে কোনো প্রতিষ্ঠান পাওয়া যায়নি।'
-          : 'এই ছাঁকনিতে কোনো প্রতিষ্ঠান নেই।',
+          : this.filter === 'all'
+            ? 'কোনো প্রতিষ্ঠান নেই।'
+            : 'এই ছাঁকনিতে কোনো প্রতিষ্ঠান নেই।',
+        // The next action, only where there is one: an empty FLEET is filled
+        // by onboarding a school, an empty filter is not.
+        action: unfiltered
+          ? { label: 'নতুন প্রতিষ্ঠান', onClick: () => this.o.onNewTenant() }
+          : undefined,
       },
+      // Screen ০২'s columns. The school's slug is on its page and in the
+      // search; its billing state and its cap fold into the অবস্থা chip and
+      // the শিক্ষার্থী cell. Last use stays — the list sorts by it, and a
+      // school nobody has signed in to is the one an operator most wants.
       columns: [
         { key: 'name', header: 'প্রতিষ্ঠান', mobile: 'title', width: 'minmax(0, 2fr)',
           cell: (t) => t.nameBn },
-        // The school's own slug, never the uuid. It is what an operator says
-        // on the phone and types into a URL.
-        { key: 'slug', header: 'ঠিকানা', mobile: 'subtitle', width: 'minmax(0, 1.4fr)',
-          cell: (t) => t.slug },
-        { key: 'students', header: 'শিক্ষার্থী', mobile: 'meta', numeric: true,
-          width: '150px',
-          cell: (t) => `${bn(t.studentCount)} / ${bn(t.studentCap)}` },
-        { key: 'plan', header: 'প্ল্যান', mobile: 'meta', width: 'minmax(0, 1.2fr)',
+        { key: 'plan', header: 'প্ল্যান', mobile: 'subtitle', width: 'minmax(0, 1.2fr)',
           cell: (t) => t.planName ?? t.planCode },
-        { key: 'billing', header: 'বিলিং', mobile: 'meta', width: '150px',
-          cell: (t) => statusBadge(d, BILLING_BN[t.billingState]
-            ?? { label: t.billingState, state: 'draft' }) },
+        // "৫০০ / ৫০০" only when the cap is reached or near — the drawing's
+        // rule, so the cap is read where it matters and not on every row.
+        { key: 'students', header: 'শিক্ষার্থী', mobile: 'meta', numeric: true,
+          width: '130px',
+          cell: (t) => t.studentCap > 0 && t.studentCount >= t.studentCap * 0.9
+            ? `${bn(t.studentCount)} / ${bn(t.studentCap)}`
+            : bn(t.studentCount) },
+        { key: 'due', header: 'পরের বিল', mobile: 'meta', width: '150px',
+          cell: (t) => {
+            if (!t.nextDueOn) return '—';
+            const late = t.billingState === 'limited' ? overdueDays(t.nextDueOn) : 0;
+            return late > 0 ? `${bn(late)} দিন পার` : bnDate(t.nextDueOn);
+          } },
         // §26 — measured, from real sign-ins and real product events.
-        { key: 'seen', header: 'শেষ ব্যবহার', mobile: 'meta', width: '170px',
+        { key: 'seen', header: 'শেষ ব্যবহার', mobile: 'meta', width: '160px',
           cell: (t) => t.lastActiveAt ? bnDate(t.lastActiveAt) : 'কখনো নয়' },
         // The EFFECTIVE answer, not `ops_state`. A school suspended by its
         // legacy status, its bill or a closed portal has `ops_state` of
         // 'active', and a list an operator scans for trouble must not show
         // "সক্রিয়" next to a school nobody can sign in to.
         { key: 'access', header: 'অবস্থা', mobile: 'status', width: '150px',
-          cell: (t) => statusBadge(d, t.access === 'none'
-            ? { label: 'বন্ধ', state: 'overdue' }
-            : t.access === 'read_only'
-              ? { label: 'শুধু পড়া', state: 'partial' }
-              : OPS_BN[t.opsState] ?? { label: t.opsState, state: 'draft' }) },
+          cell: (t) => statusBadge(d, fleetState(t)) },
       ],
     }));
   }
 
   // ── 3. the command centre ────────────────────────────────────────────
-  private renderDrawer(): void {
+  /**
+   * One school, as a page under প্রতিষ্ঠান (screen ০৩): its name in the bar
+   * with the billing alarm and the two things done FROM here, the six-tab
+   * strip, then the tab's content in one band.
+   */
+  private renderDetail(root: HTMLElement): void {
     const d = this.o.doc;
     const id = this.openId;
     if (!id) return;
-    const t = this.rows.find((x) => x.id === id);
-    const body = el(d, 'div', { className: 'ui-card-form plat-detail' });
+    const t = this.rows.find((x) => x.id === id) ?? this.queueRows.find((x) => x.id === id);
+    const o = this.ops;
 
-    if (!this.ops) {
-      append(body, listSkeleton(d, 4));
-    } else {
-      append(body, this.identity(this.ops, t));
-      append(body, tabs(d, {
-        label: 'বিভাগ',
-        active: this.detailTab,
-        items: [
-          { id: 'overview', label: 'সারসংক্ষেপ' },
-          { id: 'services', label: 'সেবা' },
-          { id: 'portals', label: 'প্রবেশ' },
-          { id: 'billing', label: 'সাবস্ক্রিপশন' },
-          { id: 'payments', label: 'পেমেন্ট', count: this.payments.length },
-          { id: 'audit', label: 'ইতিহাস' },
-        ],
-        onSelect: (x) => { this.detailTab = x; this.renderDrawer(); },
-      }));
-      if (this.detailTab === 'overview') append(body, this.overviewTab(this.ops, id));
-      if (this.detailTab === 'services') append(body, this.servicesTab(id));
-      if (this.detailTab === 'portals') append(body, this.portalsTab(this.ops, id));
-      if (this.detailTab === 'billing') append(body, this.billingTab(this.ops, id));
-      if (this.detailTab === 'payments') append(body, this.paymentsTab(id));
-      if (this.detailTab === 'audit') append(body, this.auditTab());
+    const head = pageHeader(d, {
+      className: 'plat-bar',
+      title: t?.nameBn ?? 'প্রতিষ্ঠান',
+      actions: o ? [
+        this.billingChip(o),
+        button(d, {
+          label: 'প্রভিশনিং ও ব্র্যান্ডিং', variant: 'secondary', size: 'sm', glyph: 'settings',
+          onClick: () => { this.closeDetail(); this.o.onOpenTenant(id); },
+        }),
+        // A second way to the same confirmation the overview's state cards
+        // use — named consequence, required reason. Not offered once it is.
+        o.opsState === 'suspended' ? null : button(d, {
+          label: 'স্থগিত করুন', variant: 'danger', size: 'sm',
+          disabled: this.busy,
+          onClick: () => this.askState(id, 'suspended', OPS_BN.suspended),
+        }),
+      ] : [],
+    });
+    // The page's name takes focus when a school is opened (openDetail).
+    head.querySelector('h1')?.setAttribute('tabindex', '-1');
+    root.append(head);
+
+    if (this.flash(root, () => { void this.openDetail(id); })) return;
+    if (!o) {
+      if (!this.error) root.append(platBand(d, 'plat-loading', listSkeleton(d, 4)));
+      return;
     }
 
-    if (this.drawer) setOverlayBody(this.drawer, body);
-    else {
-      this.drawer = openDrawer(d, {
-        title: t?.nameBn ?? 'প্রতিষ্ঠান',
-        body,
-        actions: [button(d, {
-          label: 'প্রভিশনিং ও ব্র্যান্ডিং', variant: 'secondary', glyph: 'settings',
-          onClick: () => { this.closeDrawer(); this.o.onOpenTenant(id); },
-        })],
-        onClose: () => { this.drawer = null; this.openId = null; this.ops = null; },
+    root.append(tabs(d, {
+      label: 'বিভাগ',
+      className: 'plat-detail-tabs',
+      active: this.detailTab,
+      items: [
+        { id: 'overview', label: 'সারসংক্ষেপ' },
+        { id: 'services', label: 'সেবা' },
+        { id: 'portals', label: 'প্রবেশ' },
+        { id: 'billing', label: 'সাবস্ক্রিপশন' },
+        { id: 'payments', label: 'পেমেন্ট', count: this.payments.length },
+        { id: 'audit', label: 'ইতিহাস' },
+      ],
+      onSelect: (x) => { this.detailTab = x; this.render(); },
+    }));
+
+    const body = platBand(d, 'plat-detail');
+    if (this.detailTab === 'overview') append(body, this.identity(o, t), this.overviewTab(o, id));
+    if (this.detailTab === 'services') append(body, this.servicesTab(id));
+    if (this.detailTab === 'portals') append(body, this.portalsTab(o, id));
+    if (this.detailTab === 'billing') append(body, this.billingTab(o, id));
+    if (this.detailTab === 'payments') append(body, this.paymentsTab(id));
+    if (this.detailTab === 'audit') append(body, this.auditTab());
+    root.append(body);
+  }
+
+  /**
+   * The bar's chip: only an alarm, as drawn ("বকেয়া · ১২ দিন"). A school in
+   * good standing gets no chip; its billing state is on the overview and the
+   * subscription tab.
+   */
+  private billingChip(o: Operations): HTMLElement | null {
+    const d = this.o.doc;
+    if (o.billingState === 'limited') {
+      const late = o.nextDueOn ? overdueDays(o.nextDueOn) : 0;
+      return statusBadge(d, {
+        state: 'overdue', label: late > 0 ? `বকেয়া · ${bn(late)} দিন` : 'বকেয়া',
       });
     }
+    if (o.billingState === 'grace_period') {
+      return statusBadge(d, BILLING_BN.grace_period);
+    }
+    return null;
   }
 
   /**
    * Show a confirmation where the operator can reach it.
    *
-   * Inside the drawer when one is open, because the drawer is a modal: it
-   * covers the page with a scrim and marks everything outside itself
-   * `aria-hidden`. A confirmation appended to the page behind it is drawn
-   * under the drawer and read by nobody — which is what every dangerous
-   * action in this console was doing.
+   * Inside a drawer when one is open, because a drawer is a modal: it covers
+   * the page with a scrim and marks everything outside itself `aria-hidden`.
+   * Otherwise in the school page's content band, under what the operator is
+   * looking at.
    *
    * Focus moves to the dialogue's first control, which `confirmDialog` puts
    * in the DOM as Cancel on purpose: the way out is the first thing reached.
    */
   private showConfirm(dlg: HTMLElement): void {
-    const host = this.drawer?.el.querySelector('.ui-dialog-body') ?? this.o.root;
+    const host = this.drawer?.el.querySelector('.ui-dialog-body')
+      ?? this.o.root.querySelector('.plat-detail')
+      ?? this.o.root;
     host.append(dlg);
     dlg.scrollIntoView({ block: 'nearest' });
     (dlg.querySelector('button') as HTMLElement | null)?.focus();
   }
 
+  /** Close the plan or operator drawer. A school's page is closed by closeDetail. */
   private closeDrawer(): void {
     this.drawer?.close();
     this.drawer = null;
-    this.openId = null;
-    this.ops = null;
   }
 
   /** Above the fold: who, what state, and the three numbers that decide. */
   private identity(o: Operations, t?: TenantOverview): HTMLElement {
     const d = this.o.doc;
-    const wrap = el(d, 'section');
+    const wrap = el(d, 'section', { className: 'plat-identity' });
     const ops = OPS_BN[o.opsState] ?? { label: o.opsState, state: 'draft', effect: '' };
 
     // The headline is the EFFECTIVE answer, not the `ops_state` field.
@@ -1402,27 +1616,25 @@ export class PlatformOpsView {
     };
     // When the ops state does NOT explain the answer, say what does.
     const disagrees = o.access !== 'full' && o.opsState === 'active';
+    const full = o.studentCap > 0 && o.studentCount >= o.studentCap;
     append(wrap, statRow(d,
       statCard(d, {
-        label: 'এখন যা সম্ভব', value: ACCESS_BN[o.access] ?? o.access, glyph: 'lock',
-        tone: o.access === 'full' ? 'success' : o.access === 'none' ? 'accent2' : 'warn',
+        label: 'এখন যা সম্ভব', value: ACCESS_BN[o.access] ?? o.access,
+        tone: o.access === 'full' ? 'success' : o.access === 'none' ? 'danger' : 'warn',
         note: disagrees
           ? `প্রতিষ্ঠানের অবস্থা "${ops.label}" — বাধাটি বিলিং, প্রবেশপথ বা পুরোনো স্ট্যাটাস থেকে`
           : `প্রতিষ্ঠানের অবস্থা: ${ops.label}`,
       }),
       statCard(d, {
         label: 'শিক্ষার্থী', value: `${bn(o.studentCount)} / ${bn(o.studentCap)}`,
-        glyph: 'users',
-        tone: o.studentCount >= o.studentCap ? 'accent2'
-          : o.studentCount >= o.studentCap * 0.9 ? 'warn' : 'primary',
-        note: o.studentCount >= o.studentCap ? 'সীমা পূর্ণ' : undefined,
+        tone: full ? 'danger' : undefined,
+        note: full ? 'সীমা পূর্ণ' : undefined,
       }),
       statCard(d, {
         label: 'বিলিং',
         value: (BILLING_BN[o.billingState] ?? { label: o.billingState }).label,
-        glyph: 'wallet',
-        tone: o.billingState === 'limited' ? 'accent2'
-          : o.billingState === 'grace_period' ? 'warn' : 'success',
+        tone: o.billingState === 'limited' ? 'danger'
+          : o.billingState === 'grace_period' ? 'warn' : undefined,
         note: o.nextDueOn ? `শেষ তারিখ ${bnDate(o.nextDueOn)}` : 'কোনো তারিখ নির্ধারিত নেই',
       }),
     ));
@@ -1431,22 +1643,22 @@ export class PlatformOpsView {
     // read the sentence their own decision is producing.
     if (o.reasonBn) {
       append(wrap, card(d, {
-        title: 'প্রতিষ্ঠান যা দেখছে', glyph: 'message', headingLevel: 3,
+        title: 'প্রতিষ্ঠান যা দেখছে', glyph: 'message', headingLevel: 2,
         tone: o.access === 'none' ? 'warn' : 'info',
-      }, el(d, 'p', { className: 'ui-card-lead', text: o.reasonBn })));
+      }, el(d, 'p', { className: 'ui-card-lead' }, ...numText(d, o.reasonBn))));
     }
     if (t) {
       const dl = el(d, 'dl', { className: 'ui-facts' });
       append(dl,
         el(d, 'dt', { className: 'ui-facts-key', text: 'ঠিকানা' }),
-        el(d, 'dd', { className: 'ui-facts-val', text: t.slug }),
+        el(d, 'dd', { className: 'ui-facts-val' }, ...numText(d, t.slug)),
         el(d, 'dt', { className: 'ui-facts-key', text: 'জেলা' }),
         el(d, 'dd', { className: 'ui-facts-val', text: t.district || '—' }),
         el(d, 'dt', { className: 'ui-facts-key', text: 'ব্যবহারকারী' }),
-        el(d, 'dd', { className: 'ui-facts-val', text: `${bn(t.userCount)} জন` }),
+        el(d, 'dd', { className: 'ui-facts-val' }, ...numText(d, `${bn(t.userCount)} জন`)),
         el(d, 'dt', { className: 'ui-facts-key', text: 'যুক্ত হয়েছে' }),
-        el(d, 'dd', { className: 'ui-facts-val', text: bnDate(t.createdAt) }));
-      append(wrap, card(d, { title: 'পরিচয়', glyph: 'star', headingLevel: 3 }, dl));
+        el(d, 'dd', { className: 'ui-facts-val' }, ...numText(d, bnDate(t.createdAt))));
+      append(wrap, card(d, { title: 'পরিচয়', glyph: 'star', headingLevel: 2 }, dl));
     }
     return wrap;
   }
@@ -1454,8 +1666,8 @@ export class PlatformOpsView {
   /** The tenant-wide control. Four states, each explained before it is taken. */
   private overviewTab(o: Operations, id: string): HTMLElement {
     const d = this.o.doc;
-    const wrap = el(d, 'section');
-    append(wrap, sectionHeading(d, { title: 'প্রতিষ্ঠানের অবস্থা' }));
+    const wrap = el(d, 'section', { className: 'plat-overview' });
+    append(wrap, sectionHeading(d, { title: 'প্রতিষ্ঠানের অবস্থা', className: 'plat-label' }));
 
     for (const state of ['active', 'maintenance', 'limited', 'suspended']) {
       const meta = OPS_BN[state];
@@ -1464,7 +1676,6 @@ export class PlatformOpsView {
         title: meta.label,
         glyph: state === 'active' ? 'check-square' : state === 'suspended' ? 'alert-triangle' : 'lock',
         headingLevel: 3,
-        tone: current ? 'primary' : undefined,
         action: current
           ? statusBadge(d, { state: 'published', label: 'বর্তমান' })
           : button(d, {
@@ -1479,12 +1690,12 @@ export class PlatformOpsView {
         // An operator comparing two states must be able to read both.
         el(d, 'p', { className: 'ui-card-note', text: meta.effect }),
         current && o.stateReason
-          ? el(d, 'p', { className: 'ui-card-note', text: `কারণ: ${o.stateReason}` })
+          ? el(d, 'p', { className: 'ui-card-note' }, ...numText(d, `কারণ: ${o.stateReason}`))
           : null,
       ));
     }
 
-    append(wrap, sectionHeading(d, { title: 'শিক্ষার্থীর সীমা' }));
+    append(wrap, sectionHeading(d, { title: 'শিক্ষার্থীর সীমা', className: 'plat-label' }));
     const cap = field(d, {
       label: 'সর্বোচ্চ শিক্ষার্থী', name: 'studentCap', kind: 'number',
       value: String(o.studentCap),
@@ -1554,58 +1765,85 @@ export class PlatformOpsView {
     this.showConfirm(dlg);
   }
 
-  /** §6 — every service, its effective state, and what changing it does. */
+  /**
+   * §6 — every service, its effective state, and what changing it does.
+   *
+   * As drawn (screen ০৩): a label, a note, then one row per service — its
+   * name over what switching it off does, a word-chip when it is not on, and
+   * a switch. The switch changes nothing by itself: it opens the same
+   * confirmation, with the consequence and a required reason, that the
+   * buttons did.
+   */
   private servicesTab(id: string): HTMLElement {
     const d = this.o.doc;
-    const wrap = el(d, 'section');
+    const wrap = el(d, 'section', { className: 'plat-settings-section' });
     const stateOf = new Map(this.effective.map((s) => [s.code, s.state]));
 
-    append(wrap, card(d, {
-      title: 'সেবা নিয়ন্ত্রণ', glyph: 'settings', headingLevel: 3,
-    }, el(d, 'p', {
-      className: 'ui-card-note',
-      text: 'প্ল্যান ঠিক করে কোন সেবা কেনা আছে; এখান থেকে সেই সেবা এই প্রতিষ্ঠানের '
-        + 'জন্য বন্ধ বা সীমিত করা যায়। প্ল্যানে না থাকা সেবা এখান থেকে চালু করা যায় না।',
-    })));
+    append(wrap,
+      sectionHeading(d, { title: 'সেবা চালু / বন্ধ', className: 'plat-label' }),
+      el(d, 'p', {
+        className: 'plat-note',
+        text: 'প্ল্যান ঠিক করে কোন সেবা কেনা আছে; এখান থেকে সেই সেবা এই প্রতিষ্ঠানের '
+          + 'জন্য বন্ধ বা সীমিত করা যায়। প্ল্যানে না থাকা সেবা এখান থেকে চালু করা যায় না।',
+      }));
 
-    append(wrap, dataTable(d, {
-      caption: 'সেবার তালিকা ও অবস্থা',
-      rows: this.services,
-      rowKey: (s) => s.code,
-      columns: [
-        { key: 'name', header: 'সেবা', mobile: 'title', cell: (s) => s.nameBn,
-          width: 'minmax(0, 1.4fr)' },
-        // What turning it off DOES, in the row, so the consequence is read
-        // before the control is reached rather than after.
-        { key: 'effect', header: 'বন্ধ করলে', mobile: 'subtitle', cell: (s) => s.effectBn,
-          width: 'minmax(0, 3fr)' },
-        { key: 'state', header: 'অবস্থা', mobile: 'status', width: '140px',
-          cell: (s) => statusBadge(d, SERVICE_STATE_BN[stateOf.get(s.code) ?? 'unknown']) },
-        { key: 'act', header: 'ব্যবস্থা', width: '210px',
-          cell: (s) => this.serviceActions(id, s, stateOf.get(s.code) ?? 'unknown') },
-      ],
-    }));
+    const rows = list(d, 'সেবার তালিকা ও অবস্থা', ...this.services.map((s) => listItem(d, {
+      title: s.nameBn,
+      // What turning it off DOES, in the row, so the consequence is read
+      // before the control is reached rather than after.
+      subtitle: s.effectBn,
+      status: this.serviceActions(id, s, stateOf.get(s.code) ?? 'unknown'),
+    })));
+    rows.classList.add('plat-settings');
+    append(wrap, rows);
     return wrap;
   }
 
   private serviceActions(id: string, s: ServiceRow, state: string): HTMLElement {
     const d = this.o.doc;
     const row = el(d, 'div', { className: 'ui-row-actions' });
+    if (state !== 'enabled') {
+      append(row, statusBadge(d, SERVICE_STATE_BN[state] ?? SERVICE_STATE_BN.unknown));
+    }
     if (state === 'not_in_plan') {
       // Not "switched off" — not bought. Different remedy, so a different
-      // sentence and no button that would fail.
+      // sentence and no control that would fail.
       append(row, el(d, 'span', { className: 'ui-card-note', text: 'প্ল্যান বদলান' }));
       return row;
     }
-    const set = (next: string, label: string, danger = false) => button(d, {
-      label, variant: danger ? 'danger' : 'secondary', size: 'sm',
-      ariaLabel: `${s.nameBn} — ${label}`,
-      disabled: this.busy,
-      onClick: () => this.askService(id, s, next, label),
-    });
-    if (state !== 'disabled') append(row, set('disabled', 'বন্ধ', true));
-    if (state !== 'enabled') append(row, set('enabled', 'চালু'));
+    // Read-only, maintenance or unknown is neither on nor off: the switch
+    // turns it back on, and "বন্ধ" switches it fully off, as before.
+    if (state !== 'enabled' && state !== 'disabled') {
+      append(row, button(d, {
+        label: 'বন্ধ', variant: 'danger', size: 'sm',
+        ariaLabel: `${s.nameBn} — বন্ধ`,
+        disabled: this.busy,
+        onClick: () => this.askService(id, s, 'disabled', 'বন্ধ'),
+      }));
+    }
+    const on = state === 'enabled';
+    append(row, this.switchControl(
+      on, `${s.nameBn} — ${on ? 'বন্ধ করুন' : 'চালু করুন'}`,
+      () => this.askService(id, s, on ? 'disabled' : 'enabled', on ? 'বন্ধ' : 'চালু')));
     return row;
+  }
+
+  /**
+   * The drawn switch: `role="switch"` with its state in `aria-checked` and a
+   * name that says what pressing it asks for. Pressing it opens a
+   * confirmation; the state changes only when the server says it has.
+   */
+  private switchControl(on: boolean, label: string, onPress: () => void): HTMLElement {
+    const d = this.o.doc;
+    const sw = el(d, 'button', {
+      className: 'plat-switch',
+      attrs: {
+        type: 'button', role: 'switch', 'aria-checked': String(on),
+        'aria-label': label, disabled: this.busy || null,
+      },
+    }, el(d, 'span', { className: 'plat-switch-knob', attrs: { 'aria-hidden': 'true' } }));
+    sw.addEventListener('click', onPress);
+    return sw;
   }
 
   private askService(id: string, s: ServiceRow, next: string, label: string): void {
@@ -1639,42 +1877,32 @@ export class PlatformOpsView {
     this.showConfirm(dlg);
   }
 
-  /** §8 — per-portal sign-in, never by deleting users or roles. */
+  /** §8 — per-portal sign-in, never by deleting users or roles. The same rows as the services. */
   private portalsTab(o: Operations, id: string): HTMLElement {
     const d = this.o.doc;
-    const wrap = el(d, 'section');
-    append(wrap, card(d, {
-      title: 'পোর্টাল প্রবেশ', glyph: 'lock', headingLevel: 3,
-    }, el(d, 'p', {
-      className: 'ui-card-note',
-      text: 'কোনো ব্যবহারকারী বা ভূমিকা মুছে ফেলা হয় না — শুধু এই মুহূর্তে প্রবেশ '
-        + 'বন্ধ থাকে। আবার চালু করলে সবাই আগের মতোই ফিরে পাবেন।',
-    })));
+    const wrap = el(d, 'section', { className: 'plat-settings-section' });
+    append(wrap,
+      sectionHeading(d, { title: 'পোর্টাল প্রবেশ', className: 'plat-label' }),
+      el(d, 'p', {
+        className: 'plat-note',
+        text: 'কোনো ব্যবহারকারী বা ভূমিকা মুছে ফেলা হয় না — শুধু এই মুহূর্তে প্রবেশ '
+          + 'বন্ধ থাকে। আবার চালু করলে সবাই আগের মতোই ফিরে পাবেন।',
+      }));
 
-    const rows = Object.keys(PORTAL_BN).map((code) => ({
-      code, open: o.portals[code] !== false,
+    const rows = list(d, 'পোর্টালভিত্তিক প্রবেশ', ...Object.keys(PORTAL_BN).map((code) => {
+      const open = o.portals[code] !== false;
+      return listItem(d, {
+        title: PORTAL_BN[code],
+        status: el(d, 'div', { className: 'ui-row-actions' },
+          // Closed says so in words; the switch alone would be colour.
+          open ? null : statusBadge(d, { state: 'overdue', label: 'প্রবেশ বন্ধ' }),
+          this.switchControl(open,
+            `${PORTAL_BN[code]} — ${open ? 'প্রবেশ বন্ধ করুন' : 'প্রবেশ খুলে দিন'}`,
+            () => this.askPortal(id, code, !open))),
+      });
     }));
-    append(wrap, dataTable(d, {
-      caption: 'পোর্টালভিত্তিক প্রবেশ',
-      rows,
-      rowKey: (p) => p.code,
-      columns: [
-        { key: 'name', header: 'পোর্টাল', mobile: 'title',
-          cell: (p) => PORTAL_BN[p.code], width: 'minmax(0, 2fr)' },
-        { key: 'state', header: 'অবস্থা', mobile: 'status', width: '150px',
-          cell: (p) => statusBadge(d, p.open
-            ? { state: 'published', label: 'প্রবেশ খোলা' }
-            : { state: 'overdue', label: 'প্রবেশ বন্ধ' }) },
-        { key: 'act', header: 'ব্যবস্থা', width: '180px',
-          cell: (p) => el(d, 'div', { className: 'ui-row-actions' }, button(d, {
-            label: p.open ? 'বন্ধ করুন' : 'খুলে দিন',
-            variant: p.open ? 'danger' : 'secondary', size: 'sm',
-            ariaLabel: `${PORTAL_BN[p.code]} — ${p.open ? 'প্রবেশ বন্ধ করুন' : 'প্রবেশ খুলে দিন'}`,
-            disabled: this.busy,
-            onClick: () => this.askPortal(id, p.code, !p.open),
-          })) },
-      ],
-    }));
+    rows.classList.add('plat-settings');
+    append(wrap, rows);
     return wrap;
   }
 
@@ -1713,7 +1941,7 @@ export class PlatformOpsView {
   /** §11 §13 §14 — the plan, the lifecycle, and the grace window. */
   private billingTab(o: Operations, id: string): HTMLElement {
     const d = this.o.doc;
-    const wrap = el(d, 'section');
+    const wrap = el(d, 'section', { className: 'plat-billing' });
 
     const dl = el(d, 'dl', { className: 'ui-facts' });
     const facts: Array<[string, string]> = [
@@ -1727,9 +1955,9 @@ export class PlatformOpsView {
     for (const [k, v] of facts) {
       append(dl,
         el(d, 'dt', { className: 'ui-facts-key', text: k }),
-        el(d, 'dd', { className: 'ui-facts-val', text: v }));
+        el(d, 'dd', { className: 'ui-facts-val' }, ...numText(d, v)));
     }
-    append(wrap, card(d, { title: 'সাবস্ক্রিপশন', glyph: 'wallet', headingLevel: 3 },
+    append(wrap, card(d, { title: 'সাবস্ক্রিপশন', glyph: 'wallet', headingLevel: 2 },
       dl,
       // The lifecycle is DERIVED. Saying so on the screen stops an operator
       // hunting for a status field to correct.
@@ -1741,8 +1969,8 @@ export class PlatformOpsView {
       })));
 
     if (o.graceReason) {
-      append(wrap, card(d, { title: 'চলতি ছাড়', glyph: 'clock', headingLevel: 3, tone: 'warn' },
-        el(d, 'p', { className: 'ui-card-note', text: o.graceReason })));
+      append(wrap, card(d, { title: 'চলতি ছাড়', glyph: 'clock', headingLevel: 2, tone: 'warn' },
+        el(d, 'p', { className: 'ui-card-note' }, ...numText(d, o.graceReason))));
     }
 
     append(wrap, this.planCard(o, id));
@@ -1754,7 +1982,7 @@ export class PlatformOpsView {
     });
     const why = field(d, { label: 'কারণ', name: 'reason', required: true,
       placeholder: 'যেমন: চেক পাঠানো হয়েছে' });
-    append(wrap, card(d, { title: 'ছাড়ের মেয়াদ বাড়ান', glyph: 'clock', headingLevel: 3 },
+    append(wrap, card(d, { title: 'ছাড়ের মেয়াদ বাড়ান', glyph: 'clock', headingLevel: 2 },
       until.root, why.root,
       buttonRow(d, button(d, {
         label: 'ছাড় দিন', variant: 'secondary', busy: this.busy,
@@ -1777,14 +2005,15 @@ export class PlatformOpsView {
   /** §33 — what this console has done to this school, and why. */
   private auditTab(): HTMLElement {
     const d = this.o.doc;
-    const wrap = el(d, 'section');
+    const wrap = el(d, 'section', { className: 'plat-audit' });
 
-    append(wrap, card(d, { title: 'পরিবর্তনের ইতিহাস', glyph: 'clock', headingLevel: 3 },
+    append(wrap,
+      sectionHeading(d, { title: 'পরিবর্তনের ইতিহাস', className: 'plat-label' }),
       el(d, 'p', {
-        className: 'ui-card-note',
+        className: 'plat-note',
         text: 'shikhonBD-এর পক্ষ থেকে এই প্রতিষ্ঠানে করা প্রতিটি পরিবর্তন, '
           + 'সঙ্গে যে কারণ লেখা হয়েছিল। এই তালিকা মোছা যায় না।',
-      })));
+      }));
 
     if (this.audit.length === 0) {
       append(wrap, emptyState(d, {
@@ -1842,15 +2071,16 @@ export class PlatformOpsView {
     const effect = el(d, 'p', { className: 'ui-card-note' });
     const describe = (): void => {
       const p = this.plans.find((x) => x.code === pick.value());
-      if (!p) { effect.textContent = ''; return; }
+      effect.replaceChildren();
+      if (!p) return;
       const cap = Math.max(p.studentCap, o.studentCap);
       const on = Object.entries(p.services).filter(([, v]) => v).length;
-      effect.textContent =
+      append(effect, ...numText(d,
         `${p.nameBn}: ${formatBdt(p.priceBdt)} / ${CYCLE_BN[p.billingCycle] ?? p.billingCycle}, `
         + `শিক্ষার্থীর সীমা ${bn(cap)}, ${bn(on)}টি সেবা, ছাড় ${bn(p.graceDays)} দিন।`
         + (p.studentCap < enrolled
           ? ` — এই প্ল্যানের সীমা ${bn(p.studentCap)}, কিন্তু এখানে ${bn(enrolled)} জন শিক্ষার্থী আছে।`
-          : '');
+          : '')));
     };
     pick.input.addEventListener('change', describe);
     describe();
@@ -1858,7 +2088,7 @@ export class PlatformOpsView {
     const why = field(d, { label: 'কারণ', name: 'reason', required: true,
       placeholder: 'যেমন: নতুন চুক্তি স্বাক্ষরিত' });
 
-    return card(d, { title: 'প্ল্যান বদলান', glyph: 'layers', headingLevel: 3 },
+    return card(d, { title: 'প্ল্যান বদলান', glyph: 'layers', headingLevel: 2 },
       pick.root, effect, why.root,
       buttonRow(d, button(d, {
         label: 'প্ল্যান বদলান', variant: 'secondary', busy: this.busy,
@@ -1905,7 +2135,7 @@ export class PlatformOpsView {
   /** §12 — manual payments. No gateway, by decision. */
   private paymentsTab(id: string): HTMLElement {
     const d = this.o.doc;
-    const wrap = el(d, 'section');
+    const wrap = el(d, 'section', { className: 'plat-payments' });
 
     const amount = field(d, { label: 'টাকার পরিমাণ', name: 'amountBdt', kind: 'number',
       required: true, attrs: { min: 1, step: '0.01' } });
@@ -1921,7 +2151,7 @@ export class PlatformOpsView {
       kind: 'date', helper: 'দিলে পরবর্তী শেষ তারিখ এখানেই সরে যাবে।' });
     const note = field(d, { label: 'নোট', name: 'note', kind: 'textarea', attrs: { rows: 2 } });
 
-    append(wrap, card(d, { title: 'পেমেন্ট রেকর্ড করুন', glyph: 'wallet', headingLevel: 3 },
+    append(wrap, card(d, { title: 'পেমেন্ট রেকর্ড করুন', glyph: 'wallet', headingLevel: 2 },
       amount.root, paidOn.root, method.root, reference.root, covers.root, note.root,
       buttonRow(d, button(d, {
         label: 'রেকর্ড করুন', variant: 'primary', busy: this.busy,
@@ -1933,7 +2163,6 @@ export class PlatformOpsView {
             amount.input.focus();
             return;
           }
-          const host = el(d, 'div');
           const dlg = confirmDialog({
             doc: d,
             title: 'পেমেন্ট নিশ্চিত করুন',
@@ -1946,12 +2175,11 @@ export class PlatformOpsView {
               coversUntil: covers.value() || null, note: note.value().trim() || null,
             }, 'পেমেন্ট রেকর্ড হয়েছে।'),
           });
-          host.append(dlg);
-          this.o.root.append(host);
+          this.showConfirm(dlg);
         },
       }))));
 
-    append(wrap, sectionHeading(d, { title: 'পেমেন্টের ইতিহাস' }));
+    append(wrap, sectionHeading(d, { title: 'পেমেন্টের ইতিহাস', className: 'plat-label' }));
     append(wrap, dataTable(d, {
       caption: 'রেকর্ড করা পেমেন্ট',
       rows: this.payments,
@@ -1974,17 +2202,6 @@ export class PlatformOpsView {
     return wrap;
   }
 }
-
-const ATTENTION_BN: Record<string, string> = {
-  overdue: 'বকেয়া',
-  cap_full: 'সীমা পূর্ণ',
-  suspended: 'স্থগিত',
-  portal: 'প্রবেশ বন্ধ',
-  grace: 'ছাড়',
-  cap_near: 'সীমার কাছে',
-  service: 'সেবা বন্ধ',
-  onboarding: 'সেটআপ',
-};
 
 const CYCLE_BN: Record<string, string> = {
   monthly: 'মাস', quarterly: 'ত্রৈমাসিক', yearly: 'বছর',

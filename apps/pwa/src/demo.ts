@@ -1714,7 +1714,7 @@ export class DemoAuth extends Auth {
       }
 
       case '/api/v1/finance/generate':
-        return ok({ ok: true, billingPeriod: '2026-05', invoiceCount: 236, notified: 198 });
+        return ok({ ok: true, billingPeriod: '2026-05', invoicesCreated: 236, notified: 198 });
 
       // ── R-4 ────────────────────────────────────────────────────────
       case '/api/v1/ops/calendar': {

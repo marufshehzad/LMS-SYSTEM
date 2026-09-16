@@ -1,18 +1,36 @@
 /**
- * Home / dashboard — the new default landing screen.
+ * Home for every role that has no home screen of its own.
  *
- * A calm re-orientation surface: greeting card at the top, the two things a
- * teacher is most likely to touch (today's routine, take attendance) as
- * primary cards, then a compact grid of every other feature.
+ * app.ts mounts a dedicated home for the principal and owner, the student and
+ * the teaching roles. Everyone else lands here: today the guardian, the
+ * accountant, the IT admin and the academic coordinator. The screen is a calm
+ * re-orientation surface — who is signed in and what day it is, the two
+ * destinations this role most often needs, then a short list of the rest.
  *
- * For students there is one addition that changes the screen's job: a
- * "next" block fetched from /academics/next. The grid answers "what CAN I
- * do"; the next block answers "what SHOULD I do", which is the question a
- * student actually arrives with. It renders progressively — the cards
- * paint immediately and the suggestions slot in when they arrive, so the
- * shell is never blocked on a request.
+ * For guardians there is one addition: a "next" block fetched through
+ * `loadNext`. The destinations answer "what CAN I do"; the next block answers
+ * "what SHOULD I do". It renders progressively — the destinations paint
+ * immediately and the suggestions slot in when they arrive, so the shell is
+ * never blocked on a request.
+ *
+ * ── Ata Ekta ───────────────────────────────────────────────────────────────
+ * 04 Guardian §01 draws the guardian's home as three answers: today's
+ * attendance for the selected child, that child's fee due, and the new
+ * notices. This screen is handed none of that data — only the role's
+ * destinations and the next-block loader — and the redesign changes
+ * appearance, not what a screen fetches. So the drawn answers are not built
+ * here. What IS built is the page in the drawing's own vocabulary: the header
+ * through `pageHeader()` (the one h1), the blocks stacked at the drawn 12px,
+ * and each labelled group as the drawn bordered box with an inset label band
+ * over its rows. Rows and cards are the shared `listItem` and `card`, so the
+ * glyphs are neutral ink and no colour is spent on decoration.
  */
-import { iconSvg } from './icon.ts';
+import {
+  el, append, card, list, listItem, listSkeleton, pageHeader, sectionHeading,
+  statusBadge, errorState, humanError,
+} from './ui/index.ts';
+import { bnNum } from './view-states.ts';
+import { weekdayDateBn } from '../../../packages/ui-core/src/format.ts';
 
 export interface DashboardItem {
   path: string;
@@ -42,8 +60,7 @@ export interface HomeViewOptions {
   loadNext?: () => Promise<Suggestion[]>;
 }
 
-// Icon names (see ./icon.ts), not emoji: one drawn set, one stroke weight,
-// tinting with the card's urgency colour via currentColor.
+// Icon names (see ./icon.ts), not emoji: one drawn set, one stroke weight.
 const KIND_GLYPH: Record<string, string> = {
   assignment: 'edit',
   redo_practice: 'refresh',
@@ -51,8 +68,11 @@ const KIND_GLYPH: Record<string, string> = {
   new_chapter: 'star',
 };
 
-function greetingBn(): string {
-  const h = new Date().getHours();
+/** The heading every state of the next block keeps, so the slot never jumps. */
+const NEXT_TITLE = 'এখন যা করবে';
+
+function greetingBn(now: Date): string {
+  const h = now.getHours();
   if (h < 5) return 'শুভ রাত্রি';
   if (h < 12) return 'শুভ সকাল';
   if (h < 17) return 'শুভ দুপুর';
@@ -60,82 +80,81 @@ function greetingBn(): string {
   return 'শুভ সন্ধ্যা';
 }
 
-function todayBn(): string {
-  const months = ['জানুয়ারি','ফেব্রুয়ারি','মার্চ','এপ্রিল','মে','জুন','জুলাই','আগস্ট','সেপ্টেম্বর','অক্টোবর','নভেম্বর','ডিসেম্বর'];
-  const days = ['রবি','সোম','মঙ্গল','বুধ','বৃহঃ','শুক্র','শনি'];
-  const d = new Date();
-  const digits: Record<string,string> = { '0':'০','1':'১','2':'২','3':'৩','4':'৪','5':'৫','6':'৬','7':'৭','8':'৮','9':'৯' };
-  const day = String(d.getDate()).replace(/[0-9]/g, (c) => digits[c] ?? c);
-  return `${days[d.getDay()]}, ${day} ${months[d.getMonth()]}`;
+/** Navigation stays a hash change, exactly as the tiles it replaces did. */
+function go(path: string): void {
+  location.hash = `/${path}`;
 }
 
 export class HomeView {
   constructor(o: HomeViewOptions) {
     const d = o.doc;
+    const now = new Date();
     o.root.textContent = '';
 
-    // Hero: greeting + today.
-    const hero = d.createElement('section');
-    hero.className = 'hero';
-    const heroDate = d.createElement('p');
-    heroDate.className = 'hero-date';
-    heroDate.textContent = todayBn();
-    const heroGreet = d.createElement('h1');
-    heroGreet.className = 'hero-greet';
+    // The shell's home drawing (01 Shell, mirrored by the teacher home): the
+    // person's name is the page's h1 and the greeting sits with the date under
+    // it. pageHeader puts the date's digits in the numeral face (R6).
     const name = (o.displayName ?? '').trim();
-    heroGreet.textContent = name ? `${greetingBn()}, ${name}` : greetingBn();
-    const heroSub = d.createElement('p');
-    heroSub.className = 'hero-sub';
-    heroSub.textContent = 'আজ কী করতে চান?';
-    hero.append(heroDate, heroGreet, heroSub);
-    o.root.append(hero);
+    append(o.root, pageHeader(d, name
+      ? { title: name, subtitle: `${greetingBn(now)} · ${weekdayDateBn(now)}` }
+      : { title: greetingBn(now), subtitle: weekdayDateBn(now) }));
 
-    // "What should I study next" — inserted between hero and cards, so it
-    // reads as the answer to the greeting's question rather than a fourth
-    // navigation option.
+    const page = el(d, 'div', { className: 'hv-home' });
+    append(o.root, page);
+
+    // "What should I do next" — between the header and the destinations, so
+    // it reads as the answer to the greeting rather than one more option.
     if (o.loadNext) {
-      const slot = d.createElement('section');
-      slot.className = 'next-slot';
+      const slot = el(d, 'section', { className: 'hv-group' });
       // The suggestions arrive after first paint; the region announces itself
       // to a screen reader when they do, and aria-busy carries the load state.
       slot.setAttribute('aria-live', 'polite');
-      o.root.append(slot);
+      append(page, slot);
       this.loadNextInto(d, slot, o.loadNext);
     }
 
-    // Primary cards (large, two-up).
+    // The role's two main destinations: whole-card buttons, named by title.
     if (o.primary.length > 0) {
-      const primaryGrid = d.createElement('div');
-      primaryGrid.className = 'card-grid primary-grid';
-      for (const item of o.primary) primaryGrid.append(this.buildCard(d, item, true));
-      o.root.append(primaryGrid);
+      append(page, el(d, 'div', { className: 'hv-primary' },
+        ...o.primary.map((item) => card(d, {
+          title: item.titleBn,
+          subtitle: item.subtitleBn,
+          glyph: item.glyph,
+          onClick: () => go(item.path),
+        }))));
     }
 
-    // Section heading + secondary grid.
+    // "Quick access", not "all sections": a short shortcut list, with the long
+    // tail in আরও. Naming it honestly stops it reading as the whole index.
     if (o.secondary.length > 0) {
-      const sectionH = d.createElement('h2');
-      sectionH.className = 'section-heading';
-      // "Quick access", not "all sections": the grid is now a short shortcut
-      // row, and the long tail lives in আরও. Naming it honestly stops it
-      // reading as the whole index.
-      sectionH.textContent = 'দ্রুত প্রবেশ';
-      o.root.append(sectionH);
-
-      const grid = d.createElement('div');
-      grid.className = 'card-grid secondary-grid';
-      for (const item of o.secondary) grid.append(this.buildCard(d, item, false));
-      o.root.append(grid);
+      append(page, el(d, 'section', { className: 'hv-group' },
+        this.groupHead(d, 'দ্রুত প্রবেশ'),
+        list(d, 'দ্রুত প্রবেশ', ...o.secondary.map((item) => this.row(d, item)))));
     }
   }
 
+  /** The drawn label band that heads a bordered group. */
+  private groupHead(d: Document, title: string): HTMLElement {
+    return sectionHeading(d, { title, className: 'hv-group-head' });
+  }
+
+  /** One destination row. Its accessible name stays the title alone, as the tile's was. */
+  private row(d: Document, item: DashboardItem): HTMLElement {
+    const li = listItem(d, {
+      title: item.titleBn,
+      subtitle: item.subtitleBn,
+      glyph: item.glyph,
+      onClick: () => go(item.path),
+    });
+    li.querySelector('.ui-list-hit')?.setAttribute('aria-label', item.titleBn);
+    return li;
+  }
+
   /**
-   * Load the suggestions with the three states the old code collapsed into
-   * one. It painted nothing until the fetch resolved and swallowed failure
-   * into nothing — on the slow connections these users actually have, the
-   * one element built for them simply, silently, wasn't there. Now: a
-   * skeleton holds the space from first paint (so the grid below never jumps
-   * under a thumb), an empty result is a quiet reassurance, and a failure is
-   * an honest retry, not a void.
+   * Load the suggestions with three distinct states. A skeleton holds the
+   * space from first paint (so the cards below never jump under a thumb), an
+   * empty result is a quiet reassurance, and a failure is an honest retry,
+   * not a void.
    */
   private loadNextInto(
     d: Document, slot: HTMLElement, loader: () => Promise<Suggestion[]>,
@@ -143,127 +162,54 @@ export class HomeView {
     this.renderNextSkeleton(d, slot);
     slot.setAttribute('aria-busy', 'true');
     loader()
-      .then((list) => { slot.setAttribute('aria-busy', 'false'); this.renderNext(d, slot, list); })
+      .then((items) => { slot.setAttribute('aria-busy', 'false'); this.renderNext(d, slot, items); })
       .catch(() => {
         slot.setAttribute('aria-busy', 'false');
         this.renderNextError(d, slot, () => this.loadNextInto(d, slot, loader));
       });
   }
 
-  /** The section heading, always the same string. */
-  private nextHeading(d: Document): HTMLElement {
-    const h2 = d.createElement('h2');
-    h2.className = 'section-heading';
-    h2.textContent = 'এখন যা করবে';
-    return h2;
-  }
-
-  /** Skeleton of the real list — a shape, never a spinner (Wireframe §4). */
+  /** Grey rows in the shape of the list, never a spinner (Foundations §04). */
   private renderNextSkeleton(d: Document, slot: HTMLElement): void {
     slot.textContent = '';
-    slot.append(this.nextHeading(d));
-    const wrap = d.createElement('div');
-    wrap.className = 'next-skel';
-    for (let i = 0; i < 2; i++) {
-      const card = d.createElement('div');
-      card.className = 'next-skel-card is-skeleton';
-      const title = d.createElement('span'); title.className = 'skel skel-title';
-      const line = d.createElement('span'); line.className = 'skel skel-line';
-      card.append(title, line);
-      wrap.append(card);
-    }
-    slot.append(wrap);
+    append(slot, this.groupHead(d, NEXT_TITLE), listSkeleton(d, 2));
   }
 
-  /** Couldn't load — a sentence and a retry, never a silent gap. */
+  /** Couldn't load — a sentence and "আবার চেষ্টা করুন", never a silent gap. */
   private renderNextError(d: Document, slot: HTMLElement, retry: () => void): void {
     slot.textContent = '';
-    slot.append(this.nextHeading(d));
-    const row = d.createElement('div');
-    row.className = 'next-error-row';
-    const p = d.createElement('p');
-    p.className = 'next-note';
-    p.textContent = 'পরামর্শ লোড হয়নি।';
-    const btn = d.createElement('button');
-    btn.type = 'button';
-    btn.className = 'next-retry';
-    btn.textContent = 'আবার চেষ্টা';
-    btn.addEventListener('click', retry);
-    row.append(p, btn);
-    slot.append(row);
+    const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+    append(slot, this.groupHead(d, NEXT_TITLE),
+      errorState(d, offline ? humanError('offline') : 'পরামর্শ লোড হয়নি।', retry));
   }
 
-  private renderNext(d: Document, slot: HTMLElement, list: Suggestion[]): void {
+  private renderNext(d: Document, slot: HTMLElement, items: Suggestion[]): void {
     slot.textContent = '';
-    slot.append(this.nextHeading(d));
+    append(slot, this.groupHead(d, NEXT_TITLE));
 
     // Nothing due is a real, good answer — say so, quietly, instead of
-    // leaving a blank where a moment ago there was a skeleton.
-    if (list.length === 0) {
-      const p = d.createElement('p');
-      p.className = 'next-note';
-      p.textContent = 'আজ নতুন করে কিছু করার নেই — এগিয়ে আছো।';
-      slot.append(p);
+    // leaving a blank where a moment ago there was a skeleton. The next
+    // action is the destinations directly below.
+    if (items.length === 0) {
+      append(slot, el(d, 'p', {
+        className: 'hv-note', text: 'আজ নতুন করে কিছু করার নেই — এগিয়ে আছো।',
+      }));
       return;
     }
 
-    const ul = d.createElement('ul');
-    ul.className = 'next-list';
-    for (const s of list) {
-      const li = d.createElement('li');
-      const btn = d.createElement('button');
-      btn.type = 'button';
-      btn.className = 'card next-card';
-      btn.dataset.urgency = s.urgency;
-
-      const glyph = d.createElement('span');
-      glyph.className = 'next-glyph';
-      glyph.setAttribute('aria-hidden', 'true');
-      glyph.innerHTML = iconSvg(KIND_GLYPH[s.kind] ?? '');
-
-      const body = d.createElement('span');
-      body.className = 'next-body';
-      const title = d.createElement('span');
-      title.className = 'next-title';
-      title.textContent = s.titleBn;
-      // The reason is the point — a suggestion a student can't interrogate
-      // is one they'll learn to ignore.
-      const why = d.createElement('span');
-      why.className = 'next-why';
-      why.textContent = s.whyBn;
-      body.append(title, why);
-
-      btn.append(glyph, body);
-      btn.addEventListener('click', () => { location.hash = `/${s.route}`; });
-      li.append(btn);
-      ul.append(li);
-    }
-    slot.append(ul);
-  }
-
-  private buildCard(d: Document, item: DashboardItem, primary: boolean): HTMLElement {
-    const card = d.createElement('button');
-    card.type = 'button';
-    card.className = primary ? 'card home-card home-card-primary' : 'card home-card';
-    card.setAttribute('aria-label', item.titleBn);
-
-    const glyph = d.createElement('span');
-    glyph.className = 'home-glyph';
-    glyph.setAttribute('aria-hidden', 'true');
-    glyph.innerHTML = iconSvg(item.glyph);
-
-    const body = d.createElement('span');
-    body.className = 'home-body';
-    const title = d.createElement('span');
-    title.className = 'home-title';
-    title.textContent = item.titleBn;
-    const sub = d.createElement('span');
-    sub.className = 'home-sub';
-    sub.textContent = item.subtitleBn;
-    body.append(title, sub);
-
-    card.append(glyph, body);
-    card.addEventListener('click', () => { location.hash = `/${item.path}`; });
-    return card;
+    append(slot, list(d, NEXT_TITLE, ...items.map((s) => listItem(d, {
+      title: s.titleBn,
+      // The reason is the point — a suggestion nobody can interrogate is one
+      // people learn to ignore. The server writes the day count in Latin
+      // digits ("2 দিনের মধ্যে …"), so it is put into Bangla digits here, as
+      // the student home does with the same sentence (R6).
+      subtitle: bnNum(s.whyBn),
+      glyph: KIND_GLYPH[s.kind],
+      // Urgency in a word, never in a coloured rail alone (§3).
+      status: s.urgency === 'high'
+        ? statusBadge(d, { state: 'due', label: 'জরুরি' })
+        : undefined,
+      onClick: () => go(s.route),
+    }))));
   }
 }

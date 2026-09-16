@@ -1,23 +1,50 @@
 /**
  * Fees view (বেতন tab): invoices + digital receipts.
  *
- * GET /api/v1/finance/invoices feeds the list; tapping an invoice expands
- * its line items and lazily fetches GET /api/v1/finance/receipts for it.
- * Same offline-cache-in-localStorage approach as roster-view.ts.
+ * GET /api/v1/finance/invoices feeds the list; tapping an invoice opens its
+ * line items in a drawer and lazily fetches GET /api/v1/finance/receipts for
+ * it. Same offline-cache-in-localStorage approach as roster-view.ts.
  *
  * Who sees what is decided by RLS (invoice_scope in
- * db/migrations/010_rls_policies.sql): guardians/students see their own,
- * accountant/principal/owner see everything, and an ordinary subject
- * teacher legitimately sees none — the empty state says so instead of
- * pretending it's an error.
+ * db/migrations/010_rls_policies.sql, through app.can_see_student): a
+ * student sees their own, a guardian their wards', a class or subject
+ * teacher the students of their own sections, and accountant, principal and
+ * owner — and, through can_see_student's ELSE branch, every other staff role
+ * (coordinator, dept head, librarian …) — the whole school's, newest 100.
+ * Somebody whose scope holds no invoice gets the empty state, which says so
+ * instead of pretending it's an error.
+ *
+ * ── Ata Ekta: two drawings, one screen ─────────────────────────────────────
+ * The design draws this route twice, for two audiences:
+ *
+ *   FAMILY (03 Student §05, 04 Guardian §04) — a phone. What is owed comes
+ *   first, on the red ground, then the months as a list of rows.
+ *
+ *   OFFICE (07 Finance §03) — a desk. A status filter with বকেয়া already
+ *   chosen, then the table with জমা and বকেয়া columns.
+ *
+ * Which one is drawn is a PRESENTATION choice made from the role, exactly as
+ * app.ts chooses `canGenerate` for the invoices screen. What anyone can SEE
+ * is still RLS: the office layout over a guardian's rows would show the same
+ * rows, only arranged for a desk.
+ *
+ * The family layout is for the FAMILY roles only, not for "everyone who is
+ * not finance staff". Its hero adds every open balance up and calls the sum
+ * এখন বকেয়া — true only when the rows are the reader's own bills or their
+ * children's. A teacher or coordinator reading the invoices of other
+ * families would be told those families' debts are theirs, and the family
+ * rows (month · amount, no invoice number) would all look alike. Every other
+ * reader gets the office layout: no hero, each row named by its number.
  */
-import { formatBdt } from '../../../packages/ui-core/src/format.ts';
+import { formatBdt, formatCount } from '../../../packages/ui-core/src/format.ts';
 import type { Auth } from './auth.ts';
 import { refuseUnlessOk, isDenied } from './http-status.ts';
 import {
-  permissionState, permissionMessage, deniedMessage, deniedContact, pageHeader, dataTable, statusBadge,
-  openDrawer, setOverlayBody, listSkeleton, el, append, type OverlayHandle,
+  permissionState, deniedMessage, deniedContact, pageHeader, dataTable, statusBadge,
+  openDrawer, setOverlayBody, listSkeleton, errorState, announce, el, append, icon, uid,
+  numText, type OverlayHandle, type Column,
 } from './ui/index.ts';
+import type { EmptyOptions } from './view-states.ts';
 import { bnDate, bnMonth } from './view-states.ts';
 
 interface InvoiceLine {
@@ -30,6 +57,12 @@ interface InvoiceLine {
 interface Invoice {
   id: string;
   invoiceNo: string;
+  /**
+   * The API has always returned it. Optional because a cache written before
+   * this field was read does not carry it. Only ever COUNTED (how many
+   * children owe) — a uuid is never shown.
+   */
+  studentId?: string;
   billingPeriod: string | null;
   issuedOn: string;
   dueOn: string;
@@ -72,6 +105,57 @@ const STATUS_BN: Record<string, string> = {
 };
 
 /**
+ * How a receipt was paid, in words. The receipts endpoint returns the enum
+ * (`cash`, `bkash`), and the drawer printed it raw onto a Bangla screen.
+ * These are the labels finance-svc/api/payments.ts METHOD_BN writes on the
+ * receipt itself, so the drawer and the printed receipt say the same word.
+ */
+const METHOD_BN: Record<string, string> = {
+  cash: 'নগদ', cheque: 'চেক', bank_transfer: 'ব্যাংক ট্রান্সফার',
+  bkash: 'বিকাশ', nagad: 'নগদ (Nagad)', rocket: 'রকেট', upay: 'উপায়',
+};
+
+/**
+ * The people who make invoices. Mirrors GENERATE_INVOICES in app.ts and
+ * COLLECT_ROLES in finance-svc payments.ts. Used only for copy: the empty
+ * state tells THEM to create the month's invoices, which nobody else can.
+ * Presentation only — see the header comment.
+ */
+const FINANCE_STAFF = new Set(['principal', 'school_owner', 'accountant']);
+
+/**
+ * The family layout's audience: people whose invoices are their own bills or
+ * their children's, so a summed balance is truly what THEY owe. Anyone else
+ * (a teacher, a coordinator, an unknown role) gets the office layout without
+ * the finance-staff copy — see the header comment.
+ */
+const FAMILY = new Set(['student', 'guardian']);
+
+/** Statuses after which nothing more is owed, whatever the balance says. */
+const CLOSED = new Set(['paid', 'waived', 'cancelled']);
+
+/** Still owes money: a balance on an invoice that is not closed. */
+function owes(inv: Invoice): boolean {
+  return Number(inv.balanceAmount) > 0 && !CLOSED.has(inv.status);
+}
+
+/**
+ * 07 Finance §03's filter row. A view over the rows already loaded — nothing
+ * is fetched when it changes. বকেয়া includes a part-paid invoice, because a
+ * part-paid family still owes; আংশিক is that subset on its own.
+ */
+type FeesFilter = 'all' | 'due' | 'paid' | 'partial';
+const FILTERS: ReadonlyArray<{ id: FeesFilter; label: string; match: (i: Invoice) => boolean; none: string }> = [
+  { id: 'all', label: 'সব', match: () => true, none: '' },
+  { id: 'due', label: 'বকেয়া', match: owes,
+    none: 'এই তালিকায় বকেয়া থাকা কোনো ইনভয়েস নেই।' },
+  { id: 'paid', label: 'পরিশোধিত', match: (i) => i.status === 'paid',
+    none: 'এই তালিকায় পরিশোধিত কোনো ইনভয়েস নেই।' },
+  { id: 'partial', label: 'আংশিক', match: (i) => i.status === 'partly_paid',
+    none: 'এই তালিকায় আংশিক পরিশোধিত কোনো ইনভয়েস নেই।' },
+];
+
+/**
  * R-8 audit. This file used to carry its own `money()`, rendering Bangla
  * digits — so a parent read **৳ ১,২৫০** here and **৳ 1,250.00** on the receipt
  * printed for the same invoice. Two formatters, one decision, two answers.
@@ -102,6 +186,17 @@ export class FeesView {
   /** B-84. The refusal itself, so the screen can say which kind it was. */
   private deniedErr: unknown = null;
   private loading = true;
+  /**
+   * A failure with nothing cached to show — not an empty list. It used to
+   * fall through to the empty state, which told a family they had no
+   * invoices when the truth was that none could be fetched.
+   */
+  private error = false;
+  /** The office filter. বকেয়া is chosen first (07 Finance §03's note). */
+  private filter: FeesFilter = 'due';
+  /** The office table and chips, so a filter swaps rows without a repaint. */
+  private rowsEl: HTMLElement | null = null;
+  private chips: HTMLButtonElement[] = [];
 
   constructor(options: FeesViewOptions) {
     this.o = options;
@@ -124,6 +219,7 @@ export class FeesView {
       const body = (await res.json()) as { invoices: Invoice[] };
       this.invoices = body.invoices;
       this.offline = false;
+      this.error = false;
       try { localStorage.setItem(CACHE_KEY, JSON.stringify(this.invoices)); } catch { /* best-effort */ }
     } catch (err) {
       if (isDenied(err)) {
@@ -138,9 +234,17 @@ export class FeesView {
         this.loading = false; this.render(); return;
       }
       this.offline = this.invoices.length > 0;
+      this.error = this.invoices.length === 0;
     }
     this.loading = false;
     this.render();
+  }
+
+  /** The error state's retry: the same fetch again, from the top. */
+  private retry(): void {
+    this.error = false;
+    this.loading = true;
+    void this.init();
   }
 
   /**
@@ -149,12 +253,14 @@ export class FeesView {
    * A DRAWER, not an inline expansion. The list is now a table, and a table
    * row cannot hold a second table of line items and receipts — and on a
    * phone an expansion pushes every other invoice off the screen, which is
-   * the thing a parent is comparing against.
+   * the thing a parent is comparing against. (On a phone the drawer rises
+   * as a bottom sheet — 13 Responsive ০৭, done by the overlay's own CSS.)
    */
   private async toggle(invoiceId: string): Promise<void> {
     this.expanded = invoiceId;
     const inv = this.invoices.find((i) => i.id === invoiceId);
     if (!inv) return;
+    // The title's figures are put in the numeral face by openDrawer itself.
     const handle = openDrawer(this.o.doc, {
       title: inv.billingPeriod
         ? `${inv.invoiceNo} · ${bnMonth(inv.billingPeriod)}`
@@ -179,6 +285,14 @@ export class FeesView {
     }
   }
 
+  /** A money figure: one element, wholly in the numeral face (R6). */
+  private figure(amount: string | number, className = ''): HTMLElement {
+    return el(this.o.doc, 'span', {
+      className: ['n fees-amount', className].filter(Boolean).join(' '),
+      text: money(amount),
+    });
+  }
+
   /** One invoice's lines, due date and receipts. Drawer body. */
   private detail(inv: Invoice): HTMLElement {
     const d = this.o.doc;
@@ -193,8 +307,9 @@ export class FeesView {
           width: 'minmax(0, 2fr)' },
         { key: 'amount', header: 'টাকা', mobile: 'meta', numeric: true,
           cell: (l) => (Number(l.waiverAmount) > 0
-            ? `${money(l.netAmount)} (মওকুফ ${money(l.waiverAmount)})`
-            : money(l.amount)),
+            ? el(d, 'span', {},
+              this.figure(l.netAmount), ' (মওকুফ ', this.figure(l.waiverAmount), ')')
+            : this.figure(l.amount)),
           width: 'minmax(0, 1.4fr)' },
       ],
     }));
@@ -202,14 +317,14 @@ export class FeesView {
     const dl = el(d, 'dl', { className: 'ui-facts' });
     append(dl,
       el(d, 'dt', { className: 'ui-facts-key', text: 'মোট' }),
-      el(d, 'dd', { className: 'ui-facts-val', text: money(inv.totalAmount) }),
+      el(d, 'dd', { className: 'ui-facts-val n', text: money(inv.totalAmount) }),
       el(d, 'dt', { className: 'ui-facts-key', text: 'পরিশোধিত' }),
-      el(d, 'dd', { className: 'ui-facts-val', text: money(inv.paidAmount) }),
+      el(d, 'dd', { className: 'ui-facts-val n', text: money(inv.paidAmount) }),
       el(d, 'dt', { className: 'ui-facts-key', text: 'বকেয়া' }),
-      el(d, 'dd', { className: 'ui-facts-val', text: money(inv.balanceAmount) }),
+      el(d, 'dd', { className: 'ui-facts-val n', text: money(inv.balanceAmount) }),
       // Was `শেষ তারিখ: 2026-08-10` — an ISO date on a Bangla screen.
       el(d, 'dt', { className: 'ui-facts-key', text: 'শেষ তারিখ' }),
-      el(d, 'dd', { className: 'ui-facts-val', text: bnDate(inv.dueOn) }));
+      el(d, 'dd', { className: 'ui-facts-val' }, ...numText(d, bnDate(inv.dueOn))));
     append(host, dl);
 
     const receipts = this.receipts.get(inv.id);
@@ -221,10 +336,10 @@ export class FeesView {
         columns: [
           { key: 'no', header: 'রসিদ', mobile: 'title', cell: (r) => r.receiptNo,
             width: 'minmax(0, 1.6fr)' },
-          { key: 'how', header: 'মাধ্যম', mobile: 'subtitle', cell: (r) => r.method,
-            width: 'minmax(0, 1fr)' },
+          { key: 'how', header: 'মাধ্যম', mobile: 'subtitle',
+            cell: (r) => METHOD_BN[r.method] ?? r.method, width: 'minmax(0, 1fr)' },
           { key: 'amt', header: 'টাকা', mobile: 'meta', numeric: true,
-            cell: (r) => money(r.amount), width: 'minmax(0, 1fr)' },
+            cell: (r) => this.figure(r.amount), width: 'minmax(0, 1fr)' },
         ],
       }));
     } else if (Number(inv.paidAmount) > 0) {
@@ -233,10 +348,196 @@ export class FeesView {
     return host;
   }
 
+  /**
+   * The due hero. 03 Student §05: "বকেয়া থাকলে লাল পটভূমিতে অঙ্কটাই আগে" —
+   * one child owing reads এখন বকেয়া; a guardian with two children owing
+   * reads the total and the count (04 Guardian §04). Nothing owed, no hero:
+   * the design draws only the owing case.
+   *
+   * The sum is in paisa, so ৳ 1,200.10 + ৳ 1,200.20 is not a float's
+   * approximation of it.
+   *
+   * Family roles only. For a teacher or coordinator the rows are other
+   * families' bills, and a total labelled এখন বকেয়া over them would be false
+   * (and a sum of at most 100 rows). The check is here as well as at the
+   * call, so no future caller can put the hero in front of the wrong reader.
+   */
+  private dueSummary(): HTMLElement | null {
+    if (!FAMILY.has(this.o.auth.role)) return null;
+    const d = this.o.doc;
+    const open = this.invoices.filter(owes);
+    if (!open.length) return null;
+    const owedPaisa = open.reduce((s, i) => s + Math.round(Number(i.balanceAmount) * 100), 0);
+    const children = new Set(open.map((i) => i.studentId).filter(Boolean)).size;
+    const multi = children > 1;
+    const earliest = open.map((i) => i.dueOn).filter(Boolean)
+      .sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+    const label = multi ? `মোট বকেয়া · ${formatCount(children, 'bn')} সন্তান` : 'এখন বকেয়া';
+    const labelId = uid('fees-due');
+    return el(d, 'section', {
+      className: multi ? 'fees-due is-multi' : 'fees-due',
+      attrs: { 'aria-labelledby': labelId },
+    },
+      el(d, 'p', { className: 'fees-due-label', attrs: { id: labelId } }, ...numText(d, label)),
+      el(d, 'p', { className: 'fees-due-amount n', text: money(owedPaisa / 100) }),
+      // The drawn late-fee sentence is fee policy the invoice does not carry;
+      // the due date is the fact that exists, in the drawer's own words.
+      earliest
+        ? el(d, 'p', { className: 'fees-due-note' }, ...numText(d, `শেষ তারিখ ${bnDate(earliest)}`))
+        : null);
+  }
+
+  /**
+   * The invoice table and its phone list, from one column set.
+   *
+   * On a phone the two audiences want different rows (13 Responsive ০১):
+   * a family reads month · amount · ✓ (03 Student §05), the office reads
+   * invoice · month · what is still owed. Nothing is dropped: every hidden
+   * column is in the row's drawer (মোট / পরিশোধিত / বকেয়া), and all of it is
+   * in the desktop table.
+   *
+   * `office` is the LAYOUT (every reader who is not family), not "finance
+   * staff" — a teacher reading many families' rows needs the invoice number
+   * as the row's name just as an accountant does.
+   */
+  private table(office: boolean, rows: Invoice[], empty: EmptyOptions): HTMLElement {
+    const d = this.o.doc;
+    const columns: Array<Column<Invoice>> = [
+      { key: 'no', header: 'ইনভয়েস', mobile: office ? 'title' : 'hidden',
+        cell: (inv) => inv.invoiceNo, width: 'minmax(0, 1.6fr)' },
+      // Was `2026-08` — a database key printed at a parent. An invoice with
+      // no billing month is named by its number in the phone's title, where
+      // the invoice column is hidden, and by a dash in the table's মাস column.
+      { key: 'period', header: 'মাস', mobile: office ? 'subtitle' : 'title',
+        width: 'minmax(0, 1.2fr)',
+        cell: (inv) => (inv.billingPeriod
+          ? bnMonth(inv.billingPeriod)
+          : el(d, 'span', {},
+            el(d, 'span', { className: 'fees-list-only', text: inv.invoiceNo }),
+            el(d, 'span', { className: 'fees-table-only', text: '—' }))) },
+      { key: 'total', header: 'মোট', numeric: true, mobile: office ? 'hidden' : 'status',
+        cell: (inv) => this.figure(inv.totalAmount), width: 'minmax(0, 1fr)' },
+      { key: 'paid', header: 'জমা', numeric: true, mobile: 'hidden',
+        cell: (inv) => this.figure(inv.paidAmount), width: 'minmax(0, 1fr)' },
+      { key: 'balance', header: 'বকেয়া', numeric: true, mobile: office ? 'meta' : 'hidden',
+        width: 'minmax(0, 1fr)',
+        cell: (inv) => el(d, 'span', {},
+          // On the office phone the figure stands alone on its line; the word
+          // is for the eye (the list already reads the header to a screen
+          // reader), and the table's column header does this job on a desk.
+          el(d, 'span', { className: 'fees-list-only', text: 'বকেয়া ', attrs: { 'aria-hidden': 'true' } }),
+          el(d, 'span', {
+            className: 'n fees-amount fees-balance',
+            text: money(inv.balanceAmount),
+            data: { owed: owes(inv) ? 'true' : undefined },
+          })) },
+      { key: 'status', header: 'অবস্থা', mobile: 'status', width: '150px',
+        cell: (inv) => {
+          const paid = inv.status === 'paid';
+          return el(d, 'span', { className: 'fees-status' },
+            statusBadge(d, {
+              state: BADGE_STATE[inv.status] ?? 'pending',
+              label: STATUS_BN[inv.status] ?? inv.status,
+              className: paid ? 'fees-paid-word' : undefined,
+            }),
+            // 03 Student §05 marks a paid month with a green check. The
+            // word stays for a screen reader; CSS shows the mark only in the
+            // family's phone list, and the badge everywhere else.
+            paid
+              ? el(d, 'span', { className: 'fees-paid-mark' },
+                icon(d, 'check'), el(d, 'span', { className: 'ui-sr-only', text: 'পরিশোধিত' }))
+              : null);
+        } },
+    ];
+    return dataTable(d, {
+      caption: 'ইনভয়েসের তালিকা',
+      rows,
+      rowKey: (inv) => inv.id,
+      onRowClick: (inv) => { void this.toggle(inv.id); },
+      empty,
+      columns,
+    });
+  }
+
+  /**
+   * No invoice at all. Says who would see one, and what would make one. The
+   * "create them" sentence is for finance staff only: a teacher or librarian
+   * on the office layout cannot open the ইনভয়েস তৈরি page, so they get the
+   * sentence about who sees invoices instead.
+   */
+  private noInvoices(): EmptyOptions {
+    return FINANCE_STAFF.has(this.o.auth.role)
+      ? { glyph: 'wallet',
+          message: 'এখনো কোনো ইনভয়েস তৈরি হয়নি। “ইনভয়েস তৈরি” পাতা থেকে মাসের ইনভয়েস তৈরি করুন।' }
+      : { glyph: 'wallet',
+          message: 'কোনো ইনভয়েস পাওয়া যায়নি। অভিভাবক নিজের সন্তানের এবং ' +
+                   'হিসাবরক্ষক সবার ইনভয়েস দেখতে পান।' };
+  }
+
+  /** FAMILY: the due hero, then the months — one panel (03 §05, 04 §04). */
+  private familySheet(): HTMLElement {
+    const d = this.o.doc;
+    return el(d, 'div', { className: 'fees-sheet is-family' },
+      this.dueSummary(),
+      // 03 Student §05's eyebrow bar over the rows. A real h2, so heading
+      // navigation reaches the list. Not "আগের রসিদ": the rows are every
+      // invoice, owed ones included, and that heading would say otherwise.
+      el(d, 'h2', { className: 'label fees-list-head', text: 'ইনভয়েস ও রসিদ' }),
+      this.table(false, this.invoices, this.noInvoices()));
+  }
+
+  /** OFFICE: the status filter over the table (07 Finance §03). */
+  private officeSheet(): HTMLElement {
+    const d = this.o.doc;
+    const bar = el(d, 'div', {
+      className: 'fees-filter', attrs: { role: 'group', 'aria-label': 'অবস্থা অনুযায়ী ছাঁকুন' },
+    });
+    this.chips = FILTERS.map((f) => {
+      const b = el(d, 'button', {
+        className: 'fees-filter-opt',
+        text: f.label,
+        attrs: { type: 'button', 'aria-pressed': String(f.id === this.filter) },
+        data: { filter: f.id },
+      });
+      b.addEventListener('click', () => this.setFilter(f.id));
+      return b;
+    });
+    append(bar, ...this.chips);
+    this.rowsEl = this.officeRows();
+    return el(d, 'div', { className: 'fees-sheet is-office' }, bar, this.rowsEl);
+  }
+
+  private officeRows(): HTMLElement {
+    const f = FILTERS.find((x) => x.id === this.filter) ?? FILTERS[0];
+    return this.table(true, this.invoices.filter(f.match), {
+      glyph: 'wallet',
+      message: f.none,
+      action: { label: 'সব ইনভয়েস দেখুন', onClick: () => this.setFilter('all') },
+    });
+  }
+
+  /**
+   * Swap the rows in place. A repaint of the screen would take focus off the
+   * chip the person just pressed; this keeps it there and says what changed.
+   */
+  private setFilter(id: FeesFilter): void {
+    if (id === this.filter && this.rowsEl) return;
+    this.filter = id;
+    for (const c of this.chips) c.setAttribute('aria-pressed', String(c.dataset.filter === id));
+    const next = this.officeRows();
+    if (this.rowsEl?.isConnected) this.rowsEl.replaceWith(next);
+    this.rowsEl = next;
+    const f = FILTERS.find((x) => x.id === id) ?? FILTERS[0];
+    const count = this.invoices.filter(f.match).length;
+    announce(this.o.doc, `${formatCount(count, 'bn')}টি ইনভয়েস দেখানো হচ্ছে`);
+  }
+
   private render(): void {
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';
+    this.rowsEl = null;
+    this.chips = [];
 
     // B-30. A refusal outranks the offline banner, the skeleton and the
     // empty state: nothing is loading, there is nothing to show, and calling
@@ -253,38 +554,35 @@ export class FeesView {
     root.append(pageHeader(d, {
       title: 'বেতন ও ফি',
       subtitle: 'ইনভয়েস, মওকুফ ও ডিজিটাল রসিদ',
-      badge: this.offline
-        ? statusBadge(d, { state: 'pending', label: 'অফলাইন — সর্বশেষ সংরক্ষিত' })
-        : undefined,
     }));
 
     if (this.loading) { root.append(listSkeleton(d, 3)); return; }
 
-    root.append(dataTable(d, {
-      caption: 'ইনভয়েসের তালিকা',
-      rows: this.invoices,
-      rowKey: (inv) => inv.id,
-      onRowClick: (inv) => { void this.toggle(inv.id); },
-      empty: {
-        message: 'কোনো ইনভয়েস পাওয়া যায়নি। অভিভাবক নিজের সন্তানের এবং ' +
-                 'হিসাবরক্ষক সবার ইনভয়েস দেখতে পান।',
-      },
-      columns: [
-        { key: 'no', header: 'ইনভয়েস', mobile: 'title', cell: (inv) => inv.invoiceNo,
-          width: 'minmax(0, 1.6fr)' },
-        // Was `2026-08` — a database key printed at a parent.
-        { key: 'period', header: 'মাস', mobile: 'subtitle',
-          cell: (inv) => bnMonth(inv.billingPeriod), width: 'minmax(0, 1.2fr)' },
-        { key: 'total', header: 'মোট', mobile: 'meta', numeric: true,
-          cell: (inv) => money(inv.totalAmount), width: 'minmax(0, 1fr)' },
-        { key: 'balance', header: 'বকেয়া', mobile: 'meta', numeric: true,
-          cell: (inv) => money(inv.balanceAmount), width: 'minmax(0, 1fr)' },
-        { key: 'status', header: 'অবস্থা', mobile: 'status', width: '150px',
-          cell: (inv) => statusBadge(d, {
-            state: BADGE_STATE[inv.status] ?? 'pending',
-            label: STATUS_BN[inv.status] ?? inv.status,
-          }) },
-      ],
-    }));
+    if (this.error) {
+      root.append(errorState(d,
+        'বেতন ও ফির তথ্য আনা গেল না। ইন্টারনেট নেই বা সার্ভার সাড়া দিচ্ছে না।',
+        () => this.retry()));
+      return;
+    }
+
+    if (this.offline) {
+      // A --warn-tint banner above the cached list (§7), not a grey chip
+      // beside the title. This screen only reads, so nothing is queued and
+      // there is no count to show.
+      root.append(el(d, 'p', { className: 'offline-banner fees-offline', attrs: { role: 'status' } },
+        icon(d, 'wifi-off', 'offline-icon'),
+        el(d, 'span', { text: 'অফলাইন — সর্বশেষ সংরক্ষিত ইনভয়েস দেখানো হচ্ছে' })));
+    }
+
+    // Family roles get the family sheet and its hero; every other reader —
+    // finance staff, teachers and coordinators reading other families' rows,
+    // an unknown role — gets the office sheet, which has no hero.
+    const family = FAMILY.has(this.o.auth.role);
+    if (!this.invoices.length) {
+      // The empty state stands on its own: no hero, no filter over nothing.
+      root.append(this.table(!family, [], this.noInvoices()));
+      return;
+    }
+    root.append(family ? this.familySheet() : this.officeSheet());
   }
 }

@@ -16454,3 +16454,103 @@ from that role, but the data still arrives.
 
 PWA suite **1,048 tests**, all passing; typecheck 0 errors; build clean;
 `index.html` byte-identical at `496199bd`.
+
+---
+
+# Ata Ekta — wave 2, batch D, and attendance path খ (2026-09-17)
+
+## Batch D: finance, student, guardian, AI helpers, platform console
+
+Eleven units: fees, fee structures, invoices, ledger, student home, guardian
+home, the guardian view and panel, শিখো, শিক্ষক সহায়ক, practice, and the
+platform console. Nine needed a repair pass.
+
+- **Fees** has two drawn layouts on one route — the family sheet (a
+  `--danger-tint` due hero over the invoice rows) for students and guardians,
+  and the office list with সব / বকেয়া / পরিশোধিত / আংশিক chips for finance
+  staff. Review caught the first draft choosing the family layout for "anyone
+  not finance staff", which would have put a family's "এখন বকেয়া" hero over a
+  coordinator's view of other families' rows; it is now chosen FOR students
+  and guardians only. A failed load with nothing cached is now the error
+  state — it used to show the empty-state sentence, which falsely said there
+  were no invoices.
+- **Invoice generation** sits behind the irreversible panel (§7), with the
+  same test strength as result publishing.
+- **Ledger** keeps every MFS channel's posted and reconciled amounts visible.
+- **Student home** dropped a "জমা বাকি" figure that was really a count of
+  suggestions, not of homework due.
+- **The platform console** is the drawn operator shell; the repair also fixed a
+  refusal that survived signing out and back in.
+
+## Attendance path খ — the one behaviour change
+
+Built contract-first: before any code, one investigation traced what the
+screen enqueues, what the sync applier accepts, and exactly when a guardian
+gets an SMS. Then one implementation, then three independent skeptics
+(design, data correctness, accessibility), three rounds of repair and
+re-verification.
+
+What the teacher sees now:
+
+- Every row shows the roll AND the name, and starts **unset —
+  "চিহ্নিত হয়নি"**. Nobody is present until the teacher says so.
+- "{T} জনকে উপস্থিত ধরুন" (`markAllPresent()`) is the prominent action; a
+  tap opens a row's three choices; `grid.cycle()` is gone.
+- **Guard 1:** "দেখে জমা দিন" with anyone unmarked raises a `--warn-tint`
+  footer naming the count, with "বাকি {U} জনে যান" and the quiet
+  "তবুও জমা".
+- **Guard 2:** every change gets a 5-second undo naming the student and the new
+  state (Ctrl/Cmd+Z too), including undo of the bulk mark.
+- **Guard 3:** a sheet lists absentees and late arrivals by roll and name, each
+  with "বদলান", and says how many guardians will get an SMS. Screen-reader
+  users Tabbing through it hear roll, name and state on every change button,
+  and the SMS count when focus reaches "জমা দিন" — this last part was the one
+  accessibility finding still open after three rounds, and the lead fixed it.
+
+The data contract, held by tests:
+
+- "Unset" is derived from the grid's existing `touched` flag. No new status was
+  added — an `unset` value would fail the server's enum cast and park the
+  whole register as a non-retryable failure.
+- A save sends ONLY the students the teacher marked, with the status the
+  teacher gave. "তবুও জমা" omits the unmarked: no row, no default. The server
+  accepts a partial register, and every reader counts only existing records,
+  so omitted really is "not counted".
+- A save with nobody marked is refused before anything is queued; the server
+  would otherwise accept an empty register and count the section as taken.
+- The outbox op, its id, idempotency and offline durability are unchanged.
+
+The investigation found that **a correction cannot recall an SMS**
+(BACKLOG AE-13): the 20-minute grace window sends from the event and never
+re-reads the record, so absent → present within the window still texts the
+guardian, and absent → late texts twice. The three guards exist to catch the
+mistake before the register leaves the phone.
+
+## Also fixed centrally in this step
+
+- **Every checkbox had lost its keyboard focus ring** — including "আমি বুঝেছি
+  এটি ফেরানো যাবে না" on all four irreversible screens. A carried
+  `input:focus { outline: none }` rule (for text fields, which draw focus on
+  the border) beat the sheet's ring on equal specificity. Restored for
+  checkboxes and radios, keyboard focus only.
+- **Invoice generation always reported "nothing new".** The screen read
+  `invoiceCount`; finance-svc returns `invoicesCreated`. The demo fixture had
+  the same wrong name, which is why it never showed. A test now fails on the
+  old read.
+- The numeral-face test was restated over the stacks rules actually read: the
+  carried `--font-heading` / `--font-body` are no longer read by anything.
+
+## Merged centrally
+
+Batch D: 352 CSS rules added, 59 retired (12 more refused by the removal
+guard). Attendance: 83 added, 30 retired — the old tile grid. No raw hex, no
+undefined token, no cross-wave override. Icons: list, layout-dashboard,
+building-2.
+
+Shared tests for batch D were applied and mutation-tested: 44 deliberate
+breakages of the screens, every one caught by the intended assertion.
+
+## Verified
+
+PWA suite **1,110 tests**, all passing; typecheck 0 errors; build clean;
+`index.html` byte-identical at `496199bd`.
