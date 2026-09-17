@@ -182,13 +182,17 @@ export class StaffAttendanceView {
     const root = this.o.root;
     root.textContent = '';
 
+    // A family is shown no register at all (see `family`), so, like a
+    // refusal, it gets no day for a register to belong to and no picker.
+    const noRegister = this.denied || this.family;
+
     // 05 Principal §06: the title, and on the right the day the register is
     // for — day and month, no year, in the text colour of a caption. No
     // subtitle: the drawn bar has none. Not shown beside a refusal, where
     // there is no register for the day to belong to.
     root.append(pageHeader(d, {
       title: 'শিক্ষক হাজিরা',
-      actions: this.denied ? undefined : [el(d, 'time', {
+      actions: noRegister ? undefined : [el(d, 'time', {
         className: 'staff-att-date-text',
         attrs: { datetime: this.date },
       }, ...numText(d, formatDayMonth(this.date, 'bn')))],
@@ -210,16 +214,20 @@ export class StaffAttendanceView {
 
     // Not drawn — the frame shows only today — but viewing and correcting
     // another day is half of what this screen is for, so the picker stays,
-    // capped to the width a date needs.
-    root.append(field(d, {
-      label: 'তারিখ',
-      name: 'date',
-      kind: 'date',
-      value: this.date,
-      helper: 'অন্য দিনের হাজিরা দেখতে বা সংশোধন করতে তারিখ বদলান।',
-      className: 'staff-att-date',
-      onChange: (v) => { if (!v) return; this.date = v; void this.load(); },
-    }).root);
+    // capped to the width a date needs. Not for a family: every day's
+    // register is equally closed to them, and "change the date to see or
+    // correct another day" promised them something no date gives.
+    if (!noRegister) {
+      root.append(field(d, {
+        label: 'তারিখ',
+        name: 'date',
+        kind: 'date',
+        value: this.date,
+        helper: 'অন্য দিনের হাজিরা দেখতে বা সংশোধন করতে তারিখ বদলান।',
+        className: 'staff-att-date',
+        onChange: (v) => { if (!v) return; this.date = v; void this.load(); },
+      }).root);
+    }
 
     if (this.loading) { root.append(skeleton(d, 5)); return; }
 
@@ -227,13 +235,9 @@ export class StaffAttendanceView {
     if (!data) return;
 
     if (data.teachers.length === 0) {
-      // The GET is not role-gated, and `users_scope` hides the staff from a
-      // family: a student or guardian who opens this by its URL gets an empty
-      // register from every school, full of teachers or not. "No teachers
-      // have been added" was a false statement about their school; say what
-      // is true for them instead.
-      const family = ['student', 'guardian'].includes(this.o.auth.role);
-      root.append(emptyState(d, family
+      // "No teachers have been added" was a false statement about a family's
+      // school (see `family`); say what is true for them instead.
+      root.append(emptyState(d, this.family
         ? {
           glyph: 'users',
           message: 'শিক্ষকদের হাজিরা এই অ্যাকাউন্ট থেকে দেখা যায় না।',
@@ -288,6 +292,17 @@ export class StaffAttendanceView {
         rowKey: (t) => t.teacherId,
         columns,
       })));
+  }
+
+  /**
+   * A student or guardian, who cannot read this register. The GET is not
+   * role-gated, and `users_scope` hides the staff from a family: one who
+   * opens this by its URL gets an empty register from every school, for any
+   * date, full of teachers or not. Known from the role before the read, so
+   * the date picker is never drawn for them, not even over the skeleton.
+   */
+  private get family(): boolean {
+    return ['student', 'guardian'].includes(this.o.auth.role);
   }
 
   private nameOf(t: TeacherRow): string {

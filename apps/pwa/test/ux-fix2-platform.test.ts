@@ -188,7 +188,7 @@ function announcements(): { said: string[]; flush: () => Promise<string[]>; stop
 // ── R14 ───────────────────────────────────────────────────────────────────
 
 describe('R14 — Enter in an empty sign-in field is said, with focus on that field', () => {
-  test('THE ONE THAT MATTERS — Enter in the token field, both empty: focus stays, and the errors are alerts', async () => {
+  test('THE ONE THAT MATTERS — Enter in the token field, both empty: focus stays, and both missing fields are announced', async () => {
     const api = platformApi(healthy);
     new Console(root());
     const f = signInForm();
@@ -202,20 +202,22 @@ describe('R14 — Enter in an empty sign-in field is said, with focus on that fi
     const line = errorLine(f.token);
     assert.equal(line.hidden, false);
     assert.equal(line.textContent, 'অপারেটর টোকেন দিন।');
-    assert.equal(line.getAttribute('role'), 'alert', 'the token field’s error is not announced');
-    assert.equal(line.closest('[role="alert"],[aria-live]'), line);
-    // The key's error is not read by any focus move at all.
-    assert.equal(errorLine(f.key).getAttribute('role'), 'alert', 'the key field’s error is not announced');
+    assert.equal(errorLine(f.key).hidden, false);
     assert.equal(errorLine(f.key).textContent, 'PLATFORM_API_KEY দিন।');
 
+    // Round 3: said as ONE alert naming both (two alerts back to back let a
+    // reader cut the first off). The key's error is not read by any focus
+    // move at all, so it must be in what is said.
     const said = await ann.flush();
     ann.stop();
-    assert.ok(said.some((s) => s.includes('অপারেটর টোকেন দিন।')), `not announced: ${JSON.stringify(said)}`);
-    assert.ok(said.some((s) => s.includes('PLATFORM_API_KEY দিন।')), `not announced: ${JSON.stringify(said)}`);
+    const alerts = said.filter((s) => s.startsWith('alert:'));
+    assert.equal(alerts.length, 1, `not one alert: ${JSON.stringify(said)}`);
+    assert.match(alerts[0]!, /অপারেটর টোকেন/, `the token is not announced: ${JSON.stringify(said)}`);
+    assert.match(alerts[0]!, /PLATFORM_API_KEY/, `the key is not announced: ${JSON.stringify(said)}`);
     assert.equal(api.asked.length, 0, 'an empty form was sent');
   });
 
-  test('Enter in the empty key field after typing a token: focus stays on the key, its error is an alert', async () => {
+  test('Enter in the empty key field after typing a token: focus stays on the key, its error is announced', async () => {
     platformApi(healthy);
     new Console(root());
     const f = signInForm();
@@ -227,7 +229,6 @@ describe('R14 — Enter in an empty sign-in field is said, with focus on that fi
     assert.equal(active(), f.key, 'focus is not on the invalid field');
     const line = errorLine(f.key);
     assert.equal(line.hidden, false);
-    assert.equal(line.getAttribute('role'), 'alert', 'the key field’s error is not announced');
     assert.equal(f.key.getAttribute('aria-invalid'), 'true');
     // The filled field is neither marked nor an (empty) alert.
     assert.equal(errorLine(f.token).hidden, true);
@@ -274,8 +275,12 @@ describe('R14 — Enter in an empty sign-in field is said, with focus on that fi
     f.token.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
     assert.equal(errorLine(f.token).hidden, true);
     assert.equal(errorLine(f.token).getAttribute('role'), null, 'an empty, hidden alert was left on the form');
-    // The other field is still wrong, and still said.
-    assert.equal(errorLine(f.key).getAttribute('role'), 'alert');
+    // Round 3: nor an alert still naming the token that has just been typed.
+    assert.deepEqual(shownAlerts(f.form), [], 'a stale alert was left on the form');
+    // The other field is still wrong, and still tied to its words.
+    assert.equal(f.key.getAttribute('aria-invalid'), 'true');
+    assert.equal(errorLine(f.key).hidden, false);
+    assert.match(f.key.getAttribute('aria-describedby') ?? '', new RegExp(errorLine(f.key).id));
   });
 });
 
@@ -514,7 +519,11 @@ describe('R16 — a failure is announced once, when it is first shown', () => {
     }) as { showSection(s: string): void };
   }
 
-  test('THE ONE THAT MATTERS — a save that fails behind the operator drawer is said once, when the drawer closes', async () => {
+  // Round 3: a failure of the drawer's OWN save is no longer drawn behind it.
+  // It is shown and said inside the open drawer (ux-fix3-platform, item 1);
+  // what this test protects — the failed save is said exactly once, and never
+  // again by closing the drawer or changing section — still holds.
+  test('THE ONE THAT MATTERS — a save that fails in the operator drawer is said once, and not again when the drawer closes', async () => {
     const v = operatorsView({ failSave: true });
     await settle();
     v.showSection('operators');
@@ -522,21 +531,18 @@ describe('R16 — a failure is announced once, when it is first shown', () => {
     buttonNamed('অপারেটরের নাম যোগ করুন').click();
     drawerButton('সংরক্ষণ').click();
     await settle();
-    // Drawn behind the drawer, where nobody hears it.
-    assert.ok(root().querySelector('.ui-state-error'), 'the failure is not on the page');
     assert.equal(root().getAttribute('aria-hidden'), 'true', 'the drawer did not hide the page');
-    assert.deepEqual(alertsIn(await ann.flush()), []);
+    assert.ok(doc().querySelector('.ui-dialog .ui-state-error'), 'the failure is not shown in the drawer');
+    const saidOpen = alertsIn(await ann.flush());
+    assert.equal(saidOpen.length, 1,
+      `a failed save was ${saidOpen.length ? `said ${saidOpen.length} times` : 'never said'} while the drawer is open`);
+    assert.match(saidOpen[0]!, /অপারেটর সংরক্ষণ করা যায়নি।/);
 
     escape();
     assert.equal(doc().querySelector('.ui-dialog'), null, 'Escape did not close the drawer');
-    const said = alertsIn(await ann.flush());
-    assert.equal(said.length, 1,
-      `a failure drawn behind the drawer was ${said.length ? `said ${said.length} times` : 'never said'} when it closed`);
-    assert.match(said[0]!, /অপারেটর সংরক্ষণ করা যায়নি।/);
+    assert.deepEqual(alertsIn(await ann.flush()), [], 'closing the drawer said it a second time');
 
-    // Heard now: the next section change does not say it again.
     v.showSection('plans');
-    assert.ok(root().querySelector('.ui-state-error'), 'the failure is no longer shown');
     assert.deepEqual(alertsIn(await ann.flush()), [], 'the section change said it a second time');
     ann.stop();
   });

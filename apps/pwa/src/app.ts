@@ -685,9 +685,20 @@ async function main() {
         glyph: 'edit',
         hidden: true,
         mount: (container) => {
-          new MarksView({ root: container, doc: document, auth, outbox: engine });
+          marksView = new MarksView({ root: container, doc: document, auth, outbox: engine });
         },
+        unmount: () => { destroyView(marksView); marksView = null; },
         queuesOffline: true,
+        // Marks typed but not saved exist only on this sheet. Choosing another
+        // paper already asks (R7); leaving the route by a sidebar link, a tab,
+        // the bell or Android back threw them away without a word. The same
+        // question attendance asks, answered by the view.
+        hasUnsavedChanges: () => Boolean(marksView?.hasUnsavedChanges()),
+        unsavedPrompt: {
+          title: 'নম্বর সংরক্ষণ করা হয়নি',
+          body: 'লেখা নম্বর এখনো সংরক্ষণ করা হয়নি। এখন চলে গেলে এই নম্বরগুলো হারিয়ে যাবে।',
+          confirmLabel: 'বাদ দিন',
+        },
       },
       {
         path: 'more',
@@ -1384,6 +1395,9 @@ async function main() {
   // listeners. Without it, navigating away and back stacks one pair of
   // online/offline handlers per visit.
   let attendanceScreen: AttendanceScreen | null = null;
+  // Held so the marks route can ask whether typed marks are still unsaved,
+  // and drop the sheet's outbox listener when it is left.
+  let marksView: MarksView | null = null;
   // Same reason, for the screens that listen for the connection coming back.
   let routineView: RoutineView | null = null;
   let feesView: FeesView | null = null;

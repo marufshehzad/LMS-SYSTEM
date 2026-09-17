@@ -54,7 +54,11 @@ export interface OutboxLike {
     opId?: string;
     payload: unknown;
   }): Promise<{ opId: string }>;
-  flush(): Promise<unknown>;
+  /**
+   * `ignoreBackoff`: a person asked to send now ("আবার পাঠান"), so ops still
+   * waiting out a failed attempt's backoff go too. Automatic sends omit it.
+   */
+  flush(options?: { ignoreBackoff?: boolean }): Promise<unknown>;
   state(): Promise<{
     pending: number; failed: number; conflicts: number; lastSyncAt?: number;
     /** Ops being sent right now (the sync engine reports them apart from pending). */

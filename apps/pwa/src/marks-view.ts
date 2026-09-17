@@ -122,7 +122,6 @@ export class MarksView {
   /** The server refused this read. Not an outage; no retry will help. */
   private denied = false;
   private loading = false;
-  private savedAt = 0;
   private completeEl: HTMLElement | null = null;
   private activeKeys: MarkKey[] = [];
 
@@ -133,9 +132,18 @@ export class MarksView {
   private examsFailed = false;
   /** The chosen sheet could not be fetched and there is no cached copy. */
   private sheetFailed = false;
-  /** Rows the last save put in the outbox, and whether it was offline. */
-  private savedRows = 0;
-  private savedOffline = false;
+  /**
+   * What the last save on each paper put in the outbox, by examSubjectId:
+   * how many rows, and whether it was made offline (they are still held on
+   * this device until the queue drains).
+   *
+   * Per paper, because the footer speaks for the sheet on screen. One set of
+   * fields for the whole view carried পদার্থবিজ্ঞান's "১ সারি এই যন্ত্রে জমা"
+   * (and, once the queue drained, its "সংরক্ষিত") onto গণিত, where nothing
+   * had been saved. Kept, not reset, when another paper opens: going back to
+   * পদার্থবিজ্ঞান while its row is still queued says so again.
+   */
+  private saved = new Map<string, { rows: number; offline: boolean }>();
   /** Both copies of "সব সংরক্ষণ" (header ≥1024px, footer below). */
   private saveButtons: HTMLButtonElement[] = [];
   /** The footer note: pending changes, rows held on this device, or saved. */
@@ -179,12 +187,16 @@ export class MarksView {
    * footer kept saying they were waiting. Once nothing is pending or in
    * flight it reads "সংরক্ষিত", as a save made online does. With another op
    * still waiting it stays as it is: it may be late to change, never early.
+   *
+   * An empty queue speaks for every paper saved here, not only the one on
+   * screen: rows saved offline on one paper can leave while the teacher is on
+   * another, and going back must not find them still "waiting".
    */
   private async queueChanged(ev: Event): Promise<void> {
     // The shell reuses its container for the next route and this route has
     // no unmount: a view whose header is gone has been replaced.
     if (!this.headerEl?.isConnected) { this.destroy(); return; }
-    if (!this.savedAt || !this.savedOffline) return;
+    if (![...this.saved.values()].some((s) => s.offline)) return;
     const save = this.saveCount;
     let waiting: number | null = null;
     if (typeof this.o.outbox.state === 'function') {
@@ -198,9 +210,21 @@ export class MarksView {
       if (typeof detail?.pending !== 'number') return;
       waiting = detail.pending + (detail.inflight ?? 0);
     }
-    if (waiting > 0 || save !== this.saveCount || !this.savedAt || !this.savedOffline) return;
-    this.savedOffline = false;
+    if (waiting > 0 || save !== this.saveCount) return;
+    for (const entry of this.saved.values()) entry.offline = false;
     this.paintSaveBar();
+  }
+
+  /** The last save's record for the paper on screen, if it has one. */
+  private savedHere(): { rows: number; offline: boolean } | undefined {
+    const id = this.selected?.subject.examSubjectId;
+    return id === undefined ? undefined : this.saved.get(id);
+  }
+
+  /** An edit on the paper on screen: its last save no longer describes it. */
+  private forgetSaveHere(): void {
+    const id = this.selected?.subject.examSubjectId;
+    if (id !== undefined) this.saved.delete(id);
   }
 
   private async init(): Promise<void> {
@@ -408,14 +432,12 @@ export class MarksView {
       if (this.dirty.get(studentId) === change) this.dirty.delete(studentId);
     }
     this.saveCount++;
-    // The footer speaks for the sheet on screen, which is this one unless
-    // another paper was chosen while the rows were being queued.
-    if (this.sheet === sheet) {
-      this.savedAt = Date.now();
-      // What the footer note reports: "৪ সারি এই যন্ত্রে জমা — ইন্টারনেট এলে যাবে".
-      this.savedRows = queued;
-      this.savedOffline = !navigator.onLine;
-    }
+    // What this paper's footer reports: "৪ সারি এই যন্ত্রে জমা — ইন্টারনেট
+    // এলে যাবে". Recorded against the paper the rows belong to, which is not
+    // the one on screen if another paper was chosen while they were queued:
+    // that paper's footer says nothing of them, and this one's does when the
+    // teacher comes back to it.
+    this.saved.set(sel.subject.examSubjectId, { rows: queued, offline: !navigator.onLine });
     this.cacheSet(MARKS_CACHE_PREFIX + sel.subject.examSubjectId, sheet);
     // Fire-and-forget: offline failure is the normal case, not an error.
     void Promise.resolve(this.o.outbox.flush()).catch(() => {});
@@ -484,7 +506,7 @@ export class MarksView {
 
   private markDirty(studentId: string, change: Partial<MarkRow>): void {
     this.dirty.set(studentId, { ...this.dirty.get(studentId), ...change });
-    this.savedAt = 0;
+    this.forgetSaveHere();
     this.paintSaveBar();
   }
 
@@ -496,7 +518,7 @@ export class MarksView {
     if (!cur) return;
     delete (cur as Record<string, unknown>)[key];
     if (Object.keys(cur).length === 0) this.dirty.delete(studentId);
-    this.savedAt = 0;
+    this.forgetSaveHere();
     this.paintSaveBar();
   }
 
@@ -574,11 +596,13 @@ export class MarksView {
     if (!note) return;
     let glyph = SAVE_GLYPH;
     let text: string;
+    // This paper's own save only; another paper's never shows here.
+    const saved = this.savedHere();
     if (this.dirty.size > 0) {
       text = `${formatCount(this.dirty.size, 'bn')}টি পরিবর্তন`;
-    } else if (this.savedAt && this.savedOffline) {
-      text = `${formatCount(this.savedRows, 'bn')} সারি এই যন্ত্রে জমা — ইন্টারনেট এলে যাবে`;
-    } else if (this.savedAt) {
+    } else if (saved?.offline) {
+      text = `${formatCount(saved.rows, 'bn')} সারি এই যন্ত্রে জমা — ইন্টারনেট এলে যাবে`;
+    } else if (saved) {
       glyph = 'check';
       text = 'সংরক্ষিত';
     } else {

@@ -406,7 +406,10 @@ describe('18 (review) — a part-paid bill past its date keeps its payment on th
     assert.equal(cell('total'), '৳ 1,250.00');
     assert.equal(cell('paid'), '৳ 1,000.00');
     assert.equal(cell('balance'), '৳ 250.00');
-    assert.equal(cell('status'), 'মেয়াদোত্তীর্ণ');
+    // Round 3 (ux-fix3-fees): the late part-paid bill's status keeps the word
+    // আংশিক পরিশোধিত beside its মেয়াদোত্তীর্ণ badge.
+    assert.equal(text(tr.querySelector('[data-col="status"] .ui-status')), 'মেয়াদোত্তীর্ণ');
+    assert.equal(cell('status'), 'মেয়াদোত্তীর্ণ, আংশিক পরিশোধিত');
   });
 
   test('a guardian of two: each child’s rows add up to that child’s due row, and all to the hero', async () => {

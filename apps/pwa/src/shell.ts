@@ -30,7 +30,8 @@
  *
  * What did NOT change: the hash router, `ShellRoute`, the five-tab cap, the
  * offline banner, the bell, the branding patch-in-place, or a single view.
- * Every route mounts into `.shell-view` exactly as before.
+ * Every route mounts inside `main.shell-view`: into a fresh `.shell-route`
+ * container of its own for each navigation (see renderRoute for why).
  */
 import { iconSvg } from './icon.ts';
 import { formatCount } from '../../../packages/ui-core/src/format.ts';
@@ -43,6 +44,11 @@ export interface ShellRoute {
   path: string;       // hash fragment without '#/', e.g. 'attendance'
   labelBn: string;
   glyph: string;       // icon name from ./icon.ts — never an emoji
+  /**
+   * Draw the page into `container`: an element of this navigation's own
+   * inside main#shell-view, never main itself. When the person leaves it is
+   * taken out of the document, so a render that arrives late goes nowhere.
+   */
   mount: (container: HTMLElement) => void | Promise<void>;
   /** Called when navigating away, so a view can release listeners/timers. */
   unmount?: () => void;
@@ -153,6 +159,11 @@ export class Shell {
   private readonly o: ShellOptions;
   private readonly nav: RoleNav | null;
   private viewEl!: HTMLElement;
+  /**
+   * The container the page on screen was mounted into: main's only child,
+   * replaced by a new one on every navigation. Null when no page is mounted.
+   */
+  private outletEl: HTMLElement | null = null;
   private shellEl!: HTMLElement;
   private bellEls: HTMLButtonElement[] = [];
   private bellBadgeEls: HTMLElement[] = [];
@@ -329,6 +340,8 @@ export class Shell {
     if (this.railQuery && this.onRailQuery) {
       this.railQuery.removeEventListener('change', this.onRailQuery);
     }
+    // A mount still loading when the shell goes must not move focus after it.
+    this.outletEl = null;
     this.currentRoute?.unmount?.();
   }
 
@@ -1077,6 +1090,16 @@ export class Shell {
     // Already asking: a second back press waits for the answer to the first.
     if (this.unsavedAsk) return true;
     if (!leaving.hasUnsavedChanges?.()) return false;
+    // One sheet at a time. Back pressed while the register's "জমা দেওয়ার
+    // আগে দেখুন" sheet was open stacked this question on top of it: two
+    // modal sheets, two scrims. Whatever is open on the page is dismissed
+    // first, the way its own × would (every way out of the review sheet is
+    // "ফিরে যান", never a submit), so focus goes back to its opener on the
+    // page — and বাতিল then returns focus there, on the register, which is
+    // still mounted with every mark. Only once the question WILL be asked:
+    // a clean page leaves through renderRoute, which closes them anyway.
+    this.closeProfile();
+    closeAllOverlays();
     const p = leaving.unsavedPrompt ?? {};
     this.unsavedAsk = confirmOverlay(this.o.doc, {
       title: p.title ?? 'জমা দেওয়া হয়নি',
@@ -1186,11 +1209,30 @@ export class Shell {
     this.currentHash = location.hash;
 
     this.viewEl.textContent = '';
+    this.outletEl = null;
     // Armed after the old page is gone and before the new one mounts, so an
     // identity from the previous page is never matched against this one.
+    // Armed on main, not on the route's container: main is the landmark and
+    // the element focus waits on, and the keeper follows the whole subtree.
     this.stopFocusKeeper = keepFocusWithin(this.viewEl);
     if (!this.currentRoute) return;
-    await this.currentRoute.mount(this.viewEl);
+    // Each page gets a container of its OWN, never main itself. A view clears
+    // and redraws its root whenever a read comes back, and nothing tells it
+    // that the person has left: when the root was main, a slow read resolving
+    // after a navigation drew the old page over the new one (an assignment
+    // detail opened on 2G, then হোম; 2.6s later #/home showed the
+    // assignment). Now that late render goes into this node, which the next
+    // navigation has already taken out of the document, so nobody sees it.
+    // The container is main's only child. app.css draws it `display:
+    // contents`, so the page's own elements still lay out as main's children.
+    const outlet = this.o.doc.createElement('div');
+    outlet.className = 'shell-route';
+    this.viewEl.append(outlet);
+    this.outletEl = outlet;
+    await this.currentRoute.mount(outlet);
+    // Replaced while it mounted (the person left before a slow mount
+    // finished): focus and scroll belong to the page that replaced it.
+    if (this.outletEl !== outlet) return;
 
     // Every navigation after the first moves focus into the new page and
     // resets the scroll. Without it a keyboard user's next Tab continues from

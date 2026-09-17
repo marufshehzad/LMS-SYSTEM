@@ -106,6 +106,19 @@ function refusalBn(field: string, message: string, code = ''): string {
 const standInId = (i: number): string => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
 
 /**
+ * Scroll `node` into view the shortest way: not at all when it is already
+ * fully on screen. The root's scroll-padding keeps it clear of the sticky
+ * topbar and the fixed tab bar. A no-op where there is no layout.
+ */
+function bringIntoView(node: HTMLElement): void {
+  try {
+    if (typeof node.scrollIntoView === 'function') {
+      node.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  } catch { /* no layout */ }
+}
+
+/**
  * Who may author a notice. Mirrors `AUTHOR_ROLES` in
  * `services/ops-svc/api/notices.ts`, which is the real gate — this copy only
  * decides whether the form is offered, never whether the send succeeds.
@@ -382,6 +395,24 @@ export class NoticeComposeView {
   }
 
   /**
+   * A send has just succeeded and the next notice is not begun: the panel is
+   * saying what happened, not what is about to.
+   *
+   * The "পাবে:" line describes the notice being written, and there is none
+   * yet. A send clears the ticked sections, so for a section audience the line
+   * turned into "কোনো শাখা বাছাই করা হয়নি — পাঠাতে অন্তত একটি শাখা বাছাই করুন"
+   * the moment the notice went: a do-this-first prompt drawn directly above
+   * "২৪ জনের কাছে পৌঁছেছে", read before the outcome it sat over. So the line
+   * waits while the outcome stands, and comes back with the first change to
+   * the next notice, which redraws the line in place (`syncLive`) or rebuilds
+   * the panel (`buildPanel`). It stays in the DOM, hidden, because
+   * Send is described by it and a disabled Send is still read in browse mode.
+   */
+  private sentStands(): boolean {
+    return this.noticeKind === 'ok' && !!this.notice;
+  }
+
+  /**
    * Draw the outcome of a send, and put focus where the person now is.
    *
    * The outcome is drawn beside Send, where the person who pressed it is
@@ -403,9 +434,20 @@ export class NoticeComposeView {
     const send = root.querySelector<HTMLButtonElement>('[data-send]');
     const result = root.querySelector<HTMLElement>('[data-send-result]');
     const target = !sent && send && !send.disabled ? send : result;
-    // Not preventScroll: the sentence is drawn above Send and can push it
-    // below the fold of a 375px screen.
-    target?.focus();
+    if (!target) return;
+    target.focus({ preventScroll: true });
+    // The sentence is drawn ABOVE Send, so drawing it pushes Send down — on a
+    // 375px phone, under the fixed tab bar. A plain focus() scrolled only the
+    // focused node into view: after a send that is the sentence, and the
+    // disabled পাঠান was left half under the bar (Send top 733 of 812). So the
+    // panel's tail is brought into view the shortest way, both nodes, the
+    // focused one last so it wins when the two cannot fit. `nearest` scrolls
+    // only what is not fully on screen, and the page's scroll-padding (the
+    // bar's height, app.css "[5] lead") keeps both clear of the tab bar.
+    for (const node of [result, send]) {
+      if (node && node !== target) bringIntoView(node);
+    }
+    bringIntoView(target);
   }
 
   private async send(): Promise<void> {
@@ -582,7 +624,11 @@ export class NoticeComposeView {
     if (warn) warn.hidden = !live.warn;
 
     const line = root.querySelector<HTMLElement>('[data-audience-line]');
-    if (line) this.fill(line, this.audienceSentence());
+    if (line) {
+      this.fill(line, this.audienceSentence());
+      const p = line.closest('p');
+      if (p) p.hidden = this.sentStands();
+    }
 
     // The acknowledgement shows what the estimate says NOW. A changed estimate
     // has already revoked the flag (applyEstimate); the box and the counts
@@ -1088,10 +1134,14 @@ export class NoticeComposeView {
       }))));
 
     const lineId = uid('compose-line');
-    panel.append(el(d, 'p', { className: 'compose-line', attrs: { id: lineId } },
-      el(d, 'span', { className: 'compose-line-label', text: 'পাবে:' }), ' ',
-      el(d, 'span', { attrs: { 'data-audience-line': '' } },
-        ...numText(d, this.audienceSentence()))));
+    panel.append(el(d, 'p', {
+      className: 'compose-line',
+      // Not while a send's outcome stands: see `sentStands`.
+      attrs: { id: lineId, hidden: this.sentStands() },
+    },
+    el(d, 'span', { className: 'compose-line-label', text: 'পাবে:' }), ' ',
+    el(d, 'span', { attrs: { 'data-audience-line': '' } },
+      ...numText(d, this.audienceSentence()))));
 
     const result = this.resultNode(d);
     if (result) panel.append(result);

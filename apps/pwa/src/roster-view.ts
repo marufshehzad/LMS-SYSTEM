@@ -109,6 +109,15 @@ type Body = 'loading' | 'denied' | 'error' | 'pick' | 'none' | 'list';
  */
 type Shape = 'list' | 'table';
 
+/** A কোড press that came back without a code: whose, and the sentence why. */
+interface IssueFailure {
+  studentId: string;
+  nameBn: string;
+  message: string;
+  /** Not yet drawn: the first drawing is announced (role="alert"). */
+  fresh: boolean;
+}
+
 function shapeOf(node: Element | null): Shape {
   return node?.closest('.ui-list') ? 'list' : 'table';
 }
@@ -128,6 +137,16 @@ export class RosterView {
    */
   private issued: { studentId: string; nameBn: string; code: string; shape: Shape } | null = null;
   private issuing: string | null = null;
+  /**
+   * F-202: the last কোড press that came back without a code, and why. Drawn
+   * AT that student's row (UX sweep round 3), under the button that was
+   * pressed — not above the panel, where at 375 it rendered 150px above the
+   * viewport while focus went back to row ৬ and a sighted teacher saw nothing
+   * change. `fresh` until it has been drawn once: that drawing carries
+   * role="alert" and is announced; later redraws (every keystroke in the
+   * search rebuilds the rows) keep it on screen without saying it again.
+   */
+  private issueFailure: IssueFailure | null = null;
   private selectedId: string | null = null;
   private roster: RosterStudent[] = [];
   private offline = false;
@@ -138,9 +157,9 @@ export class RosterView {
    * changes what is fetched, when, or what is sent.
    *
    * `failed`: the load that produced `errorMsg`, so its error card can offer
-   * "আবার চেষ্টা করুন" (an issue-code failure never does). `sectionsDenied` /
-   * `rosterDenied`: the last load was refused (403), drawn as the denied state
-   * rather than as a red error. `sectionsLoading`: the first sections fetch is
+   * "আবার চেষ্টা করুন" (a কোড failure is not kept here: see issueFailure).
+   * `sectionsDenied` / `rosterDenied`: the last load was refused (403), drawn
+   * as the denied state rather than as a red error. `sectionsLoading`: the first sections fetch is
    * still out, so an empty screen is a skeleton, not "pick a section".
    */
   private failed: 'sections' | 'roster' | null = null;
@@ -297,11 +316,11 @@ export class RosterView {
 
     const body = this.bodyKind();
 
-    // Rendered wherever it is set, not only on an empty screen: an
-    // issue-code failure happens WITH a roster on screen, and an error only
-    // visible on an empty page is an error nobody sees. A load failure with
-    // nothing to show is drawn inside the panel instead, where the list would
-    // be; a refusal is drawn there as the denied state.
+    // A load failure with a cached roster still on screen: said above the
+    // panel, with its retry. A load failure with nothing to show is drawn
+    // inside the panel instead, where the list would be; a refusal is drawn
+    // there as the denied state. (A কোড failure is not a load failure: it is
+    // drawn at its row — see issueFailure.)
     if (this.errorMsg && body !== 'error' && body !== 'denied') {
       const err = errorState(d, this.errorMsg,
         this.failed ? () => { void this.retry(); } : undefined);
@@ -339,6 +358,14 @@ export class RosterView {
 
     const host = el(d, 'div', { className: 'roster-body' });
     append(panel, host);
+
+    // A কোড failure with no rows to hang it on (the section was changed while
+    // the request was out): at the top of the panel's body, naming the child.
+    // The list draws its own (fillList); a skeleton waits for the rows.
+    if (body !== 'list' && body !== 'loading' && this.issueFailure) {
+      append(host, this.issueNote(this.issueFailure, 'body'));
+      this.issueFailure.fresh = false;
+    }
 
     switch (body) {
       case 'loading':
@@ -386,6 +413,13 @@ export class RosterView {
       ? this.roster.filter((s) => matches(s, this.query))
       : this.roster;
 
+    // A কোড failure whose row the search now hides (or that belongs to a
+    // section no longer shown) is said over the rows, naming the child, so it
+    // is never an error nobody sees. Its row coming back takes it back.
+    const failure = this.issueFailure;
+    const failedRowShown = failure !== null && rows.some((r) => r.studentId === failure.studentId);
+    if (failure && !failedRowShown) append(host, this.issueNote(failure, 'body'));
+
     if (rows.length === 0) {
       append(host, emptyState(d, {
         glyph: 'search',
@@ -393,22 +427,74 @@ export class RosterView {
         detail: 'বানান বা রোল দেখে আবার খুঁজুন।',
         action: { label: 'খোঁজা মুছুন', onClick: () => { this.clearSearch(); } },
       }));
-      return;
+    } else {
+      const picked = this.sections.find((x) => x.id === this.selectedId);
+      // One declaration, two renderings: a table on a laptop, a list of cards
+      // on a phone. §7 — a six-column table squeezed into 360px is where a
+      // teacher reads a student's name two characters at a time.
+      const table = dataTable(d, {
+        columns: this.columns(),
+        rows,
+        rowKey: (r) => r.studentId,
+        caption: picked
+          ? `${picked.className.bn} — ${picked.name} শাখার শিক্ষার্থী তালিকা`
+          : 'শিক্ষার্থী তালিকা',
+        className: 'roster-data',
+      });
+      append(host, table);
+      if (failure && failedRowShown) this.placeIssueNote(table, failure);
     }
+    if (failure) failure.fresh = false;
+  }
 
-    const picked = this.sections.find((x) => x.id === this.selectedId);
-    // One declaration, two renderings: a table on a laptop, a list of cards on
-    // a phone. §7 — a six-column table squeezed into 360px is where a teacher
-    // reads a student's name two characters at a time.
-    append(host, dataTable(d, {
-      columns: this.columns(),
-      rows,
-      rowKey: (r) => r.studentId,
-      caption: picked
-        ? `${picked.className.bn} — ${picked.name} শাখার শিক্ষার্থী তালিকা`
-        : 'শিক্ষার্থী তালিকা',
-      className: 'roster-data',
-    }));
+  /**
+   * Hang a কোড failure on its row, in both of dataTable's renderings (CSS
+   * shows one): on a phone as a line under the row — name, roll and the
+   * button — and on a laptop under the button in its own cell. The row's
+   * button is described by it, so focus returning there says why no code came.
+   */
+  private placeIssueNote(table: HTMLElement, failure: IssueFailure): void {
+    for (const row of table.querySelectorAll<HTMLElement>('[data-key]')) {
+      if (row.dataset.key !== failure.studentId) continue;
+      const shape = shapeOf(row);
+      const note = this.issueNote(failure, shape);
+      if (shape === 'list') row.append(note);
+      else (row.querySelector('td[data-col="code"]') ?? row).append(note);
+      row.querySelector('.roster-issue')?.setAttribute('aria-describedby', note.id);
+    }
+  }
+
+  /**
+   * The words of a কোড failure. At the row the row names the child; over the
+   * rows (`body`) the note has to. role="alert" only on its first drawing.
+   */
+  private issueNote(
+    failure: IssueFailure, where: Shape | 'body',
+  ): HTMLElement {
+    const d = this.o.doc;
+    const text = where === 'body'
+      ? `${failure.nameBn} এর সক্রিয়ন কোড: ${failure.message}`
+      : failure.message;
+    return el(d, 'p', {
+      className: `roster-issue-note is-${where}`,
+      attrs: { id: `roster-issue-note-${where}`, role: failure.fresh ? 'alert' : null },
+    },
+    icon(d, 'alert-circle', 'ui-icon roster-issue-note-glyph'),
+    el(d, 'span', { className: 'roster-issue-note-text' }, ...numText(d, text)));
+  }
+
+  /**
+   * Bring the drawn কোড failure on screen the shortest way, without touching
+   * focus: the copy CSS renders, `nearest`, so a note under the last row
+   * visible above the tab bar is scrolled up just enough and the button above
+   * it stays in view. jsdom and a detached layout have no boxes: nothing moves.
+   */
+  private revealIssueNote(): void {
+    const note = [...this.o.root.querySelectorAll<HTMLElement>('.roster-issue-note')]
+      .find((n) => n.getClientRects().length > 0);
+    try {
+      note?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+    } catch { /* no layout */ }
   }
 
   private columns(): Array<Column<RosterStudent>> {
@@ -482,8 +568,10 @@ export class RosterView {
       onChange: (v) => {
         this.selectedId = v || null;
         this.roster = [];
-        // A new list is a new search.
+        // A new list is a new search, and a কোড failure in the old one is
+        // about a row that is gone.
         this.query = '';
+        this.issueFailure = null;
         this.lastAnnounced = -1;
         if (this.selectedId) void this.loadRoster(this.selectedId);
         else this.render();
@@ -549,14 +637,20 @@ export class RosterView {
    * back onto the row's VISIBLE কোড button when no code came. Only when focus
    * was still lost when the answer came: somebody who moved on meanwhile
    * keeps their place.
+   *
+   * No code (UX sweep round 3): the reason is drawn under that same button
+   * (issueFailure), where the teacher is looking, and scrolled on screen the
+   * shortest way when focus is put back there.
    */
   private async issueCode(s: RosterStudent, shape: Shape): Promise<void> {
     if (this.issuing) return;
     this.issuing = s.studentId;
-    this.errorMsg = '';
-    this.failed = null;
+    // A new attempt starts clean. A load failure above the panel is a
+    // different story and stays until its own retry.
+    this.issueFailure = null;
     this.render();
     let made = false;
+    let failure: string | null = null;
     try {
       const res = await this.o.auth.authedFetch('/api/v1/auth/activate', {
         method: 'POST',
@@ -565,7 +659,7 @@ export class RosterView {
       });
       const body = (await res.json()) as { code?: string; error?: string; message?: string };
       if (!res.ok || !body.code) {
-        this.errorMsg = body.error === 'not_your_student'
+        failure = body.error === 'not_your_student'
           ? 'শুধু নিজের শাখার শিক্ষার্থীর জন্য কোড তৈরি করা যায়।'
           : body.error === 'activation_unconfigured'
             ? 'এই সুবিধাটি এখনো চালু হয়নি।'
@@ -580,16 +674,27 @@ export class RosterView {
         made = true;
       }
     } catch {
-      this.errorMsg = 'সংযোগ পাওয়া যায়নি।';
+      failure = 'সংযোগ পাওয়া যায়নি।';
     } finally {
       this.issuing = null;
+      if (failure !== null) {
+        this.issueFailure = {
+          studentId: s.studentId, nameBn: nameOf(s), message: failure, fresh: true,
+        };
+      }
       // Asked BEFORE the redraw, which takes focus from whatever in the view
       // had it: lost now means lost since the busy render took the button.
       const lost = focusIsLost(this.o.doc);
       this.render();
       if (lost) {
         if (made) this.o.root.querySelector<HTMLElement>('.issued-code-card')?.focus();
-        else this.focusRowCode(s.studentId, shape);
+        else {
+          this.focusRowCode(s.studentId, shape);
+          // The failure is drawn under that button; make sure it is on
+          // screen too. Only here, where focus is being put back: somebody
+          // who moved on meanwhile keeps their place, and hears the alert.
+          if (failure !== null) this.revealIssueNote();
+        }
       }
       // Once, when the code is made — not on every later redraw that still
       // shows the card (a section change redraws twice).

@@ -102,7 +102,11 @@ async function mountInbox(payload: { unread: number; notices: InboxNotice[] }) {
     displayName: 'অভিভাবক', onLogout: () => {},
   });
   await tick(5);
-  const view = doc().getElementById('shell-view') as HTMLElement;
+  // The route mounts into its own `.shell-route` outlet inside main#shell-view
+  // (ux-fix3: a stale view can then only write into a detached node), so the
+  // container the view clears and rebuilds is that outlet, not main itself.
+  const main = doc().getElementById('shell-view') as HTMLElement;
+  const view = (main.querySelector('.shell-route') as HTMLElement | null) ?? main;
   assert.ok(view.querySelector('.notice-head'), 'the inbox rendered inside the shell');
   return { auth, view, unread: () => unread };
 }

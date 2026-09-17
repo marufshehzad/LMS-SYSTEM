@@ -161,6 +161,16 @@ function isOverdue(inv: Invoice, today: string): boolean {
   return due !== '' && due < today;
 }
 
+/**
+ * Part of the bill paid, part still owed: what the office's আংশিক filter
+ * lists (a stored `partly_paid`), or a payment recorded against a bill whose
+ * stored status was never moved on. Read beside isOverdue: a late bill's badge
+ * says মেয়াদোত্তীর্ণ, and this is the fact that badge would otherwise hide.
+ */
+function partPaid(inv: Invoice): boolean {
+  return owes(inv) && (inv.status === 'partly_paid' || paisa(inv.paidAmount) > 0);
+}
+
 /** "১টি বিল সময় পেরিয়েছে" — the guardian panel's own sentence. */
 function overdueSentence(count: number): string {
   return `${formatCount(count, 'bn')}টি বিল সময় পেরিয়েছে`;
@@ -730,16 +740,31 @@ export class FeesView {
           // Past its due date and still owing: মেয়াদোত্তীর্ণ, in the shared
           // overdue badge (danger, with its glyph), whatever the stored status
           // says — see isOverdue. A part-paid bill too: the panel counts it.
-          // Its payment is not lost with the word আংশিক: the family row's
-          // figure beside this badge is "বাকি ৳ …" (familyAmount), the office
-          // row's is its বকেয়া, and the desk has the জমা column.
           const late = isOverdue(inv, today);
-          return el(d, 'span', { className: 'fees-status' },
+          // That badge took the place of আংশিক পরিশোধিত, and nothing else on
+          // the office row said it: under the আংশিক filter a late part-paid
+          // bill read "বকেয়া ৳ 250.00 · মেয়াদোত্তীর্ণ", on the phone and at
+          // the desk (whose জমা column shows a figure, not the word). The
+          // word now stays under the badge, as a word — the badge's red is
+          // not what says it. The family phone row already says it with
+          // "বাকি ৳ …" (familyAmount) in a row with no room to spare, so
+          // there the word is the table's only; the family desk table has it.
+          const also = late && partPaid(inv);
+          return el(d, 'span', { className: also ? 'fees-status has-also' : 'fees-status' },
             statusBadge(d, {
               state: late ? 'overdue' : BADGE_STATE[inv.status] ?? 'pending',
               label: late ? STATUS_BN.overdue : STATUS_BN[inv.status] ?? inv.status,
               className: paid ? 'fees-paid-word' : undefined,
             }),
+            also
+              ? el(d, 'span', {
+                className: office ? 'fees-status-also' : 'fees-status-also fees-table-only',
+              },
+                // A pause between the two words for a screen reader, which
+                // reads the cell (and the phone row's button) as one name.
+                el(d, 'span', { className: 'ui-sr-only', text: ', ' }),
+                STATUS_BN.partly_paid)
+              : null,
             // 03 Student §05 marks a paid month with a green check. The
             // word stays for a screen reader; CSS shows the mark only in the
             // family's phone list, and the badge everywhere else.

@@ -5492,7 +5492,7 @@ input[type="radio"]:focus-visible { outline: 2px solid var(--accent); outline-of
 .gp-candidates>.system-row:hover { background: var(--neutral-100); }
 
 /* ── shikho ── */
-.shell-view:has(>.chat-form) { display: flex; flex-direction: column; }
+
 .page-header-actions>.chat-class-field { display: flex; align-items: center; gap: var(--space-2); margin-bottom: 0; }
 .chat-class-field .ui-field-label { margin-bottom: 0; }
 .chat-log { flex: 1 0 auto; display: flex; flex-direction: column; gap: var(--space-3); }
@@ -5968,3 +5968,40 @@ input[type="radio"]:focus-visible { outline: 2px solid var(--accent); outline-of
 
 /* ── ux-fix2:platform ── */
 .plat-title { width: fit-content; max-width: 100%; }
+
+/* ═══ [4] Ata Ekta — ux fixes round 3 (shell route container, roster code note) ═══════════════════════════════════════════
+   Rules the redesign's units needed that the one stylesheet is silent on.
+   Merged by script: a declaration the ata-ekta section already sets for the
+   same selector was refused (the sheet wins), as was any raw hex.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── ux-fix3:shell ── */
+.shell-route { display: contents; }
+.shell-route>* { animation: rise var(--dur-3) var(--ease) backwards; }
+.shell-route>* { max-width: var(--content-max); }
+.shell-view:has(>.shell-route>.chat-form) { display: flex; flex-direction: column; }
+
+/* ── ux-fix3:roster ── */
+.roster-issue-note { display: flex; align-items: flex-start; gap: var(--space-2); margin: 0; font-size: var(--text-small); line-height: var(--lh-small); font-weight: 600; color: var(--danger); }
+.roster-issue-note-glyph { flex: none; margin-top: calc((var(--lh-small) - 1) * 0.5em); }
+.roster-issue-note.is-list { padding: 0 14px var(--space-2) calc(14px + 34px + var(--space-3)); }
+.roster-issue-note.is-table { width: 0; min-width: 100%; margin-top: var(--space-1); }
+.roster-issue-note.is-body { padding: 10px 14px; border-bottom: 1px solid var(--line); }
+
+/* ── lead: fees, the two facts a late part-paid bill carries (ux round 3) ──
+   A bill that is both late and part paid used to show only মেয়াদোত্তীর্ণ, so
+   the money already paid was invisible in the very filter that lists it
+   (আংশিক). The second word sits under the badge — a word, not a colour — and
+   never widens the row: it wraps as its own line. */
+.fees-status.has-also { display: inline-flex; flex-direction: column; }
+.fees-sheet .ui-list .fees-status.has-also { align-items: flex-end; }
+.fees-sheet .ui-table .fees-status.has-also { align-items: flex-start; }
+.fees-status-also { font-weight: 400; white-space: nowrap; }
+/* A family's phone row: at 320 the wider badge pushed the month onto two
+   lines ("আগস্ট" / "২০২৬"). The month keeps its own width and the status moves
+   under the amount instead. The office rows and the per-child summary rows are
+   left as they were. */
+.fees-sheet.is-family .ui-list:not(.fees-kids) > .ui-list-item > .ui-list-hit {
+  flex-wrap: wrap; justify-content: flex-end; }
+.fees-sheet.is-family .ui-list:not(.fees-kids) > .ui-list-item > .ui-list-hit > .ui-list-main {
+  flex: 0 0 auto; max-width: 100%; }

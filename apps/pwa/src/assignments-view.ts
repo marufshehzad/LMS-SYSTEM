@@ -36,6 +36,7 @@ import {
   focusIsLost, serverMessage,
   type Column,
 } from './ui/index.ts';
+import { LANDING_CLASS } from './ui/dom.ts';
 
 /**
  * F-902 kill switch. Mirrors SUBMISSION_MEDIA_ENABLED in the sync applier
@@ -195,6 +196,46 @@ function rowTitle(a: Assignment): string {
 
 const ERROR_TAIL = 'ইন্টারনেট নেই বা সার্ভার সাড়া দিচ্ছে না।';
 
+/** Focus a control; false when it refuses (hidden by CSS, or detached). */
+function tryFocus(doc: Document, node: HTMLElement): boolean {
+  try { node.focus(); } catch { /* detached */ }
+  return doc.activeElement === node;
+}
+
+/**
+ * Focus the page title as a landing, the way the shell's focus keeper and
+ * learn land on a heading (ui/dom.ts): `tabindex="-1"` so a heading can take
+ * focus while staying out of the Tab order, and LANDING_CLASS for its light
+ * focus style. Without the class the global `[tabindex]:focus-visible` ring
+ * drew a 2px accent box round the whole title row, ~990px wide on a desktop.
+ *
+ * Both are the landing's only while the title holds focus: once focus leaves,
+ * a mouse press on the title does not make it a focus stop. A title that was
+ * already focusable or already a landing (the keeper put it there) keeps
+ * what it had. A blur while the title is still the active element is the
+ * window losing focus to another app, not the title: it keeps both.
+ */
+function landOnTitle(doc: Document, h: HTMLElement): boolean {
+  const hadTab = h.hasAttribute('tabindex');
+  const hadClass = h.classList.contains(LANDING_CLASS);
+  const undo = (): void => {
+    if (!hadTab) h.removeAttribute('tabindex');
+    if (!hadClass) h.classList.remove(LANDING_CLASS);
+  };
+  if (!hadTab) h.setAttribute('tabindex', '-1');
+  h.classList.add(LANDING_CLASS);
+  if (!tryFocus(doc, h)) { undo(); return false; }
+  if (!hadTab || !hadClass) {
+    const tidy = (): void => {
+      if (doc.activeElement === h) return;
+      h.removeEventListener('blur', tidy);
+      undo();
+    };
+    h.addEventListener('blur', tidy);
+  }
+  return true;
+}
+
 export class AssignmentsView {
   private readonly o: AssignmentsViewOptions;
   private list: Assignment[] = [];
@@ -348,16 +389,13 @@ export class AssignmentsView {
       if (again) targets.push(again);
     }
     // The page title: what a route change announces, and the top of the new
-    // page for the next Tab. tabindex -1 takes it out of the Tab order.
+    // page for the next Tab.
     const title = root.querySelector<HTMLElement>('h1');
-    if (title) {
-      if (!title.hasAttribute('tabindex')) title.setAttribute('tabindex', '-1');
-      targets.push(title);
-    }
+    if (title) targets.push(title);
     for (const t of targets) {
       // A hidden shape (the table below 1024px) refuses focus; try the next.
-      try { t.focus(); } catch { /* detached */ }
-      if (d.activeElement === t) { goal.hold = t; return; }
+      const took = t === title ? landOnTitle(d, t) : tryFocus(d, t);
+      if (took) { goal.hold = t; return; }
     }
   }
 

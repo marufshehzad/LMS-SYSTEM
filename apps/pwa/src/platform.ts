@@ -806,21 +806,31 @@ export class Console_ {
     // aria-describedby — but only when focus MOVES. Enter pressed inside the
     // empty field that already had focus (or inside the token field when only
     // the key was missing) moved nothing and said nothing: aria-invalid
-    // changed, and a reader does not speak that. So the error line is an
-    // alert while it shows. The check clears the line and writes it afresh,
-    // so a second press is said again. (Where focus does move, the words may
-    // be heard twice; never not at all.)
-    const missing = (f: { wrap: HTMLElement }, message: string): void => {
-      f.wrap.querySelector('.ui-field-error')?.setAttribute('role', 'alert');
-      setFieldError(f.wrap, message);
+    // changed, and a reader does not speak that. So the check says what is
+    // missing, as an alert. (Where focus does move, the words may be heard
+    // twice; never not at all.)
+    //
+    // ONE alert per check, naming every field that is missing. Each field's
+    // error line used to be an alert of its own, so Enter on an empty form
+    // fired two assertive alerts back to back, and a reader that cuts the
+    // first off for the second said only "PLATFORM_API_KEY দিন।". The lines
+    // stay each field's own words, read with the field; the sentence said is
+    // this one, off screen (the lines already show it), put on the page
+    // afresh by every check so a second press is said again.
+    let said: HTMLElement | null = null;
+    const unsay = (): void => { said?.remove(); said = null; };
+    const say = (tokenMissing: boolean, keyMissing: boolean): void => {
+      unsay();
+      // The key's name in an English voice, as its label is (04-UIUX §5).
+      const keyName = (): HTMLElement => lang(d, 'en', 'PLATFORM_API_KEY');
+      said = el(d, 'p', { className: 'ui-sr-only plat-signin-said', attrs: { role: 'alert' } },
+        ...(tokenMissing && keyMissing ? ['অপারেটর টোকেন ও ', keyName(), ' দিন।']
+          : tokenMissing ? ['অপারেটর টোকেন দিন।'] : [keyName(), ' দিন।']));
+      submit.after(said);
     };
-    // Typing clears the line (ui/field.ts); an empty, hidden line is no alert.
-    for (const f of fields) {
-      f.input.addEventListener('input', () => {
-        const line = f.wrap.querySelector<HTMLElement>('.ui-field-error');
-        if (line?.hidden) line.removeAttribute('role');
-      });
-    }
+    // Typing clears the field's line (ui/field.ts); the sentence that named it
+    // goes too, so no stale alert is left on the form.
+    for (const f of fields) f.input.addEventListener('input', unsay);
 
     form.addEventListener('submit', (e) => {
       e.preventDefault();
@@ -832,10 +842,18 @@ export class Console_ {
       // page, which destroyed the field or button the operator was on (focus
       // fell to <body>) and said "দুটোই দিতে হবে।" even when one was given.
       clearRefusal();
+      unsay();
       for (const f of fields) clearFieldError(f.wrap);
-      if (!token) missing(tokenField, 'অপারেটর টোকেন দিন।');
-      if (!key) missing(keyField, 'PLATFORM_API_KEY দিন।');
-      if (!token || !key) { (token ? keyField : tokenField).input.focus(); return; }
+      if (!token) setFieldError(tokenField.wrap, 'অপারেটর টোকেন দিন।');
+      if (!key) setFieldError(keyField.wrap, 'PLATFORM_API_KEY দিন।');
+      if (!token || !key) {
+        // The first invalid field takes focus, THEN the sentence is said: a
+        // focus move announces the field, and made after the alert it would
+        // talk over it.
+        (token ? keyField : tokenField).input.focus();
+        say(!token, !key);
+        return;
+      }
 
       setBusy(submit, true);
       void this.signIn(token, key).then((entered) => {

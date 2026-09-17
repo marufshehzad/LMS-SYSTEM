@@ -32,7 +32,7 @@
  *   7 queued         · the sync line, with the count
  *   8 syncing        · the sync line, while a flush is in flight
  *   9 sync failed    · the sync line + a RETRY button that did not exist
- *  10 retry          · this module — `outbox.flush()` on demand
+ *  10 retry          · this module — `outbox.flush({ ignoreBackoff })` on demand
  *  11 permission     · this module — 403 from sections/roster
  *  12 error          · this module — anything else, through `humanError`
  *  13 success        · the toast, and the sync line clearing
@@ -126,9 +126,16 @@ export class AttendanceScreen {
    * over an empty queue for as long as the screen stayed open.
    */
   private onOutbox?: () => void;
-  /** The sync line on screen, and the state it was drawn from. */
+  /**
+   * The sync line on screen, and the badge it shows (`state|label`). The line
+   * lives in the status strip's aria-live region, so it is built once and then
+   * changed in place — only the part whose words changed — and never removed
+   * and drawn again while there is still something to say.
+   */
   private syncLine: HTMLElement | null = null;
   private syncKey = '';
+  /** "এখন অফলাইন …", while the device is offline. Same rule as the sync line. */
+  private offlineNote: HTMLElement | null = null;
   /** Sync-line paints run one after another; see paintSync. */
   private syncRunning: Promise<void> = Promise.resolve();
   private syncQueued: Promise<void> | null = null;
@@ -495,16 +502,27 @@ export class AttendanceScreen {
    * own progress strip — which counts only students the teacher marked.
    */
   private paintStatus(): Promise<void> {
-    if (!this.statusHost) return Promise.resolve();
+    const host = this.statusHost;
+    if (!host) return Promise.resolve();
     const d = this.o.doc;
-    this.statusHost.textContent = '';
 
+    // The strip is an aria-live region, and it used to be emptied and filled
+    // again on every paint — a reconnect, a submit, a retry — so the offline
+    // note and the sync line were read out again with nothing new to say.
+    // Each part is now added when it becomes true and removed when it stops.
+    const note = this.offlineNote?.parentNode === host ? this.offlineNote : null;
     if (!navigator.onLine) {
-      append(this.statusHost, el(d, 'p', { className: 'att-offline-note' },
-        icon(d, 'wifi-off', 'att-offline-glyph'),
-        el(d, 'span', {
-          text: 'এখন অফলাইন — জমা দিলে এই যন্ত্রে থাকবে, সংযোগ পেলে নিজেই পাঠানো হবে।',
-        })));
+      if (!note) {
+        this.offlineNote = el(d, 'p', { className: 'att-offline-note' },
+          icon(d, 'wifi-off', 'att-offline-glyph'),
+          el(d, 'span', {
+            text: 'এখন অফলাইন — জমা দিলে এই যন্ত্রে থাকবে, সংযোগ পেলে নিজেই পাঠানো হবে।',
+          }));
+        host.insertBefore(this.offlineNote, host.firstChild);
+      }
+    } else if (note) {
+      note.remove();
+      this.offlineNote = null;
     }
     // The register's own "saved" footer says whether it has left the device;
     // it re-reads the queue whenever the sync line does.
@@ -540,17 +558,23 @@ export class AttendanceScreen {
     const d = this.o.doc;
     const host = this.statusHost;
     if (!host) return;
-    let s: { pending: number; failed: number };
+    let s: Awaited<ReturnType<OutboxLike['state']>>;
     try { s = await this.o.outbox.state(); } catch { return; }
     // The screen drew a new status strip while the queue was being read.
     if (host !== this.statusHost) return;
 
     const old = this.syncLine?.parentNode === host ? this.syncLine : null;
-    const hadFocus = !!old && old.contains(d.activeElement);
-    if (s.pending === 0 && s.failed === 0) {
+    // An op being sent right now has not arrived: it is still waiting. The
+    // engine reports it as `inflight`, not `pending`, and reading only
+    // `pending` took the line away for the length of every push — and a push
+    // that failed drew it back, so the live region read it out again.
+    const waiting = (s.pending ?? 0) + (s.inflight ?? 0);
+    const failed = s.failed ?? 0;
+    if (waiting === 0 && failed === 0) {
       this.syncLine = null;
       this.syncKey = '';
       if (!old) return;
+      const hadFocus = old.contains(d.activeElement);
       old.remove();
       // The line (and a focused "আবার পাঠান") went because the queue emptied.
       // The register's saved line, if there is one, says where it went.
@@ -558,35 +582,64 @@ export class AttendanceScreen {
       return;
     }
 
-    const online = navigator.onLine;
-    const key = `${s.failed}|${s.pending}|${online}`;
-    // Nothing changed since the line was drawn: keep the node, so a focused
-    // "আবার পাঠান" keeps focus and the live region does not repeat itself on
-    // every flush report.
-    if (old && key === this.syncKey) return;
+    const state = failed ? 'failed' : 'queued';
+    const label = failed
+      ? `${formatCount(failed, 'bn')}টি পাঠানো যায়নি`
+      : `${formatCount(waiting, 'bn')}টি অপেক্ষমাণ`;
+    const text = failed
+      ? 'কিছু হাজিরা সার্ভারে পৌঁছায়নি। তথ্য এই যন্ত্রে নিরাপদ আছে।'
+      // Offline nothing is being sent, and the line said it was.
+      : navigator.onLine
+        ? 'হাজিরা এই যন্ত্রে জমা আছে, পাঠানো হচ্ছে।'
+        : 'হাজিরা এই যন্ত্রে জমা আছে, সংযোগ পেলে পাঠানো হবে।';
+    const key = `${state}|${label}`;
+    const newBadge = () => badge(d, {
+      label, tone: failed ? 'danger' : 'warn', glyph: failed ? 'alert-triangle' : 'clock',
+    });
 
-    const line = el(d, 'p', { className: 'att-sync-line', data: { state: s.failed ? 'failed' : 'queued' } });
-    append(line, badge(d, {
-      label: s.failed
-        ? `${formatCount(s.failed, 'bn')}টি পাঠানো যায়নি`
-        : `${formatCount(s.pending, 'bn')}টি অপেক্ষমাণ`,
-      tone: s.failed ? 'danger' : 'warn',
-      glyph: s.failed ? 'alert-triangle' : 'clock',
-    }));
-    append(line, el(d, 'span', {
-      className: 'att-sync-text',
-      text: s.failed
-        ? 'কিছু হাজিরা সার্ভারে পৌঁছায়নি। তথ্য এই যন্ত্রে নিরাপদ আছে।'
-        // Offline nothing is being sent, and the line said it was.
-        : online
-          ? 'হাজিরা এই যন্ত্রে জমা আছে, পাঠানো হচ্ছে।'
-          : 'হাজিরা এই যন্ত্রে জমা আছে, সংযোগ পেলে পাঠানো হবে।',
-    }));
-    append(line, button(d, {
+    if (!old) {
+      const line = el(d, 'p', { className: 'att-sync-line', data: { state } },
+        newBadge(),
+        el(d, 'span', { className: 'att-sync-text', text }),
+        this.retryButton());
+      append(host, line);
+      this.syncLine = line;
+      this.syncKey = key;
+      return;
+    }
+
+    // The line is already on screen: change only what now reads differently.
+    // A report that changes nothing touches nothing, so the live region stays
+    // quiet, and "আবার পাঠান" is the same button — a focused one keeps focus.
+    if (old.dataset.state !== state) old.dataset.state = state;
+    if (key !== this.syncKey) {
+      const shown = [...old.children].find((c) => c.classList.contains('ui-badge'));
+      if (shown) shown.replaceWith(newBadge());
+      else old.insertBefore(newBadge(), old.firstChild);
+      this.syncKey = key;
+    }
+    const words = [...old.children].find((c) => c.classList.contains('att-sync-text'));
+    if (words && words.textContent !== text) words.textContent = text;
+  }
+
+  /** The sync line's "আবার পাঠান". Built once per line; the line keeps it. */
+  private retryButton(): HTMLButtonElement {
+    const d = this.o.doc;
+    return button(d, {
       label: 'আবার পাঠান', variant: 'secondary', size: 'sm', glyph: 'refresh',
       onClick: async () => {
         announce(d, 'আবার পাঠানোর চেষ্টা হচ্ছে');
-        try { await this.o.outbox.flush(); } catch { /* stays queued */ }
+        // A press means now. A plain flush() skips every op still waiting out
+        // the backoff of a failed send — up to minutes once a few sends have
+        // failed — so the press sent nothing and the line went on saying
+        // "পাঠানো হচ্ছে". Offline there is nothing to try now, and a failed
+        // attempt would only lengthen the wait the reconnect then has to sit
+        // out, so offline it stays the automatic flush.
+        try {
+          await (navigator.onLine
+            ? this.o.outbox.flush({ ignoreBackoff: true })
+            : this.o.outbox.flush());
+        } catch { /* stays queued */ }
         if (!navigator.onLine) {
           // Offline the line comes back reading exactly as before, so the
           // press looked like it did nothing. Say what happened.
@@ -598,19 +651,12 @@ export class AttendanceScreen {
         await this.paintStatus();
         // The queue emptied, so this line and its button are gone and focus
         // went with them. The register's saved line now says it arrived.
-        // (While the line is still there the shell's focus keeper puts focus
-        // back on its new "আবার পাঠান".)
+        // (While anything is still queued the line, and this button, stay.)
         if (focusIsLost(d) && !this.statusHost?.querySelector('.att-sync-line')) {
           this.view?.focusSaved();
         }
       },
-    }));
-    if (old) old.replaceWith(line);
-    else append(host, line);
-    this.syncLine = line;
-    this.syncKey = key;
-    // The count changed under a focused "আবার পাঠান": the new line has one.
-    if (hadFocus && focusIsLost(d)) line.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
+    });
   }
 
   /** Test seam. */

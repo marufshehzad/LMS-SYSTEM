@@ -9,13 +9,15 @@
  *   3. Flushing is single-flight: two tabs must not send the same batch.
  */
 import { assertClientAuthorable, resolveConflict, type ConflictContext } from './conflict.ts';
-import type {
-  Entity,
-  Operation,
-  OutboxOp,
-  PushResult,
-  SyncEngineOptions,
-  SyncState, OpOwner,
+import {
+  ownedBy,
+  type Entity,
+  type FlushOptions,
+  type Operation,
+  type OutboxOp,
+  type PushResult,
+  type SyncEngineOptions,
+  type SyncState, type OpOwner,
 } from './types.ts';
 import { backoffMs, ClockSync, Mutex, uuidv7 } from './util.ts';
 
@@ -110,21 +112,56 @@ export class SyncEngine {
    * Never throws: a transport failure is a normal condition offline, and a
    * throwing flush would surface as an unhandled rejection in a Background
    * Sync handler.
+   *
+   * `{ ignoreBackoff: true }` is for a person's explicit "send now" — see
+   * FlushOptions. Automatic flushes pass nothing and wait out the backoff.
    */
-  async flush(): Promise<{ sent: number; acked: number; rounds: number }> {
-    const res = await this.mutex.run(() => this.drain());
+  async flush(options: FlushOptions = {}): Promise<{ sent: number; acked: number; rounds: number }> {
+    const byPerson = options.ignoreBackoff === true;
+    const res = await this.mutex.run(async () => {
+      if (byPerson) await this.makeWaitingDue();
+      return this.drain(byPerson);
+    });
     return res ?? { sent: 0, acked: 0, rounds: 0 };
   }
 
-  private async drain(): Promise<{ sent: number; acked: number; rounds: number }> {
+  /**
+   * Bring this session's backed-off pending ops forward to now, inside the
+   * flush's lock, so the drain that follows claims them like any due op.
+   *
+   * Moving the deadline — rather than claiming past it — keeps a full batch's
+   * next round moving on: an op that fails in this drain gets a fresh deadline
+   * in the future, so round two claims the ops after it instead of the same
+   * ones again. `attempts` is left alone, so the backoff after a failed tap
+   * grows exactly as it would have.
+   */
+  private async makeWaitingDue(): Promise<void> {
+    const now = this.now;
+    for (const op of await this.o.store.byStatus('pending')) {
+      if (op.nextAttemptAt <= now || !ownedBy(op, this.owner)) continue;
+      op.nextAttemptAt = now;
+      await this.o.store.update(op);
+    }
+  }
+
+  /** @param byPerson a person asked for this flush: its failures never park an op. */
+  private async drain(byPerson = false): Promise<{ sent: number; acked: number; rounds: number }> {
     let sent = 0;
     let acked = 0;
     let rounds = 0;
+    /**
+     * A person's flush sends each op at most once. Full jitter can draw a zero
+     * delay, which makes a just-failed op due again at once; an automatic
+     * flush is bounded by the retry budget then, and a person's is not.
+     */
+    const attempted = byPerson ? new Set<string>() : null;
 
     for (;;) {
-      const batch = await this.o.store.claimBatch(this.o.batchSize, this.now, this.owner);
+      const claimed = await this.o.store.claimBatch(this.o.batchSize, this.now, this.owner);
+      const batch = attempted ? claimed.filter((op) => !attempted.has(op.opId)) : claimed;
       if (batch.length === 0) break;
       rounds++;
+      for (const op of batch) attempted?.add(op.opId);
 
       for (const op of batch) {
         op.status = 'inflight';
@@ -142,7 +179,7 @@ export class SyncEngine {
         // Transport failure: every op goes back to pending with backoff.
         // Nothing is dropped — that is the whole point.
         this.lastError = err instanceof Error ? err.message : String(err);
-        await this.backoffAll(batch, this.lastError);
+        await this.backoffAll(batch, this.lastError, byPerson);
         await this.emit();
         return { sent, acked, rounds };
       }
@@ -159,24 +196,24 @@ export class SyncEngine {
         const op = byId.get(r.opId);
         if (!op) continue; // result for an op we didn't send — ignore
         seen.add(r.opId);
-        if (await this.applyResult(op, r)) acked++;
+        if (await this.applyResult(op, r, byPerson)) acked++;
       }
 
       // Any op the server didn't mention is NOT assumed delivered.
       for (const op of batch) {
         if (seen.has(op.opId)) continue;
-        await this.backoffOne(op, 'no result returned for op');
+        await this.backoffOne(op, 'no result returned for op', byPerson);
       }
 
       await this.emit();
-      if (batch.length < this.o.batchSize) break;
+      if (claimed.length < this.o.batchSize) break;
     }
 
     return { sent, acked, rounds };
   }
 
   /** @returns true if the op left the outbox. */
-  private async applyResult(op: OutboxOp, r: PushResult): Promise<boolean> {
+  private async applyResult(op: OutboxOp, r: PushResult, byPerson = false): Promise<boolean> {
     switch (r.status) {
       case 'applied':
       case 'duplicate':
@@ -209,7 +246,7 @@ export class SyncEngine {
 
       case 'rejected': {
         if (r.error?.retryable) {
-          await this.backoffOne(op, r.error.code);
+          await this.backoffOne(op, r.error.code, byPerson);
           return false;
         }
         op.status = 'failed';
@@ -221,15 +258,20 @@ export class SyncEngine {
     }
   }
 
-  private async backoffAll(ops: OutboxOp[], reason: string): Promise<void> {
-    for (const op of ops) await this.backoffOne(op, reason);
+  private async backoffAll(ops: OutboxOp[], reason: string, byPerson = false): Promise<void> {
+    for (const op of ops) await this.backoffOne(op, reason, byPerson);
   }
 
-  private async backoffOne(op: OutboxOp, reason: string): Promise<void> {
+  /**
+   * @param byPerson the attempt was a person's "send now". It counts and it
+   *   backs off, but it never exhausts the budget: the next AUTOMATIC failure
+   *   past the limit parks the op, as it would have.
+   */
+  private async backoffOne(op: OutboxOp, reason: string, byPerson = false): Promise<void> {
     op.attempts += 1;
     op.lastError = reason;
 
-    if (op.attempts >= this.o.maxAttempts) {
+    if (op.attempts >= this.o.maxAttempts && !byPerson) {
       // Parked, NOT deleted. The UI offers retry and export-to-file; an
       // attendance record that vanishes is a parent who was never told.
       op.status = 'failed';

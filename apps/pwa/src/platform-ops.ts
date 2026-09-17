@@ -29,8 +29,9 @@ import {
   pageHeader, sectionHeading, card, button, buttonRow, dataTable, statusBadge,
   statRow, statCard, field, setFieldError, clearFieldError, tabs, openDrawer,
   listSkeleton, permissionState, permissionMessage, humanError, list, listItem, avatar,
-  numText, el, append, focusIsLost, type OverlayHandle, type Field, type Child,
+  numText, el, append, focusIsLost, setBusy, type OverlayHandle, type Field, type Child,
 } from './ui/index.ts';
+import { LANDING_CLASS } from './ui/dom.ts';
 import {
   emptyState, errorState, successNote, confirmDialog, bnDate, bnDateTime,
 } from './view-states.ts';
@@ -443,18 +444,23 @@ export function quietState(scope: HTMLElement): HTMLElement {
  * when a load redraws the page — the words change ("প্রতিষ্ঠান" while a school
  * loads, then its name), the place does not.
  *
- * `plat-title` is the hook for the ring's size. The name is a block as wide
- * as the bar, so the sheet's focus ring (`[tabindex]:focus-visible`) drew a
- * 2px box round the whole title row — about 970px at 1280 — after every
- * keyboard page change. app.css (`.plat-title`) sizes the name to its words,
- * and the same ring then marks the words; the focus move itself is unchanged.
+ * `LANDING_CLASS` (ui/dom.ts) is how the name looks while it holds focus. The
+ * name is a block as wide as the bar, so the sheet's focus ring
+ * (`[tabindex]:focus-visible`) drew a 2px accent box round the whole title
+ * row — about 970px at 1280 — after every keyboard page change, and round
+ * the words still, once `plat-title` had sized the name to them. A heading
+ * focus lands on is a place to start reading from, not a control: it gets
+ * the keeper's own landing style (an underline under the words), the same
+ * as every heading the app's shell lands focus on. The class only styles
+ * `:focus-visible`, so it stays on the name; the focus move is unchanged.
+ * `plat-title` stays as the console's hook for the name.
  */
 export function titleTarget(scope: ParentNode): HTMLElement | null {
   const h = scope.querySelector<HTMLElement>('h1');
   if (!h) return null;
   h.setAttribute('tabindex', '-1');
   h.setAttribute('data-focus-key', 'plat-title');
-  h.classList.add('plat-title');
+  h.classList.add('plat-title', LANDING_CLASS);
   return h;
 }
 
@@ -542,7 +548,7 @@ export class PlatformOpsView {
   private notice = '';
   private search = '';
   private filter = 'all';
-  /** The plan or operator drawer, when one is open. */
+  /** The operator drawer, when one is open (showConfirm puts a confirm inside it). */
   private drawer: OverlayHandle | null = null;
   private openId: string | null = null;
   private ops: Operations | null = null;
@@ -589,9 +595,11 @@ export class PlatformOpsView {
    *
    * "Shown" means a reader could be handed it: on the page, and not under an
    * open drawer. openDrawer (ui/overlay.ts) sets `aria-hidden` on the rest of
-   * the page while it is open, and a failure drawn then — an operator save
-   * that fails keeps its drawer open — is heard by nobody. It stays unsaid
-   * until the drawer closes, and is said then (see `onOverlayClosed`).
+   * the page while it is open, and a failure drawn then — a load that fails
+   * while the operator drawer is open — is heard by nobody. It stays unsaid
+   * until the drawer closes, and is said then (see `onOverlayClosed`). A
+   * failure of the drawer's OWN save is not this: it is said inside the
+   * drawer (operatorForm).
    */
   private failure = 0;
   private saidFailure = 0;
@@ -1056,7 +1064,25 @@ export class PlatformOpsView {
     const body = el(d, 'div', { className: 'ui-stack' });
     for (const f of [id, name, email, note]) append(body, f.root);
 
-    const save = async (status: 'active' | 'revoked'): Promise<void> => {
+    /**
+     * A failed save is said INSIDE the drawer, which stays open with what was
+     * typed. It used to be the page's failure card, drawn behind the drawer:
+     * the drawer is a modal, the page under it is covered by the scrim and
+     * `aria-hidden`, so an operator pressed সংরক্ষণ and saw and heard nothing
+     * — until the drawer was closed and the card was said to a page that no
+     * longer had the form on it. The card lives with the form it is about,
+     * and goes when the drawer goes.
+     */
+    let problem: HTMLElement | null = null;
+    let saving = false;
+    const save = async (status: 'active' | 'revoked', pressed: HTMLButtonElement): Promise<void> => {
+      if (saving) return;
+      saving = true;
+      // The last attempt's words go: a second failure is put on the page
+      // afresh, and said again.
+      problem?.remove();
+      problem = null;
+      setBusy(pressed, true);
       try {
         await this.o.call('/operator', {
           method: 'POST',
@@ -1069,31 +1095,59 @@ export class PlatformOpsView {
         this.notice = status === 'revoked'
           ? 'ক্রেডেনশিয়াল প্রত্যাহার করা হয়েছে।'
           : 'অপারেটর সংরক্ষণ হয়েছে।';
-        this.closeDrawer();
+        drawer.close();
         await this.load();
       } catch (err) {
-        this.fail(err, 'অপারেটর সংরক্ষণ করা যায়নি।');
-        this.render();
+        setBusy(pressed, false);
+        // Closed while the request was on the wire: the page is uncovered
+        // again, and the page's failure card is where it can be seen and heard.
+        if (!drawer.el.isConnected) {
+          this.fail(err, 'অপারেটর সংরক্ষণ করা যায়নি।');
+          this.render();
+          return;
+        }
+        // Focus first, then the words. A disabled button drops focus (Chrome
+        // moves it to <body>, outside the dialog); it goes back to the button
+        // that was pressed, so the next Tab stays in the drawer and a second
+        // press is one key away. Moving it after the alert would read the
+        // button's name over the failure.
+        const a = d.activeElement;
+        if (!a || !drawer.el.contains(a)) pressed.focus();
+        const card = isDenied(errorCodeOf(err))
+          ? refusalState(d)
+          : errorState(d, plainError(err, 'অপারেটর সংরক্ষণ করা যায়নি।'));
+        card.classList.add('plat-drawer-problem');
+        problem = card;
+        // After the fields, next to the button that was pressed.
+        body.append(card);
+        if (typeof card.scrollIntoView === 'function') card.scrollIntoView({ block: 'nearest' });
+      } finally {
+        saving = false;
       }
     };
 
-    const actions = [button(d, {
+    const saveButton = button(d, {
       label: 'সংরক্ষণ', variant: 'primary',
-      onClick: () => { void save('active'); },
-    })];
+      onClick: () => { void save('active', saveButton); },
+    });
+    const actions = [saveButton];
     // Revocation is offered only for a credential that exists and is live.
     if (existing && existing.status === 'active') {
-      actions.push(button(d, {
+      const revoke = button(d, {
         label: 'প্রত্যাহার', variant: 'danger',
-        onClick: () => { void save('revoked'); },
-      }));
+        onClick: () => { void save('revoked', revoke); },
+      });
+      actions.push(revoke);
     }
 
-    this.drawer = openDrawer(d, {
+    const drawer = openDrawer(d, {
       title: existing ? existing.fullName : 'নতুন অপারেটর',
       body, actions,
-      onClose: () => { this.drawer = null; },
+      // Only this drawer's own handle: a later drawer is not forgotten when
+      // this one closes.
+      onClose: () => { if (this.drawer === drawer) this.drawer = null; },
     });
+    this.drawer = drawer;
   }
 
   /**
@@ -1849,12 +1903,6 @@ export class PlatformOpsView {
     host.append(dlg);
     dlg.scrollIntoView({ block: 'nearest' });
     (dlg.querySelector('button') as HTMLElement | null)?.focus();
-  }
-
-  /** Close the plan or operator drawer. A school's page is closed by closeDetail. */
-  private closeDrawer(): void {
-    this.drawer?.close();
-    this.drawer = null;
   }
 
   /** Above the fold: who, what state, and the three numbers that decide. */
