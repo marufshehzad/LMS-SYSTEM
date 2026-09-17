@@ -122,7 +122,7 @@ describe('exam routine view (§8.3)', () => {
     test('every status carries a word, never colour or a glyph alone (F-812)', () => {
       // P6 moved these onto `statusBadge`, so a clashing paper tints like
       // every other overdue thing in the product rather than like exams only.
-      const chips = [...root.querySelectorAll('.data-table .ui-badge')];
+      const chips = [...root.querySelectorAll('.ui-table .ui-badge')];
       assert.equal(chips.length, 3);
       assert.ok(chips.every((c) => /সংঘর্ষ|ঠিক আছে/.test(c.textContent ?? '')),
         chips.map((c) => c.textContent).join(' | '));
@@ -191,14 +191,75 @@ describe('exam routine view (§8.3)', () => {
       const labels = [...root.querySelectorAll('button')].map((b) => b.textContent);
       assert.ok(!labels.includes('প্রকাশ করুন'));
       assert.ok(!labels.includes('সময় পরিবর্তন করুন'));
-      // And the state is stated, not merely implied by what is missing. P6
-      // moved it into the action card's own header, beside the exam it is
-      // about, rather than into a bare `.action-row`.
-      assert.match(root.querySelector('.ui-card-action .ui-badge')?.textContent ?? '',
+      // And the state is stated, not merely implied by what is missing. Ata
+      // Ekta (05 Principal §06) draws it as the chip in the page bar's right
+      // cluster, where the action card's header used to hold it.
+      assert.match(root.querySelector('.page-header-actions .ui-badge')?.textContent ?? '',
         /প্রকাশিত/);
       // Said in words as well as in a badge: a published routine cannot be
       // edited, and a reader must not have to infer that from absent buttons.
       assert.match(root.textContent ?? '', /প্রকাশিত রুটিন আর পরিবর্তন করা যায় না/);
+    });
+  });
+
+  describe('Ata Ekta — 05 Principal §06', () => {
+    test('the bar carries the clash count, in Bangla, with the number in the numeral face', async () => {
+      root = await mount(withClash);
+      const chip = root.querySelector('.page-header-actions .ui-badge');
+      assert.match(chip?.textContent ?? '', /২ সংঘর্ষ/);
+      assert.equal(chip?.querySelector('.n')?.textContent, '২');
+      // One accent on the page: the publish button, and nothing else.
+      assert.equal(root.querySelectorAll('.btn-primary').length, 1);
+    });
+
+    test('the strip says why, in one sentence, and that publishing waits on it', async () => {
+      root = await mount(withClash);
+      const panel = root.querySelector('#clash-panel')!;
+      assert.match(panel.querySelector('.clash-head')?.textContent ?? '',
+        /১৪ ডিসেম্বর তারিখে ১ জন শিক্ষার্থীর একই সময়ে দুটি পরীক্ষা পড়েছে — সে রসায়ন ও উচ্চতর গণিত দুটোই নিয়েছে।/);
+      assert.match(panel.textContent ?? '', /সংঘর্ষ থাকা অবস্থায় রুটিন প্রকাশ করা যাবে না/);
+      // The publish button's description still points at it.
+      const pub = [...root.querySelectorAll('button')]
+        .find((b) => b.textContent === 'প্রকাশ করুন') as HTMLButtonElement;
+      assert.equal(pub.getAttribute('aria-describedby'), 'clash-panel');
+    });
+
+    test('a refusal is the permission state, never a retryable load error', async () => {
+      const r = dom.window.document.getElementById('root') as HTMLElement;
+      r.textContent = '';
+      new ExamRoutineView({
+        root: r, doc: dom.window.document,
+        auth: {
+          authedFetch: async () => ({
+            ok: false, status: 403, json: async () => ({ error: 'forbidden' }),
+          }) as unknown as Response,
+        } as unknown as ConstructorParameters<typeof ExamRoutineView>[0]['auth'],
+      });
+      await new Promise((res) => setTimeout(res, 0));
+      await new Promise((res) => setTimeout(res, 0));
+      assert.ok(r.querySelector('.ui-state-denied'), 'the denied state is shown');
+      assert.match(r.textContent ?? '', /অনুমতি/);
+      assert.doesNotMatch(r.textContent ?? '', /লোড হয়নি|আবার চেষ্টা/);
+      assert.equal(r.querySelectorAll('h1').length, 1);
+    });
+
+    test('no exams yet says what is missing and where to go next', async () => {
+      const r = dom.window.document.getElementById('root') as HTMLElement;
+      r.textContent = '';
+      new ExamRoutineView({
+        root: r, doc: dom.window.document,
+        auth: {
+          authedFetch: async () => ({
+            ok: true, status: 200, json: async () => ({ exams: [] }),
+          }) as unknown as Response,
+        } as unknown as ConstructorParameters<typeof ExamRoutineView>[0]['auth'],
+      });
+      await new Promise((res) => setTimeout(res, 0));
+      await new Promise((res) => setTimeout(res, 0));
+      assert.match(r.textContent ?? '', /কোনো পরীক্ষার সময়সূচি তৈরি হয়নি/);
+      const go = [...r.querySelectorAll('button')]
+        .find((b) => b.textContent === 'পরীক্ষা ব্যবস্থাপনায় যান');
+      assert.ok(go, 'the next action is a real button');
     });
   });
 });

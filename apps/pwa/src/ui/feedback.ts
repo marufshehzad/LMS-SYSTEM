@@ -19,12 +19,71 @@
  * of three notifications is a thing to dismiss rather than a thing to read.
  */
 import { el, icon, append, clear, type Child } from './dom.ts';
-import { skeleton } from '../view-states.ts';
+import { skeleton, bnNum } from '../view-states.ts';
+import { hasIcon } from '../icon.ts';
 
 export type ToastTone = 'success' | 'error' | 'info';
 
 let host: HTMLElement | null = null;
 let timer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Every number gets `.n` (Ata Ekta §2), including a number that arrives inside
+ * a caller's sentence — "৩৪০ / ১০০০ সারি", "৩টি পরিবর্তন সংরক্ষণ হয়েছে".
+ *
+ * The class goes on the smallest element holding the number, not on the whole
+ * sentence: `.n` switches to the numeral face, and a whole Bangla sentence set
+ * in it is a different typeface for the words too. `textContent` is unchanged,
+ * so a reader and a test see the sentence exactly as the caller wrote it.
+ */
+const DIGIT = /[0-9০-৯]/;
+const NUMBER_RUN = /[0-9০-৯]+(?:[.,:/][0-9০-৯]+)*%?/g;
+
+function numText(doc: Document, text: string): Child[] {
+  if (!DIGIT.test(text)) return [text];
+  const out: Child[] = [];
+  let last = 0;
+  for (const m of text.matchAll(NUMBER_RUN)) {
+    const at = m.index ?? 0;
+    if (at > last) out.push(text.slice(last, at));
+    out.push(el(doc, 'span', { className: 'n', text: m[0] }));
+    last = at + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+/**
+ * A one-message API drawn as a two-line card (14 Components §06): the first
+ * sentence is the title, anything after it the muted detail. Messages here are
+ * written "<what happened>। <what to do>।", so the split follows the sentence
+ * the caller already wrote. A one-sentence message is a title alone.
+ */
+function splitMessage(message: string): { title: string; detail: string } {
+  const i = message.indexOf('।');
+  if (i >= 0 && message.slice(i + 1).trim()) {
+    return { title: message.slice(0, i + 1), detail: message.slice(i + 1).trim() };
+  }
+  return { title: message, detail: '' };
+}
+
+/**
+ * The glyph that carries a toast's tone (§06: check-circle / alert-circle /
+ * info). Each has the glyph this component drew before as its fallback, so a
+ * set that does not carry the drawn name degrades to the old toast rather than
+ * to the unknown-icon dot. `info` had no glyph before and keeps none without
+ * its own.
+ */
+const TOAST_GLYPH: Record<ToastTone, readonly [string, string | null]> = {
+  success: ['check-circle', 'check-square'],
+  error: ['alert-circle', 'alert-triangle'],
+  info: ['info', null],
+};
+
+function toastGlyph(tone: ToastTone): string | null {
+  const [drawn, fallback] = TOAST_GLYPH[tone];
+  return hasIcon(drawn) ? drawn : fallback;
+}
 
 /**
  * The live region every toast is announced through.
@@ -58,14 +117,15 @@ export function toast(doc: Document, o: {
 
   const tone = o.tone ?? 'info';
   const node = el(doc, 'div', { className: 'ui-toast', data: { tone } });
-  if (tone !== 'info') {
-    append(node, icon(doc, tone === 'success' ? 'check-square' : 'alert-triangle', 'ui-toast-glyph'));
-  }
-  append(node, el(doc, 'span', { className: 'ui-toast-text', text: o.message }));
+  // The glyph's colour, set per tone in app.css, is what tells the three apart
+  // at a glance; the words beside it are what carries the meaning.
+  const glyph = toastGlyph(tone);
+  if (glyph) append(node, icon(doc, glyph, 'ui-toast-glyph'));
+  append(node, el(doc, 'span', { className: 'ui-toast-text' }, ...numText(doc, o.message)));
   if (o.action) {
     const b = el(doc, 'button', {
-      className: 'ui-toast-action', text: o.action.label, attrs: { type: 'button' },
-    });
+      className: 'ui-toast-action', attrs: { type: 'button' },
+    }, ...numText(doc, o.action.label));
     b.addEventListener('click', () => { o.action!.onClick(); clear(h); });
     append(node, b);
   }
@@ -109,12 +169,15 @@ export function announce(doc: Document, message: string, assertive = false): voi
  *
  * A full-page skeleton is for a first load; using one for a refresh throws
  * away the content the person is reading in order to say "wait".
+ *
+ * The label is visible beside the ring (§06): a ring alone on a slow network
+ * is the "is it broken?" moment a skeleton exists to avoid.
  */
-export function inlineLoader(doc: Document, label = 'লোড হচ্ছে'): HTMLElement {
+export function inlineLoader(doc: Document, label = 'আনা হচ্ছে…'): HTMLElement {
   return el(doc, 'div', {
     className: 'ui-inline-loader', attrs: { role: 'status', 'aria-label': label },
   }, el(doc, 'span', { className: 'ui-spinner', attrs: { 'aria-hidden': 'true' } }),
-     el(doc, 'span', { className: 'ui-sr-only', text: label }));
+     el(doc, 'span', { className: 'ui-inline-loader-label' }, ...numText(doc, label)));
 }
 
 /**
@@ -132,7 +195,14 @@ export function progress(doc: Document, o: {
 }): HTMLElement {
   const pct = o.max > 0 ? Math.min(100, Math.round((o.value / o.max) * 100)) : 0;
   const wrap = el(doc, 'div', { className: 'ui-progress' });
-  append(wrap, el(doc, 'p', { className: 'ui-progress-label', text: o.label }));
+  // Count on the left, percentage on the right (§06). The percentage is
+  // aria-hidden: the progressbar below already announces the position, and
+  // reading "৬৮%" before it would say the same thing twice.
+  append(wrap, el(doc, 'div', { className: 'ui-progress-head' },
+    el(doc, 'p', { className: 'ui-progress-label' }, ...numText(doc, o.label)),
+    el(doc, 'span', {
+      className: 'ui-progress-pct n', text: `${bnNum(pct)}%`, attrs: { 'aria-hidden': 'true' },
+    })));
   const bar = el(doc, 'div', {
     className: 'ui-progress-track',
     attrs: {
@@ -205,19 +275,20 @@ export function permissionState(doc: Document, o: {
   contact?: string;
 } = {}): HTMLElement {
   const wrap = el(doc, 'div', { className: 'ui-state ui-state-denied', attrs: { role: 'note' } });
+  // Defaults through permissionMessage() so this component is not a sixth
+  // wording of the same sentence — it was, until B-30.
+  const { title, detail } = splitMessage(o.message ?? permissionMessage());
+  const contactLine = o.contact ? `প্রয়োজন হলে ${o.contact}-এর সাথে যোগাযোগ করুন।` : '';
+  const detailText = [detail, contactLine].filter(Boolean).join(' ');
   append(wrap,
     icon(doc, 'lock', 'ui-state-glyph'),
-    el(doc, 'p', {
-      className: 'ui-state-title',
-      // Defaults through permissionMessage() so this component is not a
-      // sixth wording of the same sentence — it was, until B-30.
-      text: o.message ?? permissionMessage(),
-    }),
-    o.contact
-      ? el(doc, 'p', {
-          className: 'ui-state-detail',
-          text: `প্রয়োজন হলে ${o.contact}-এর সাথে যোগাযোগ করুন।`,
-        })
+    el(doc, 'p', { className: 'ui-state-title' }, ...numText(doc, title)),
+    // The space the split took out of the caller's sentence. It renders as
+    // nothing between two paragraphs, and keeps the card's text identical to
+    // the message it was given.
+    detail ? ' ' : null,
+    detailText
+      ? el(doc, 'p', { className: 'ui-state-detail' }, ...numText(doc, detailText))
       : null);
   return wrap;
 }

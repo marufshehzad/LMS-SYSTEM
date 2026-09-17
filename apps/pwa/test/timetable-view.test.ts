@@ -52,6 +52,9 @@ const settle = async () => {
 const text = () => root().textContent ?? '';
 const selects = () => [...root().querySelectorAll('select')];
 const optionsOf = (i: number) => [...(selects()[i]?.options ?? [])].map((o) => o.textContent);
+const scopeTabs = () => [...root().querySelectorAll<HTMLButtonElement>('.tt-scope-tabs [role="tab"]')];
+const dayTabs = () => [...root().querySelectorAll<HTMLButtonElement>('.tt-day [role="tab"]')];
+const dayRows = () => [...root().querySelectorAll('.tt-day-panel .ui-list-item')];
 
 const period = (n: number) => ({
   routineId: 'r1', periodNo: n, labelBn: `${n} নম্বর`,
@@ -137,13 +140,17 @@ describe('P9-8 — the published routine on screen', () => {
 
   test('THE ONE THAT MATTERS — the picker is the server’s list, verbatim', async () => {
     await mount();
-    // Two scopes offered, so two selects: which kind, and which one.
-    assert.deepEqual(optionsOf(0), ['আমার শাখা', 'আমার রুটিন']);
-    assert.deepEqual(optionsOf(1), ['নবম শ্রেণি — ক']);
-    // Nothing the screen invented: every option came from `offered`.
-    for (const label of optionsOf(0)) {
-      assert.ok(payload.offered.some((o) => o.labelBn === label), label);
+    // Two scopes offered, so two choices: which kind (the view tabs 06 Routine
+    // draws), and which one (the select).
+    assert.deepEqual(scopeTabs().map((t) => t.textContent), ['আমার শাখা', 'আমার রুটিন']);
+    assert.deepEqual(optionsOf(0), ['নবম শ্রেণি — ক']);
+    // Nothing the screen invented: every choice came from `offered`.
+    for (const label of scopeTabs().map((t) => t.textContent)) {
+      assert.ok(payload.offered.some((o) => o.labelBn === label), label ?? '');
     }
+    // The one showing is the scope the server answered.
+    assert.equal(scopeTabs()[0].getAttribute('aria-selected'), 'true');
+    assert.equal(scopeTabs()[1].getAttribute('aria-selected'), 'false');
   });
 
   test('§2 — one reader with one thing to look at gets no picker', async () => {
@@ -153,19 +160,58 @@ describe('P9-8 — the published routine on screen', () => {
     await mount();
     assert.equal(selects().length, 0,
       'a select with one option is a control that does nothing');
+    assert.equal(scopeTabs().length, 0, 'and neither is a strip of one tab');
     assert.match(text(), /মোট ক্লাস/, 'and the timetable is still there');
+    assert.equal(root().querySelectorAll('.routine-grid').length, 1);
   });
 
   test('changing the scope asks the server again, for that scope', async () => {
     await mount();
     const before = asked.length;
-    const sel = selects()[0];
-    sel.value = 'teacher';
-    sel.dispatchEvent(new dom.window.Event('change'));
+    scopeTabs()[1].click();
     await settle();
     assert.ok(asked.length > before, 'it re-reads rather than filtering locally');
     assert.match(asked.at(-1) ?? '', /scope=teacher/);
     assert.match(asked.at(-1) ?? '', /id=self/);
+  });
+
+  test('the scope already showing does not ask again', async () => {
+    await mount();
+    const before = asked.length;
+    scopeTabs()[0].click();
+    await settle();
+    assert.equal(asked.length, before, 'a select does not fire on the option it already shows');
+  });
+
+  test('a scope offered twice resolves to its first offer, as the select did', async () => {
+    // A principal who also teaches: "আমার রুটিন" and "শিক্ষক" are both scope
+    // teacher. The select's option values were scopes, so choosing either
+    // asked for the first one — the tabs must not quietly start doing better.
+    payload.offered = [
+      { scope: 'teacher', labelBn: 'আমার রুটিন',
+        options: [{ id: 'self', labelBn: 'আমার সাপ্তাহিক ক্লাস' }] },
+      { scope: 'institution', labelBn: 'পুরো প্রতিষ্ঠান' },
+      { scope: 'teacher', labelBn: 'শিক্ষক',
+        options: [{ id: 't-9', labelBn: 'রফিক স্যার' }] },
+    ];
+    payload.scope = 'institution';
+    await mount({ scope: 'institution' });
+    assert.equal(selects().length, 0, 'the whole institution has no second choice');
+    scopeTabs()[2].click();
+    await settle();
+    assert.match(asked.at(-1) ?? '', /scope=teacher/);
+    assert.match(asked.at(-1) ?? '', /id=self/);
+  });
+
+  test('a view tab keeps keyboard focus through the reload it asks for', async () => {
+    await mount();
+    scopeTabs()[1].click();
+    await settle();
+    // The server here always answers scope=section, so the first tab is selected.
+    const selected = root().querySelector('.tt-scope-tabs [aria-selected="true"]');
+    assert.ok(selected);
+    assert.equal(doc().activeElement, selected,
+      'a rebuilt strip must not drop the keyboard to the top of the page');
   });
 
   test('the first read names no scope — the server answers from the reader’s menu', async () => {
@@ -312,7 +358,138 @@ describe('P9-8 — the published routine on screen', () => {
     assert.doesNotMatch(text(), /2026/);
   });
 
-  /* ──────────────────────────── the numbers ───────────────────────────── */
+  /* ─────────────────────── the phone's week (13 Responsive ০৬) ──────────── */
+
+  test('the phone gets day tabs with today preselected, over that day only', async () => {
+    const week = [0, 1, 2, 3, 4, 5, 6];
+    payload.days = week.map((dow) => ({ dow, bn: ['রবি', 'সোম', 'মঙ্গল', 'বুধ', 'বৃহঃ', 'শুক্র', 'শনি'][dow] }));
+    await mount();
+    assert.deepEqual(dayTabs().map((t) => t.textContent),
+      payload.days.map((x) => x.bn), 'one tab per teaching day the server sent');
+    const today = new Date().getDay();
+    const selected = dayTabs().filter((t) => t.getAttribute('aria-selected') === 'true');
+    assert.equal(selected.length, 1);
+    assert.equal(selected[0].textContent, payload.days[today].bn, 'today, preselected');
+    const panel = root().querySelector('.tt-day-panel') as HTMLElement;
+    assert.equal(panel.getAttribute('role'), 'tabpanel');
+    assert.equal(panel.getAttribute('aria-labelledby'), selected[0].id);
+    // Two periods, so two rows for the day — whatever the day holds.
+    assert.equal(dayRows().length, 2);
+  });
+
+  test('a day that is not a teaching day falls back to the first one', async () => {
+    const today = new Date().getDay();
+    const first = (today + 1) % 7;
+    const second = (today + 2) % 7;
+    payload.days = [{ dow: first, bn: 'প্রথম' }, { dow: second, bn: 'দ্বিতীয়' }];
+    payload.lessons = [lesson(first, 1)];
+    await mount();
+    assert.deepEqual(dayTabs().map((t) => t.getAttribute('aria-selected')), ['true', 'false']);
+  });
+
+  test('switching day repaints from memory and never asks the server', async () => {
+    await mount();
+    // Pin the start: pick রবি, where period 1 is গণিত and period 2 is বাংলা.
+    const rabi = dayTabs().find((t) => t.textContent === 'রবি')!;
+    rabi.click();
+    const before = asked.length;
+    const som = dayTabs().find((t) => t.textContent === 'সোম')!;
+    som.click();
+    await settle();
+    assert.equal(asked.length, before, 'the week is already here');
+    const now = dayTabs().find((t) => t.getAttribute('aria-selected') === 'true')!;
+    assert.equal(now.textContent, 'সোম');
+    assert.equal(doc().activeElement, now, 'focus follows the tab, not lost with the old strip');
+    const rows = dayRows().map((r) => r.textContent ?? '');
+    assert.match(rows[0], /গণিত/, 'সোম, period 1');
+    assert.match(rows[1], /—/, 'সোম, period 2 is free');
+    assert.doesNotMatch(rows.join(' '), /বাংলা/, 'রবি’s বাংলা is not on সোম');
+  });
+
+  test('a phone row keeps everything the desk cell shows', async () => {
+    payload.lessons = [lesson(0, 1, { isParallel: true })];
+    payload.days = [{ dow: 0, bn: 'রবি' }];
+    await mount();
+    const row = dayRows()[0];
+    const t = row.textContent ?? '';
+    assert.match(t, /১ম পিরিয়ড/, 'the ordinal, for a reader');
+    assert.match(t, /সকাল ৯:০০–৯:৪৫/, 'the clock');
+    assert.match(t, /গণিত/);
+    assert.match(t, /রফিক স্যার/);
+    assert.match(t, /১০১ নম্বর কক্ষ/);
+    assert.match(t, /বিভাজিত ক্লাস/);
+    // The phone rows are their own markup: the grid's counts stay the grid's.
+    assert.equal(row.querySelector('.routine-slot, .routine-cell, .routine-grid-no'), null);
+  });
+
+  test('the break is a row of the day on both shapes', async () => {
+    payload.periods = [
+      { ...period(1), kind: 'teaching' },
+      { ...period(2), labelBn: 'টিফিন', kind: 'tiffin' },
+    ];
+    payload.lessons = [lesson(0, 1)];
+    await mount();
+    // The desk grid draws it under every day, as 06 Routine does.
+    assert.equal(root().querySelectorAll('.tt-band .tt-band-cell').length, payload.days.length);
+    assert.equal(root().querySelector('.tt-band th[scope="row"]')?.textContent, 'সকাল ১০:০০–১০:৪৫');
+    // And the phone's day has it in its place.
+    assert.match(root().querySelector('.tt-day-break')?.textContent ?? '', /টিফিন/);
+  });
+
+  /* ───────────────────────────── the frame ────────────────────────────── */
+
+  test('one h1, and print is the bar’s outline action, not a primary', async () => {
+    await mount();
+    const h1s = root().querySelectorAll('h1');
+    assert.equal(h1s.length, 1);
+    assert.equal(h1s[0].textContent, 'প্রকাশিত রুটিন');
+    const print = root().querySelector('.page-header-actions button') as HTMLButtonElement;
+    assert.equal(print?.textContent?.trim(), 'ছাপুন');
+    assert.ok(print.classList.contains('btn-sm'));
+    assert.equal(root().querySelectorAll('.btn-primary').length, 0, 'this screen has no primary');
+  });
+
+  test('the which-one select keeps its label for a reader', async () => {
+    await mount();
+    const sel = selects()[0];
+    const label = root().querySelector(`label[for="${sel.id}"]`);
+    assert.equal(label?.textContent, 'কোনটি');
+    assert.ok(label?.classList.contains('ui-sr-only'), 'drawn without it, spoken with it');
+  });
+
+  test('no print action while there is nothing to print', async () => {
+    payload.published = false;
+    payload.routines = []; payload.periods = []; payload.lessons = [];
+    await mount();
+    assert.equal([...root().querySelectorAll('button')]
+      .find((b) => (b.textContent ?? '').trim() === 'ছাপুন'), undefined);
+    reply = { ok: false, status: 500, body: { error: 'internal_error' } };
+    await mount();
+    assert.equal([...root().querySelectorAll('button')]
+      .find((b) => (b.textContent ?? '').trim() === 'ছাপুন'), undefined);
+  });
+
+  test('R6 — every number a person reads sits in the numeral face', async () => {
+    payload.scope = 'institution';
+    payload.periods = [
+      { ...period(1), kind: 'teaching' },
+      { ...period(2), labelBn: 'টিফিন', kind: 'tiffin' },
+      { ...period(3), kind: 'teaching' },
+    ];
+    payload.lessons = [0, 1, 2, 3, 4].map((k) =>
+      lesson(0, 1, { sectionLabel: String.fromCharCode(0x995 + k) }));
+    await mount();
+    const walker = doc().createTreeWalker(root(), 4 /* SHOW_TEXT */);
+    const bare: string[] = [];
+    for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+      if (!/[0-9০-৯]/.test(t.nodeValue ?? '')) continue;
+      const p = t.parentElement!;
+      if (p.closest('option, select, .ui-sr-only')) continue;
+      if (!p.classList.contains('n')) bare.push(`${p.className}: ${t.nodeValue}`);
+    }
+    assert.deepEqual(bare, [], 'a digit outside the numeral face');
+  });
+
 
   test('every count is the server’s, in Bangla, with the word that names it', async () => {
     payload.counts = { sections: 20, teachers: 23, rooms: 22, classes: 5 };

@@ -120,13 +120,18 @@ describe('P10-2 — the dashboard counts the fleet, not the page', () => {
       summary: SUMMARY,
       page: { page: 1, size: 25, total: 258, pages: 11, sort: 'name', dir: 'asc' },
     });
-    assert.equal(stat(d, 'মোট'), '২৫৮',
+    // Ata Ekta (10 Platform Console, screen ০১) names the fleet total
+    // "প্রতিষ্ঠান" and the fully active count "সক্রিয়"; the guarantee is the
+    // same — the figure is the server's, never the page's.
+    assert.equal(stat(d, 'প্রতিষ্ঠান'), '২৫৮',
       'the dashboard reported the page length as the fleet total');
-    // The other three cards on that row are fleet-wide too, and each of them
-    // was a `rows.filter(...).length` before P10-2.
-    assert.equal(stat(d, 'পূর্ণ সক্রিয়'), '২৪০');
+    // The other cards are fleet-wide too, and each of them was a
+    // `rows.filter(...).length` before P10-2.
+    assert.equal(stat(d, 'সক্রিয়'), '২৪০');
     assert.equal(stat(d, 'শুধু পড়া'), '১২');
     assert.equal(stat(d, 'স্থগিত'), '৬');
+    // The drawn "নজর দরকার" figure: critical + warning over the fleet.
+    assert.equal(stat(d, 'নজর দরকার'), '১২');
   });
 
   test('students and money are the fleet-wide sums, not a reduce over a page', () => {
@@ -150,8 +155,107 @@ describe('P10-2 — the dashboard counts the fleet, not the page', () => {
       tab: 'dashboard', rows: [school(), school({ id: 'b' })], summary: null,
       page: { page: 1, size: 25, total: 0, pages: 1, sort: 'name', dir: 'asc' },
     });
-    assert.equal(stat(d, 'মোট'), '০',
+    assert.equal(stat(d, 'প্রতিষ্ঠান'), '০',
       'the dashboard filled a missing summary in from the page');
+  });
+});
+
+describe('Ata Ekta — the console’s states and the drawn fleet table', () => {
+  test('a refused credential is a state with no retry, not an error to hammer', () => {
+    // platform-svc answers a bad key, a non-operator token and a revoked
+    // credential with 403 `forbidden`. A retry button under that teaches an
+    // operator to press it; the way out is "সেশন শেষ".
+    const d = opsAt({ tab: 'dashboard', error: 'platform credentials required',
+      errorCode: 'forbidden', summary: SUMMARY, rows: [] });
+    const root = d.getElementById('root')!;
+    assert.ok(root.querySelector('.ui-state-denied'), 'a refusal did not render the denied state');
+    assert.equal(root.querySelector('.ui-state-error'), null);
+    assert.doesNotMatch(text(d), /আবার চেষ্টা করুন/, 'a refusal offered a retry');
+    assert.doesNotMatch(text(d), /platform credentials required/,
+      'the server’s English reached the screen');
+  });
+
+  test('any other failure keeps its retry', () => {
+    const d = opsAt({ tab: 'dashboard', error: 'তালিকা আনা যায়নি।', errorCode: '',
+      summary: SUMMARY, rows: [] });
+    assert.ok(d.querySelector('#root .ui-state-error'));
+    assert.match(text(d), /আবার চেষ্টা করুন/);
+  });
+
+  test('the অবস্থা chip says a school is in arrears, and the bill says for how long', () => {
+    const due = new Date(Date.now() - 12 * 86_400_000).toISOString().slice(0, 10);
+    const d = opsAt({ tab: 'institutions', summary: SUMMARY,
+      rows: [school({ billingState: 'limited', access: 'read_only', nextDueOn: due })],
+      page: { page: 1, size: 25, total: 1, pages: 1, sort: 'name', dir: 'asc' } });
+    const row = d.querySelector('.plat-fleet tbody tr')!;
+    assert.match(row.querySelector('[data-col="access"]')!.textContent ?? '', /বকেয়া/,
+      'arrears did not reach the status chip');
+    assert.match(row.querySelector('[data-col="due"]')!.textContent ?? '', /^১[১২৩] দিন পার$/);
+  });
+
+  test('the cap shows in the student cell only when it is reached or near', () => {
+    const d = opsAt({ tab: 'institutions', summary: SUMMARY,
+      rows: [school({ id: 'full', studentCount: 500, studentCap: 500 }),
+             school({ id: 'roomy', studentCount: 10, studentCap: 500 })],
+      page: { page: 1, size: 25, total: 2, pages: 1, sort: 'name', dir: 'asc' } });
+    const cells = [...d.querySelectorAll('.plat-fleet tbody [data-col="students"]')]
+      .map((c) => c.textContent);
+    assert.deepEqual(cells, ['৫০০ / ৫০০', '১০']);
+    assert.match(d.querySelector('.plat-fleet tbody tr [data-col="access"]')!.textContent ?? '',
+      /সীমা পূর্ণ/);
+  });
+
+  test('a school’s page marks the sidebar’s প্রতিষ্ঠান row, whatever opened it', () => {
+    const sections: string[] = [];
+    const root = dom.window.document.getElementById('root')!;
+    const v = new OpsView({
+      root, doc: dom.window.document,
+      call: () => new Promise(() => { /* parked */ }),
+      onOpenTenant: () => {}, onNewTenant: () => {},
+      onSection: (s: string) => sections.push(s),
+    }) as Record<string, unknown>;
+    Object.assign(v, { loading: false, tab: 'dashboard', summary: SUMMARY, rows: [school()] });
+    void (v.openDetail as (id: string) => Promise<void>).call(v, school().id as string);
+    assert.equal(sections.at(-1), 'institutions');
+    assert.equal((v.section as () => string).call(v), 'institutions');
+    // Loading, the page still names itself — one h1, and it can take focus.
+    const h1s = root.querySelectorAll('h1');
+    assert.equal(h1s.length, 1);
+    assert.equal(h1s[0]!.textContent, 'এক বিদ্যালয়');
+    assert.equal(h1s[0]!.getAttribute('tabindex'), '-1');
+    // Leaving through the sidebar goes back to the section, and says so.
+    (v.showSection as (s: string) => void).call(v, 'plans');
+    assert.equal(sections.at(-1), 'plans');
+    assert.equal(root.querySelector('h1')!.textContent, 'প্ল্যান');
+  });
+
+  test('a service switch is a real switch, and pressing it asks before it changes', () => {
+    const root = dom.window.document.getElementById('root')!;
+    // jsdom has no layout, so no scrollIntoView; the confirmation calls it.
+    (dom.window.HTMLElement.prototype as { scrollIntoView?: () => void }).scrollIntoView ??= () => {};
+    const calls: string[] = [];
+    const v = new OpsView({
+      root, doc: dom.window.document,
+      call: (path: string) => { calls.push(path); return new Promise(() => { /* parked */ }); },
+      onOpenTenant: () => {}, onNewTenant: () => {},
+    }) as Record<string, unknown>;
+    calls.length = 0;
+    Object.assign(v, {
+      loading: false, rows: [school()], openId: school().id, detailTab: 'services',
+      services: [{ code: 'sms', nameBn: 'এসএমএস', effectBn: 'বার্তা যাবে না।',
+                   dependsOn: [], inLimited: false }],
+      effective: [{ code: 'sms', state: 'enabled' }],
+      ops: { access: 'full', opsState: 'active', billingState: 'active', portals: {},
+             studentCap: 500, studentCount: 10, planCap: 500, nextDueOn: null },
+    });
+    (v.render as () => void).call(v);
+    const sw = root.querySelector('.plat-switch')!;
+    assert.equal(sw.getAttribute('role'), 'switch');
+    assert.equal(sw.getAttribute('aria-checked'), 'true');
+    assert.match(sw.getAttribute('aria-label') ?? '', /এসএমএস — বন্ধ করুন/);
+    (sw as HTMLElement).click();
+    assert.ok(root.querySelector('[role="alertdialog"]'), 'the switch did not ask first');
+    assert.deepEqual(calls, [], 'the switch changed something before it was confirmed');
   });
 });
 

@@ -6,6 +6,15 @@
  * about them: name, logo and marks, colours, then the contact block that
  * only ever appears on printed paper.
  *
+ * ── Ata Ekta (08 Admin & IT §01) ────────────────────────────────────────
+ * One panel of setting rows under the page header, then the inset
+ * "ছাপার নমুনা" band. Every row is the drawn settingRow: its title, a sub
+ * line saying WHERE the setting shows up, and the control — to the right at
+ * 1024px and up, underneath and full width below it (13 Responsive ০৮). The
+ * header carries the one primary, "সংরক্ষণ". The design draws five rows; the
+ * code edits fourteen fields, so all fourteen stay, grouped under the inset
+ * group rows 08 §02 draws, with the five drawn rows in their drawn order.
+ *
  * ── The preview is the real thing, not a mock-up ────────────────────────
  * The letterhead panel calls brandedLetterhead() from ui-core — the SAME
  * function every future receipt, report card and admit card will call. A
@@ -37,10 +46,17 @@ import {
   brandName,
   meetsAaOnWhiteText,
   contrastRatio,
+  onBrandFill,
 } from '../../../packages/ui-core/src/branding.ts';
 import { brandedLetterhead } from '../../../packages/ui-core/src/branded-doc.ts';
+import { toLatinDigits } from '../../../packages/ui-core/src/format.ts';
 import { applyBranding, cacheBranding, cachedBranding } from './branding.ts';
-import { serverMessage } from './ui/index.ts';
+import {
+  serverMessage, pageHeader, button, setBusy, field, setFieldError, clearFieldError,
+  el, append, icon, uid, numText, hasDigit, successNote, skeleton, focusIsLost,
+  type Field,
+} from './ui/index.ts';
+import { bnNum } from './view-states.ts';
 
 export interface BrandingViewOptions {
   root: HTMLElement;
@@ -69,15 +85,19 @@ const MAX_EDGE: Record<AssetField, number> = {
   signatureUrl: 480,
 };
 
+const HEX6 = /^#[0-9a-f]{6}$/i;
+
 const FIELD_LABELS_BN: Record<string, string> = {
-  nameBn: 'প্রতিষ্ঠানের নাম (বাংলা)',
-  nameEn: 'Institution name (English)',
+  nameBn: 'প্রতিষ্ঠানের নাম',
+  // Bangla, like every other label on this screen (the users form says
+  // "নাম (ইংরেজি)"). An English label with no lang was read by a Bangla voice.
+  nameEn: 'প্রতিষ্ঠানের নাম (ইংরেজি)',
   shortName: 'সংক্ষিপ্ত নাম',
   logoUrl: 'লোগো',
   faviconUrl: 'ফেভিকন',
   watermarkUrl: 'ওয়াটারমার্ক',
-  signatureUrl: 'স্বাক্ষর',
-  primaryColor: 'প্রধান রং',
+  signatureUrl: 'প্রধান শিক্ষকের স্বাক্ষর',
+  primaryColor: 'মূল রং',
   accentColor: 'সহায়ক রং',
   address: 'ঠিকানা',
   phone: 'ফোন',
@@ -87,6 +107,96 @@ const FIELD_LABELS_BN: Record<string, string> = {
   branding: 'পরিচয়',
 };
 
+/**
+ * The settingRow sub line: where the setting shows up (08 §01 — "প্রতিটি
+ * সেটিংয়ের নিচে লেখা আছে সেটি কোথায় দেখা যাবে"). The drawn rows use the
+ * drawn copy; the rest say only what the code that reads them does —
+ * manifest-build and the SMS sender read shortName, brandedLetterhead reads
+ * the contact block, brandedSignature the head teacher's name. The accent
+ * colour has no single place a reader would recognise, so it has no sub line.
+ */
+const FIELD_HINTS_BN: Partial<Record<string, string>> = {
+  nameBn: 'খোলসে, ছাপার কাগজে ও এসএমএসে এই নামটিই যাবে',
+  nameEn: 'ইংরেজি ছাপা কাগজে এই নামটি বসবে',
+  shortName: 'ফোনে ইনস্টল করা অ্যাপের নামে ও এসএমএসে বসবে',
+  logoUrl: 'বর্গাকার · কমপক্ষে ২৫৬×২৫৬ · PNG',
+  faviconUrl: 'ব্রাউজার ট্যাব ও ইনস্টল করা অ্যাপের আইকন',
+  watermarkUrl: 'ছাপা কাগজের পেছনে হালকা ছাপ',
+  primaryColor: 'শুধু প্রধান বোতাম ও চালু মেনুতে ব্যবহৃত হবে',
+  address: 'ছাপার কাগজের শীর্ষভাগে নামের নিচে বসবে',
+  phone: 'ছাপার কাগজের শীর্ষভাগে ঠিকানার নিচে বসবে',
+  email: 'ছাপার কাগজের শীর্ষভাগে ঠিকানার নিচে বসবে',
+  website: 'ছাপার কাগজের শীর্ষভাগে ঠিকানার নিচে বসবে',
+  headmasterName: 'ছাপার নথিতে স্বাক্ষরের নিচে বসবে',
+  signatureUrl: 'ছাপার নথিতে বসবে · স্বচ্ছ PNG',
+};
+
+const READ_ONLY_SUB = 'আপনি শুধু দেখতে পারবেন — পরিবর্তনের অনুমতি প্রধান শিক্ষক বা আইটি প্রশাসকের।';
+
+const ASSET_FIELDS: ReadonlySet<string> = new Set<AssetField>(
+  ['logoUrl', 'faviconUrl', 'watermarkUrl', 'signatureUrl'],
+);
+const BANGLA = /[ঀ-৿]/;
+
+/** An own property only: the key can come from a server body ("constructor"). */
+function own<T>(table: Readonly<Record<string, T>>, key: string): T | undefined {
+  return Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined;
+}
+
+/**
+ * A BrandingError, said in Bangla beside the field it belongs to.
+ *
+ * ui-core writes its messages in English on purpose: they are also the API's
+ * error text (ops-svc sends `err.message` with a 400), and an API message is
+ * written for a log. This screen showed that text unchanged, so a head teacher
+ * who typed a website without https:// read "website must be a full https://
+ * address" — the field key and the fix both in English. The sentence is chosen
+ * here by FIELD, which ui-core and the server both report reliably. A length
+ * error is told apart from a format error on the same field by measuring the
+ * value that was checked the way ui-core's text() does; the English wording is
+ * only a second signal, so rewording it upstream cannot break this. A message
+ * that is already Bangla (this screen's own "ছবিটি খুব বড়") is kept as it is.
+ */
+export function brandingErrorBn(fieldKey: string, message: string, value?: unknown): string {
+  if (BANGLA.test(message)) return message;
+  const label = own(FIELD_LABELS_BN, fieldKey);
+  const limit = own(LIMITS as Readonly<Record<string, number>>, fieldKey);
+  const measured = typeof value === 'string'
+    ? (ASSET_FIELDS.has(fieldKey) ? value : value.replace(/[\u0000-\u001f\u007f]/g, '')).trim().length
+    : 0;
+  const tooLong = limit !== undefined
+    && (measured > limit || /characters or fewer|exceeds/i.test(message));
+
+  if (label && ASSET_FIELDS.has(fieldKey)) {
+    return tooLong
+      ? `${label} ছবিটি খুব বড় — ছোট ছবি ব্যবহার করুন।`
+      : `${label} হিসেবে PNG, JPEG বা WebP ছবি দিন।`;
+  }
+  if (label && tooLong) {
+    return `${label} সর্বোচ্চ ${bnNum(limit)} অক্ষরের হতে পারে।`;
+  }
+  switch (fieldKey) {
+    case 'nameBn': return 'প্রতিষ্ঠানের নাম দিন — বাংলায় বা ইংরেজিতে, অন্তত একটি।';
+    case 'email': return 'ইমেইল ঠিকানাটি সঠিক নয় — @ চিহ্নসহ পুরো ঠিকানা লিখুন।';
+    case 'phone': return 'ফোন নম্বরটি সঠিক নয় — অঙ্ক দিয়ে পুরো নম্বরটি লিখুন।';
+    case 'website': return 'ওয়েবসাইটের পুরো ঠিকানা দিন — শুরুতে https:// থাকতে হবে।';
+    case 'primaryColor':
+    case 'accentColor':
+      return `${label} হেক্স কোডে লিখুন, যেমন #1A73E8 — অথবা পাশের রঙের ঘর থেকে বেছে নিন।`;
+    case 'branding': return 'প্রতিষ্ঠানের পরিচয় সংরক্ষণ করা যায়নি — ঘরগুলো দেখে আবার চেষ্টা করুন।';
+    default: return label ? `${label} সঠিক নয়।` : 'মানটি সঠিক নয়।';
+  }
+}
+
+/** The value a field had in the object that was validated, for brandingErrorBn. */
+function valueOf(b: Branding, fieldKey: string): unknown {
+  return own(b as unknown as Record<string, unknown>, fieldKey);
+}
+
+function isOffline(): boolean {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
+}
+
 export class BrandingView {
   private readonly o: BrandingViewOptions;
   /** The saved state — what Cancel returns to. */
@@ -95,15 +205,32 @@ export class BrandingView {
   private draft: Branding;
   private busy = false;
   private notice = '';
-  private noticeKind: 'ok' | 'error' | '' = '';
+  private noticeKind: 'ok' | 'error' | 'warn' | '' = '';
   private fieldError: { field: string; message: string } | null = null;
+  /**
+   * The next render takes the person to the field error just raised. It fires
+   * once: a later render, such as a retried load, must not pull focus back to
+   * an error nobody is working on.
+   */
+  private focusError = false;
   private readOnly = false;
+  /**
+   * Nothing cached for this school and the server has not answered yet.
+   * `cachedBranding` hands back the shared DEFAULT_BRANDING object itself
+   * when it has nothing, so identity is the test. The platform's placeholder
+   * identity, editable, is the wrong first frame — a skeleton says "coming".
+   * With a cache the form renders at once, as it always has.
+   */
+  private loading = false;
+  /** The GET failed for a reason other than being offline. */
+  private loadFailed = false;
 
   constructor(options: BrandingViewOptions) {
     this.o = options;
     this.readOnly = options.canManage === false;
     const key = this.tenantKey();
     this.saved = cachedBranding(key);
+    this.loading = this.saved === DEFAULT_BRANDING;
     this.draft = { ...this.saved };
     this.render();
     void this.load();
@@ -114,25 +241,36 @@ export class BrandingView {
   }
 
   private async load(): Promise<void> {
+    let outcome: 'ok' | 'denied' | 'failed' | 'offline' = 'ok';
     try {
       const res = await this.o.auth.authedFetch('/api/v1/ops/branding');
       if (res.status === 403) {
         // A teacher who deep-links here sees the school's identity but no
         // controls. The server is the enforcement; this is orientation.
         this.readOnly = true;
-        this.render();
-        return;
+        outcome = 'denied';
+      } else if (!res.ok) {
+        outcome = 'failed';
+      } else {
+        const body = (await res.json()) as { branding?: unknown };
+        this.saved = parseBranding(body.branding, DEFAULT_BRANDING);
+        this.draft = { ...this.saved };
+        cacheBranding(this.tenantKey(), this.saved);
       }
-      if (!res.ok) return;
-      const body = (await res.json()) as { branding?: unknown };
-      this.saved = parseBranding(body.branding, DEFAULT_BRANDING);
-      this.draft = { ...this.saved };
-      cacheBranding(this.tenantKey(), this.saved);
-      this.render();
     } catch {
-      // Offline: the cached branding is already on screen and editable.
-      // The save will fail loudly if it is still offline when they press it.
+      // Offline: the cached branding is already on screen and editable, and
+      // the shell's offline banner says why. The save will fail loudly if it
+      // is still offline when they press it. Any other failure is said here.
+      outcome = isOffline() ? 'offline' : 'failed';
     }
+    const wasLoading = this.loading;
+    const wasFailed = this.loadFailed;
+    this.loading = false;
+    this.loadFailed = outcome === 'failed';
+    // Offline with the form already up: nothing on screen changes, so do not
+    // rebuild it under someone's cursor.
+    if (outcome === 'offline' && !wasLoading && !wasFailed) return;
+    this.render();
   }
 
   private dirty(): boolean {
@@ -214,9 +352,10 @@ export class BrandingView {
       this.fieldError = {
         field,
         message: err instanceof BrandingError
-          ? err.message
+          ? brandingErrorBn(err.field, err.message)
           : 'ছবিটি পড়া যায়নি। অন্য একটি ছবি চেষ্টা করুন।',
       };
+      this.focusError = true;
       this.render();
     }
   }
@@ -230,11 +369,16 @@ export class BrandingView {
     // Local check first: a field error belongs beside its input, and a
     // round-trip to learn the colour is malformed is a round-trip wasted.
     let candidate: Branding;
+    const input = this.forParse();
     try {
-      candidate = parseBranding(this.draft, this.saved);
+      candidate = parseBranding(input, this.saved);
     } catch (err) {
       if (err instanceof BrandingError) {
-        this.fieldError = { field: err.field, message: err.message };
+        this.fieldError = {
+          field: err.field,
+          message: brandingErrorBn(err.field, err.message, valueOf(input, err.field)),
+        };
+        this.focusError = true;
         this.render();
         return;
       }
@@ -243,6 +387,7 @@ export class BrandingView {
 
     this.busy = true;
     this.render();
+    let saved = false;
     try {
       const res = await this.o.auth.authedFetch('/api/v1/ops/branding', {
         method: 'PUT',
@@ -257,7 +402,15 @@ export class BrandingView {
           this.notice = 'পরিচয় পরিবর্তনের অনুমতি আপনার নেই।';
           this.noticeKind = 'error';
         } else if (body.field) {
-          this.fieldError = { field: body.field, message: body.message ?? 'মানটি সঠিক নয়।' };
+          // The server runs the same parseBranding, so its 400 carries the
+          // same English sentence; it is said in Bangla the same way.
+          const key = String(body.field);
+          this.fieldError = {
+            field: key,
+            message: brandingErrorBn(key, typeof body.message === 'string' ? body.message : '',
+              valueOf(candidate, key)),
+          };
+          this.focusError = true;
         } else {
           this.notice = serverMessage(body, res.status, 'সংরক্ষণ করা যায়নি। আবার চেষ্টা করুন।', 'প্রতিষ্ঠানের পরিচয়');
           this.noticeKind = 'error';
@@ -269,6 +422,7 @@ export class BrandingView {
       // must not keep believing in a value the database does not hold.
       this.saved = parseBranding(body.branding, DEFAULT_BRANDING);
       this.draft = { ...this.saved };
+      this.loadFailed = false;
       cacheBranding(this.tenantKey(), this.saved);
       // Repaint the whole app immediately: the point of this screen is
       // that the change is visible, and making someone reload to see their
@@ -276,12 +430,16 @@ export class BrandingView {
       applyBranding(this.o.doc, this.saved, { tenantKey: this.tenantKey() });
       this.notice = 'সংরক্ষিত হয়েছে।';
       this.noticeKind = 'ok';
+      saved = true;
     } catch {
+      // Offline is a caution, not an error (Foundations §04): the draft is
+      // intact and the same button saves it once the connection is back.
       this.notice = 'সংযোগ নেই — সংরক্ষণ করা যায়নি।';
-      this.noticeKind = 'error';
+      this.noticeKind = 'warn';
     } finally {
       this.busy = false;
       this.render();
+      if (saved) this.focusOutcome();
     }
   }
 
@@ -291,106 +449,147 @@ export class BrandingView {
     this.notice = 'পরিবর্তন বাতিল করা হয়েছে।';
     this.noticeKind = 'ok';
     this.render();
+    this.focusOutcome();
+  }
+
+  /**
+   * After a save or a cancel that worked, focus goes to the note saying so.
+   *
+   * Both leave nothing to save, so the rebuilt সংরক্ষণ and বাতিল come back
+   * DISABLED: the shell's focus keeper waits for them rather than parking on
+   * one, and focus stayed on <body>. The next Tab started from the top of the
+   * page, and a screen reader heard nothing, because a live region inserted
+   * already holding its text is often not announced. Only when focus is
+   * actually lost: someone who clicked into a field during a slow save keeps
+   * their place. A microtask later, so the keeper — whose MutationObserver
+   * callback was queued by the render — has put that field back first.
+   */
+  private focusOutcome(): void {
+    queueMicrotask(() => {
+      const note = this.o.root.querySelector<HTMLElement>('.ui-success-note');
+      if (!note || !this.o.root.isConnected || !focusIsLost(this.o.doc)) return;
+      note.tabIndex = -1;
+      note.focus();
+    });
+  }
+
+  /**
+   * The draft as it is validated and sent. A phone number typed on a Bangla
+   * keyboard arrives in Bangla digits, and ui-core's phone rule (Latin digits
+   * only) refused a correct number as invalid. Identifiers are stored Latin;
+   * format.ts: input accepts both numeral systems and normalises to Latin.
+   */
+  private forParse(): Branding {
+    return { ...this.draft, phone: toLatinDigits(this.draft.phone) };
   }
 
   // ── Rendering ─────────────────────────────────────────────────────────
 
-  private card(titleBn: string, hintBn?: string): HTMLElement {
+  /** Replace a node's text with the same text, its numbers in the `.n` face (R6). */
+  private numFill(node: HTMLElement, text = node.textContent ?? ''): void {
+    if (!hasDigit(text)) { node.textContent = text; return; }
+    node.textContent = '';
+    append(node, ...numText(this.o.doc, text));
+  }
+
+  /** The inset group row (08 §02 "নোটিশ ও এসএমএস"). */
+  private group(parent: HTMLElement, titleBn: string): void {
+    parent.append(el(this.o.doc, 'h2', { className: 'brand-group', text: titleBn }));
+  }
+
+  /** The settingRow's left column: title, then where the setting shows up. */
+  private rowText(titleId: string, title: string, sub?: string): HTMLElement {
     const d = this.o.doc;
-    const card = d.createElement('section');
-    card.className = 'card brand-card';
-    const h = d.createElement('h2');
-    h.className = 'brand-card-title';
-    h.textContent = titleBn;
-    card.append(h);
-    if (hintBn) {
-      const p = d.createElement('p');
-      p.className = 'att-sub';
-      p.textContent = hintBn;
-      card.append(p);
-    }
-    return card;
+    const text = el(d, 'div', { className: 'brand-row-text' },
+      el(d, 'p', { className: 'brand-row-title', attrs: { id: titleId } }, ...numText(d, title)));
+    if (sub) append(text, el(d, 'p', { className: 'brand-row-sub' }, ...numText(d, sub)));
+    return text;
+  }
+
+  /**
+   * Put a field() into the settingRow shape: its label and helper move into
+   * one text column ahead of the control, so the row reads title → where it
+   * shows up → control in the DOM as well as on screen (13 Responsive ০৮
+   * stacks them in exactly that order). Nothing is re-created — `label[for]`,
+   * `aria-describedby` and the error node are the ones field() wired.
+   */
+  private shapeRow(f: Field): void {
+    const label = f.root.querySelector('.ui-field-label');
+    const help = f.root.querySelector('.ui-field-help');
+    f.root.prepend(el(this.o.doc, 'div', { className: 'brand-row-text' }, label, help));
+    f.root.querySelector('.ui-field-error')?.setAttribute('role', 'alert');
   }
 
   private textField(
     parent: HTMLElement,
-    field: keyof Branding,
-    opts: { multiline?: boolean; placeholder?: string; type?: string } = {},
+    key: keyof Branding,
+    opts: { kind?: 'text' | 'textarea' | 'tel' | 'email'; placeholder?: string } = {},
   ): void {
-    const d = this.o.doc;
-    const label = d.createElement('label');
-    label.className = 'login-label brand-field';
-    const span = d.createElement('span');
-    span.textContent = FIELD_LABELS_BN[field] ?? field;
-    label.append(span);
-
-    const input = opts.multiline
-      ? d.createElement('textarea')
-      : d.createElement('input');
-    input.className = 'login-input';
-    if (!opts.multiline && input instanceof HTMLInputElement) {
-      input.type = opts.type ?? 'text';
-      if (opts.placeholder) input.placeholder = opts.placeholder;
-    }
-    (input as HTMLInputElement | HTMLTextAreaElement).value = String(this.draft[field] ?? '');
-    input.disabled = this.readOnly;
-    input.addEventListener('input', () => {
-      this.draft[field] = (input as HTMLInputElement).value as Branding[typeof field];
-      this.fieldError = null;
-      this.paintPreview();
-      this.syncControls();
+    const f = field(this.o.doc, {
+      label: FIELD_LABELS_BN[key] ?? key,
+      name: key,
+      kind: opts.kind ?? 'text',
+      value: String(this.draft[key] ?? ''),
+      helper: FIELD_HINTS_BN[key],
+      placeholder: opts.placeholder,
+      disabled: this.readOnly,
+      // ui-core's cap, enforced while typing, so the length error is one a
+      // person rarely meets rather than one they meet after pressing save.
+      attrs: { maxlength: own(LIMITS as Readonly<Record<string, number>>, key) },
+      className: 'brand-row',
+      onInput: (value) => {
+        this.draft[key] = value as Branding[typeof key];
+        this.fieldError = null;
+        this.paintPreview();
+        this.syncControls();
+      },
     });
-    label.append(input);
-
-    if (this.fieldError?.field === field) {
-      const err = d.createElement('p');
-      err.className = 'login-error';
-      err.setAttribute('role', 'alert');
-      err.textContent = this.fieldError.message;
-      label.append(err);
-    }
-    parent.append(label);
+    this.shapeRow(f);
+    f.root.dataset.brandField = key;
+    if (this.fieldError?.field === key) setFieldError(f.root, this.fieldError.message);
+    parent.append(f.root);
   }
 
-  private colorField(parent: HTMLElement, field: 'primaryColor' | 'accentColor'): void {
+  private colorField(parent: HTMLElement, key: 'primaryColor' | 'accentColor'): void {
     const d = this.o.doc;
-    const row = d.createElement('div');
-    row.className = 'brand-color-row';
+    const label = FIELD_LABELS_BN[key];
 
-    const label = d.createElement('label');
-    label.className = 'login-label brand-field';
-    const span = d.createElement('span');
-    span.textContent = FIELD_LABELS_BN[field];
-    label.append(span);
-
-    const swatchWrap = d.createElement('div');
-    swatchWrap.className = 'brand-color-inputs';
-
-    const picker = d.createElement('input');
-    picker.type = 'color';
-    picker.className = 'brand-color-swatch';
-    picker.value = /^#[0-9a-f]{6}$/i.test(this.draft[field]) ? this.draft[field] : '#000000';
-    picker.disabled = this.readOnly;
-
-    const hex = d.createElement('input');
-    hex.type = 'text';
-    hex.className = 'login-input brand-color-hex';
-    hex.value = this.draft[field];
-    hex.disabled = this.readOnly;
+    // The native picker, drawn as the design's selected swatch.
+    const picker = el(d, 'input', {
+      className: 'brand-color-swatch',
+      attrs: { type: 'color', 'aria-label': `${label} বাছুন`, disabled: this.readOnly },
+    });
+    picker.value = HEX6.test(this.draft[key]) ? this.draft[key] : '#000000';
 
     const sync = (value: string, alsoSet: HTMLInputElement) => {
-      this.draft[field] = value;
-      if (/^#[0-9a-f]{6}$/i.test(value)) alsoSet.value = value;
+      this.draft[key] = value;
+      if (HEX6.test(value)) alsoSet.value = value;
       this.fieldError = null;
       this.paintPreview();
       this.syncControls();
     };
-    picker.addEventListener('input', () => sync(picker.value, hex));
-    hex.addEventListener('input', () => sync(hex.value.trim(), picker));
 
-    swatchWrap.append(picker, hex);
-    label.append(swatchWrap);
-    row.append(label);
+    const f = field(d, {
+      label,
+      name: key,
+      kind: 'text',
+      value: this.draft[key],
+      helper: FIELD_HINTS_BN[key],
+      disabled: this.readOnly,
+      className: 'brand-row brand-color-row',
+      onInput: (value) => sync(value.trim(), picker),
+    });
+    const hex = f.input as HTMLInputElement;
+    // A colour code is an identifier: Latin, in the numeral face (R6).
+    hex.classList.add('brand-color-hex', 'n', 'is-num');
+    picker.addEventListener('input', () => {
+      clearFieldError(f.root);
+      sync(picker.value, hex);
+    });
+    f.root.querySelector('.ui-field-control')?.prepend(picker);
+    this.shapeRow(f);
+    f.root.dataset.brandField = key;
+    if (this.fieldError?.field === key) setFieldError(f.root, this.fieldError.message);
 
     // Contrast warning. A brand colour that cannot carry white text turns
     // every primary button in the product into unreadable text at once —
@@ -400,15 +599,13 @@ export class BrandingView {
     // typing must not trigger a re-render (that would move focus out of
     // the input mid-keystroke) and a warning that only appears after a
     // save is a warning that arrives too late to be advice.
-    if (field === 'primaryColor') {
-      const warn = d.createElement('p');
-      warn.className = 'brand-warn';
-      warn.setAttribute('role', 'status');
-      warn.setAttribute('data-warn-for', field);
-      warn.hidden = true;
-      row.append(warn);
+    if (key === 'primaryColor') {
+      f.root.append(el(d, 'p', {
+        className: 'brand-warn',
+        attrs: { role: 'status', 'data-warn-for': key, hidden: true },
+      }));
     }
-    parent.append(row);
+    parent.append(f.root);
   }
 
   /**
@@ -422,262 +619,325 @@ export class BrandingView {
   private syncControls(): void {
     const root = this.o.root;
 
-    const buttons = root.querySelectorAll<HTMLButtonElement>('.brand-actions button');
+    const buttons = root.querySelectorAll<HTMLButtonElement>('button.brand-action');
     const dirty = this.dirty();
     for (const b of buttons) b.disabled = this.busy || !dirty;
 
     const warn = root.querySelector<HTMLElement>('[data-warn-for="primaryColor"]');
     if (!warn) return;
     const c = this.draft.primaryColor;
-    if (/^#[0-9a-f]{6}$/i.test(c) && !meetsAaOnWhiteText(c)) {
-      warn.textContent =
-        `এই রঙে সাদা লেখা পড়া কঠিন (কনট্রাস্ট ${contrastRatio(c, '#ffffff').toFixed(1)}:১, `
-        + 'প্রয়োজন ৪.৫:১)। গাঢ় রং বেছে নিন।';
+    if (HEX6.test(c) && !meetsAaOnWhiteText(c)) {
+      this.numFill(warn,
+        `এই রঙে সাদা লেখা পড়া কঠিন (কনট্রাস্ট ${bnNum(contrastRatio(c, '#ffffff').toFixed(1))}:১, `
+        + 'প্রয়োজন ৪.৫:১)। গাঢ় রং বেছে নিন।');
       warn.hidden = false;
     } else {
       warn.hidden = true;
     }
   }
 
-  private assetField(parent: HTMLElement, field: AssetField, hintBn: string): void {
+  private assetField(parent: HTMLElement, key: AssetField): void {
     const d = this.o.doc;
-    const block = d.createElement('div');
-    block.className = 'brand-asset';
+    const titleId = uid('brand');
+    const value = this.draft[key];
+    const error = this.fieldError?.field === key ? this.fieldError.message : '';
+    const errId = error ? uid('brand-err') : '';
+    // The buttons are this row's controls, so they carry the error in their
+    // description, the way setFieldError wires an input's.
+    const describedBy = [titleId, errId].filter(Boolean).join(' ');
+    const row = el(d, 'div', { className: 'brand-row brand-asset-row', data: { brandField: key } },
+      this.rowText(titleId, FIELD_LABELS_BN[key], FIELD_HINTS_BN[key]));
 
-    const head = d.createElement('div');
-    head.className = 'brand-asset-head';
-    const name = d.createElement('span');
-    name.className = 'brand-asset-name';
-    name.textContent = FIELD_LABELS_BN[field];
-    head.append(name);
-    block.append(head);
-
-    const hint = d.createElement('p');
-    hint.className = 'att-sub';
-    hint.textContent = hintBn;
-    block.append(hint);
-
-    const preview = d.createElement('div');
-    preview.className = 'brand-asset-preview';
-    if (this.draft[field]) {
-      const img = d.createElement('img');
-      img.src = this.draft[field];
-      img.alt = '';
-      preview.append(img);
-    } else {
-      const empty = d.createElement('span');
-      empty.className = 'brand-asset-empty';
-      empty.textContent = 'নেই';
-      preview.append(empty);
+    const control = el(d, 'div', { className: 'brand-row-control' });
+    if (key === 'logoUrl') {
+      // The logo row always shows the mark: the image, or the initial on the
+      // draft's own colour — what the shell and the login screen will draw.
+      control.append(this.logoMark(this.safeDraft()));
+    } else if (value) {
+      control.append(el(d, 'span', { className: 'brand-thumb has-img' },
+        el(d, 'img', { attrs: { src: value, alt: '' } })));
+    } else if (this.readOnly) {
+      control.append(el(d, 'span', { className: 'brand-asset-empty', text: 'নেই' }));
     }
-    block.append(preview);
-
     if (!this.readOnly) {
-      const actions = d.createElement('div');
-      actions.className = 'action-row';
-      const pick = d.createElement('button');
-      pick.type = 'button';
-      pick.className = 'btn-secondary btn-small';
-      pick.textContent = this.draft[field] ? 'পরিবর্তন করুন' : 'আপলোড করুন';
-      pick.addEventListener('click', () => { void this.pickAsset(field); });
-      actions.append(pick);
-      if (this.draft[field]) {
-        const clear = d.createElement('button');
-        clear.type = 'button';
-        clear.className = 'btn-ghost btn-small';
-        clear.textContent = 'সরান';
-        clear.addEventListener('click', () => { this.set(field, ''); this.render(); });
-        actions.append(clear);
+      control.append(button(d, {
+        label: value ? 'বদলান' : 'আপলোড',
+        variant: 'secondary',
+        size: 'sm',
+        attrs: { 'aria-describedby': describedBy },
+        onClick: () => { void this.pickAsset(key); },
+      }));
+      if (value) {
+        control.append(button(d, {
+          label: 'সরান',
+          variant: 'ghost',
+          size: 'sm',
+          attrs: { 'aria-describedby': describedBy },
+          onClick: () => { this.set(key, ''); this.render(); },
+        }));
       }
-      block.append(actions);
     }
+    row.append(control);
 
-    if (this.fieldError?.field === field) {
-      const err = d.createElement('p');
-      err.className = 'login-error';
-      err.setAttribute('role', 'alert');
-      err.textContent = this.fieldError.message;
-      block.append(err);
+    if (error) {
+      // tabindex -1: the focus target of last resort when the row has no
+      // enabled button to take the person to (see revealFieldError).
+      row.append(el(d, 'p', {
+        className: 'ui-field-error',
+        attrs: { id: errId, role: 'alert', tabindex: '-1' },
+      }, ...numText(d, error)));
     }
-    parent.append(block);
+    parent.append(row);
   }
 
   /**
-   * Repaint only the preview panel. Called on every keystroke, so it must
-   * not rebuild the form — doing that would move focus out of the input
-   * being typed into after each character.
+   * "ছাপার কাগজের শীর্ষভাগ" — the drawn row whose "দেখুন" shows the
+   * letterhead. The letterhead is not a field of its own (it is built from
+   * the name, logo and contact rows), so the button brings the live sample
+   * below into view and moves focus to it. Nothing is fetched or opened.
    */
-  private paintPreview(): void {
-    const host = this.o.root.querySelector<HTMLElement>('[data-brand-preview]');
-    if (!host) return;
-    host.textContent = '';
-    host.append(this.previewContent());
+  private letterheadRow(parent: HTMLElement, sample: HTMLElement): void {
+    const d = this.o.doc;
+    const titleId = uid('brand');
+    parent.append(el(d, 'div', { className: 'brand-row' },
+      this.rowText(titleId, 'ছাপার কাগজের শীর্ষভাগ', 'প্রগতি পত্র, রসিদ ও প্রবেশপত্রের উপরে বসবে'),
+      el(d, 'div', { className: 'brand-row-control' },
+        button(d, {
+          label: 'দেখুন',
+          variant: 'secondary',
+          size: 'sm',
+          attrs: { 'aria-describedby': titleId },
+          onClick: () => sample.focus(),
+        }))));
   }
 
-  private previewContent(): HTMLElement {
-    const d = this.o.doc;
-    const wrap = d.createElement('div');
-
-    // Safe to preview even mid-edit: a half-typed colour must not throw and
-    // must not be written into a stylesheet.
-    let safe: Branding;
+  /** The draft as it can safely be drawn: a half-typed colour must not throw. */
+  private safeDraft(): Branding {
     try {
-      safe = parseBranding(this.draft, this.saved);
+      return parseBranding(this.forParse(), this.saved);
     } catch {
-      safe = this.saved;
+      return this.saved;
     }
+  }
 
-    // 1 — the app's own chrome.
-    const shellRow = d.createElement('div');
-    shellRow.className = 'brand-preview-shell';
-    shellRow.style.setProperty('--preview-primary', safe.primaryColor);
-    const mark = d.createElement('span');
-    mark.className = 'brand-preview-mark';
+  /** The 44px mark in the logo row: the logo, or the initial on the brand fill. */
+  private logoMark(safe: Branding): HTMLElement {
+    const d = this.o.doc;
+    const mark = el(d, 'span', {
+      className: safe.logoUrl ? 'brand-thumb has-img' : 'brand-thumb is-mark',
+      attrs: { 'data-brand-mark': '', 'aria-hidden': 'true' },
+    });
     if (safe.logoUrl) {
-      const img = d.createElement('img');
-      img.src = safe.logoUrl;
-      img.alt = '';
-      mark.append(img);
+      mark.append(el(d, 'img', { attrs: { src: safe.logoUrl, alt: '' } }));
     } else {
-      mark.textContent = [...brandName(safe)][0] ?? '';
+      mark.style.setProperty('--preview-primary', safe.primaryColor);
+      // The label colour the app itself will put on this fill.
+      mark.style.setProperty('--preview-on-primary', onBrandFill(safe.primaryColor));
+      this.numFill(mark, [...brandName(safe)][0] ?? '');
     }
-    const nm = d.createElement('span');
-    nm.className = 'brand-preview-name';
-    nm.textContent = brandName(safe);
-    const btn = d.createElement('span');
-    btn.className = 'brand-preview-btn';
-    btn.textContent = 'প্রধান বোতাম';
-    shellRow.append(mark, nm, btn);
+    return mark;
+  }
 
-    const shellCap = d.createElement('p');
-    shellCap.className = 'brand-preview-cap';
-    shellCap.textContent = 'অ্যাপের শীর্ষ বার ও বোতাম';
+  /**
+   * Repaint only the sample and the logo mark. Called on every keystroke, so
+   * it must not rebuild the form — doing that would move focus out of the
+   * input being typed into after each character.
+   */
+  private paintPreview(): void {
+    const safe = this.safeDraft();
+    const host = this.o.root.querySelector<HTMLElement>('[data-brand-preview]');
+    if (host) {
+      host.textContent = '';
+      host.append(this.previewContent(safe));
+    }
+    this.o.root.querySelector('[data-brand-mark]')?.replaceWith(this.logoMark(safe));
+  }
 
-    // 2 — the letterhead, rendered by the SAME function the documents use.
-    const paper = d.createElement('div');
-    paper.className = 'brand-preview-paper';
+  private previewContent(safe: Branding): HTMLElement {
+    const d = this.o.doc;
+
+    // The letterhead, rendered by the SAME function the documents use.
+    const paper = el(d, 'div', { className: 'brand-preview-paper' });
     paper.innerHTML = brandedLetterhead(safe);
-    paper.style.setProperty('--doc-primary', safe.primaryColor);
+    // brandedLetterhead heads a printed page with <h1>; inside this screen
+    // that would be a second h1 beside the page title. Same class, same
+    // text — the heading level is the only thing that changes.
+    const org = paper.querySelector('h1.doc-org');
+    if (org) org.replaceWith(el(d, 'p', { className: 'doc-org', text: org.textContent ?? '' }));
+    for (const node of paper.querySelectorAll<HTMLElement>('.doc-org, .doc-addr, .doc-contact')) {
+      this.numFill(node);
+    }
     if (safe.watermarkUrl) {
-      const wm = d.createElement('div');
-      wm.className = 'brand-preview-watermark';
+      const wm = el(d, 'div', { className: 'brand-preview-watermark' });
       wm.style.backgroundImage = `url("${safe.watermarkUrl}")`;
       paper.prepend(wm);
     }
-    const sigRow = d.createElement('div');
-    sigRow.className = 'brand-preview-sig';
+    const sigRow = el(d, 'div', { className: 'brand-preview-sig' });
     if (safe.signatureUrl) {
-      const img = d.createElement('img');
-      img.src = safe.signatureUrl;
-      img.alt = '';
-      sigRow.append(img);
+      sigRow.append(el(d, 'img', { attrs: { src: safe.signatureUrl, alt: '' } }));
     }
-    const sigName = d.createElement('div');
-    sigName.className = 'brand-preview-signame';
-    sigName.textContent = safe.headmasterName || '—';
+    const sigName = el(d, 'div', { className: 'brand-preview-signame' });
+    this.numFill(sigName, safe.headmasterName || '—');
     sigRow.append(sigName);
     paper.append(sigRow);
+    return paper;
+  }
 
-    const paperCap = d.createElement('p');
-    paperCap.className = 'brand-preview-cap';
-    paperCap.textContent = 'রসিদ ও সনদের শীর্ষভাগ';
-
-    wrap.append(shellCap, shellRow, paperCap, paper);
-    return wrap;
+  /** A save or load that did not go through: an inline strip, words beside the tone. */
+  private noticeStrip(tone: 'danger' | 'warn', text: string, action?: HTMLElement): HTMLElement {
+    const d = this.o.doc;
+    return el(d, 'div', { className: 'brand-notice', data: { tone } },
+      icon(d, tone === 'warn' ? 'wifi-off' : 'alert-circle', 'ui-icon brand-notice-glyph'),
+      el(d, 'p', { className: 'brand-notice-text', attrs: { role: 'alert' } }, ...numText(d, text)),
+      action);
   }
 
   private render(): void {
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';
+    const dirty = this.dirty();
+    const editable = !this.readOnly && !this.loading;
+    const focusError = this.focusError;
+    this.focusError = false;
 
-    // .att-header is this app's sticky screen header — the same element
-    // roster, fees and every other view uses. Reaching for it rather than
-    // a new class is what keeps one design system instead of a dozen
-    // one-screen ones.
-    const head = d.createElement('header');
-    head.className = 'att-header brand-head';
-    const h1 = d.createElement('h1');
-    h1.textContent = 'প্রতিষ্ঠানের পরিচয়';
-    const sub = d.createElement('p');
-    sub.className = 'att-sub';
-    sub.textContent = this.readOnly
-      ? 'আপনি শুধু দেখতে পারবেন — পরিবর্তনের অনুমতি প্রধান শিক্ষক বা আইটি প্রশাসকের।'
-      : 'এখানে যা দেন, শিক্ষার্থী-অভিভাবক-শিক্ষক সবাই সেটিই দেখবে — লগইন পর্দা, অ্যাপ ও ছাপা কাগজে।';
-    head.append(h1, sub);
-    root.append(head);
+    // The bar: the title and the one primary. "বাতিল" is not drawn but is
+    // what returns the draft to the saved state, so it stays, secondary.
+    root.append(pageHeader(d, {
+      title: 'প্রতিষ্ঠানের পরিচয়',
+      subtitle: this.readOnly ? READ_ONLY_SUB : undefined,
+      className: 'brand-header',
+      actions: editable
+        ? [button(d, {
+          label: 'বাতিল',
+          variant: 'secondary',
+          size: 'sm',
+          className: 'brand-action',
+          disabled: this.busy || !dirty,
+          onClick: () => this.cancel(),
+        })]
+        : undefined,
+      primary: editable
+        ? button(d, {
+          label: this.busy ? 'সংরক্ষণ হচ্ছে…' : 'সংরক্ষণ',
+          variant: 'primary',
+          size: 'sm',
+          className: 'brand-action',
+          busy: this.busy,
+          disabled: this.busy || !dirty,
+          onClick: () => { void this.save(); },
+        })
+        : undefined,
+    }));
 
+    if (this.loadFailed) {
+      const retry = button(d, {
+        label: 'আবার চেষ্টা করুন',
+        variant: 'ghost',
+        size: 'sm',
+        className: 'brand-notice-action',
+        onClick: () => { setBusy(retry, true); void this.load(); },
+      });
+      root.append(this.noticeStrip('danger', 'প্রতিষ্ঠানের পরিচয় আনা গেল না।', retry));
+    }
     if (this.notice) {
-      const n = d.createElement('p');
-      n.className = this.noticeKind === 'error' ? 'login-error' : 'brand-ok';
-      n.setAttribute('role', this.noticeKind === 'error' ? 'alert' : 'status');
-      n.textContent = this.notice;
-      root.append(n);
+      if (this.noticeKind === 'ok') {
+        const note = successNote(d, this.notice);
+        note.setAttribute('role', 'status');
+        root.append(note);
+      } else {
+        root.append(this.noticeStrip(this.noticeKind === 'warn' ? 'warn' : 'danger', this.notice));
+      }
     }
 
-    const layout = d.createElement('div');
-    layout.className = 'brand-layout';
-
-    // ── Editing column ──────────────────────────────────────────────
-    const form = d.createElement('div');
-    form.className = 'brand-form';
-
-    const idCard = this.card('নাম', 'বাংলা নামটি সর্বত্র প্রধান; ইংরেজিটি ছাপা কাগজে ব্যবহৃত হয়।');
-    this.textField(idCard, 'nameBn');
-    this.textField(idCard, 'nameEn');
-    this.textField(idCard, 'shortName', { placeholder: 'ছোট জায়গার জন্য' });
-    form.append(idCard);
-
-    const markCard = this.card('লোগো ও ছবি', 'ছবি স্বয়ংক্রিয়ভাবে ছোট করে নেওয়া হবে।');
-    this.assetField(markCard, 'logoUrl', 'অ্যাপ, লগইন পর্দা ও প্রতিটি ছাপা কাগজের শীর্ষে।');
-    this.assetField(markCard, 'faviconUrl', 'ব্রাউজার ট্যাব ও ইনস্টল করা অ্যাপের আইকন।');
-    this.assetField(markCard, 'watermarkUrl', 'ছাপা কাগজের পেছনে হালকা ছাপ।');
-    this.assetField(markCard, 'signatureUrl', 'রসিদ ও সনদে অনুমোদিত স্বাক্ষর।');
-    form.append(markCard);
-
-    const colorCard = this.card('রং', 'প্রধান রং বোতাম ও সক্রিয় মেনুতে ব্যবহৃত হয়।');
-    this.colorField(colorCard, 'primaryColor');
-    this.colorField(colorCard, 'accentColor');
-    form.append(colorCard);
-
-    const contactCard = this.card('যোগাযোগ ও স্বাক্ষর', 'এগুলো কেবল ছাপা কাগজে দেখা যায়।');
-    this.textField(contactCard, 'address', { multiline: true });
-    this.textField(contactCard, 'phone', { placeholder: '+8801XXXXXXXXX' });
-    this.textField(contactCard, 'email', { type: 'email' });
-    this.textField(contactCard, 'website', { placeholder: 'https://…' });
-    this.textField(contactCard, 'headmasterName');
-    form.append(contactCard);
-
-    if (!this.readOnly) {
-      const actions = d.createElement('div');
-      actions.className = 'action-row brand-actions';
-      const save = d.createElement('button');
-      save.type = 'button';
-      save.className = 'btn-primary';
-      save.textContent = this.busy ? 'সংরক্ষণ হচ্ছে…' : 'সংরক্ষণ করুন';
-      save.disabled = this.busy || !this.dirty();
-      save.addEventListener('click', () => { void this.save(); });
-      const cancel = d.createElement('button');
-      cancel.type = 'button';
-      cancel.className = 'btn-secondary';
-      cancel.textContent = 'বাতিল';
-      cancel.disabled = this.busy || !this.dirty();
-      cancel.addEventListener('click', () => this.cancel());
-      actions.append(save, cancel);
-      form.append(actions);
+    const panel = el(d, 'section', { className: 'brand-panel' });
+    root.append(panel);
+    if (this.loading) {
+      panel.append(skeleton(d, 6));
+      return;
     }
 
-    // ── Preview column ──────────────────────────────────────────────
-    const previewCard = this.card('পূর্বরূপ');
-    const previewHost = d.createElement('div');
-    previewHost.setAttribute('data-brand-preview', '');
-    previewHost.append(this.previewContent());
-    previewCard.append(previewHost);
+    // The sample is built first so the letterhead row can point at it.
+    const sampleId = uid('brand-sample');
+    const host = el(d, 'div', { attrs: { 'data-brand-preview': '' } }, this.previewContent(this.safeDraft()));
+    const sample = el(d, 'div', {
+      className: 'brand-sample',
+      attrs: { tabindex: '-1', role: 'group', 'aria-labelledby': sampleId },
+    },
+    el(d, 'h2', { className: 'brand-sample-label', text: 'ছাপার নমুনা', attrs: { id: sampleId } }),
+    host);
 
-    layout.append(form, previewCard);
-    root.append(layout);
+    const rows = el(d, 'div', { className: 'brand-rows' });
+
+    this.group(rows, 'নাম');
+    this.textField(rows, 'nameBn');
+    this.textField(rows, 'nameEn');
+    this.textField(rows, 'shortName', { placeholder: 'ছোট জায়গার জন্য' });
+
+    this.group(rows, 'লোগো ও ছবি');
+    this.assetField(rows, 'logoUrl');
+    this.assetField(rows, 'faviconUrl');
+    this.assetField(rows, 'watermarkUrl');
+
+    this.group(rows, 'রং');
+    this.colorField(rows, 'primaryColor');
+    this.colorField(rows, 'accentColor');
+
+    // The drawn order continues: the letterhead row, then the paper-only
+    // contact block, and the signature last, as the design ends.
+    this.group(rows, 'যোগাযোগ ও স্বাক্ষর');
+    this.letterheadRow(rows, sample);
+    this.textField(rows, 'address', { kind: 'textarea' });
+    this.textField(rows, 'phone', { kind: 'tel', placeholder: '+8801XXXXXXXXX' });
+    this.textField(rows, 'email', { kind: 'email' });
+    this.textField(rows, 'website', { placeholder: 'https://…' });
+    this.textField(rows, 'headmasterName');
+    this.assetField(rows, 'signatureUrl');
+
+    panel.append(rows, sample);
     // The contrast advice is toggled rather than conditionally built, so
     // it has to be evaluated once after every full render too.
     this.syncControls();
+
+    const errorRow = this.fieldErrorRow(rows);
+    // A field error with no row of its own (the whole object refused, or a
+    // key this screen does not edit) is still said, beside the header's
+    // "সংরক্ষণ" that raised it, so a save never ends in silence.
+    if (this.fieldError && !errorRow) {
+      panel.before(this.noticeStrip('danger', this.fieldError.message));
+    }
+    if (focusError && errorRow) this.revealFieldError(errorRow);
+  }
+
+  /** The row that shows the current field error, if this screen has one. */
+  private fieldErrorRow(rows: HTMLElement): HTMLElement | null {
+    const key = this.fieldError?.field;
+    if (!key) return null;
+    // Matched by dataset, not by a selector built from the key: the key can
+    // come from the server's response body.
+    return [...rows.querySelectorAll<HTMLElement>('[data-brand-field]')]
+      .find((n) => n.dataset.brandField === key) ?? null;
+  }
+
+  /**
+   * Take the person to the field error just raised.
+   *
+   * The one "সংরক্ষণ" is in the page header, and most errors belong to rows
+   * far below it: the contact block, the colours. Without this, pressing save
+   * on a long form showed nothing on screen and left focus on the body, so
+   * the save looked dead. It does what ui/field.ts reportErrors() does: focus
+   * the failing control. An asset row has no input, so its focus goes to the
+   * row's first button, whose description now carries the error. The row is
+   * centred first, so the message under the control is in view as well as
+   * the control.
+   */
+  private revealFieldError(row: HTMLElement): void {
+    if (!this.o.root.isConnected) return;
+    const target = row.querySelector<HTMLElement>('[aria-invalid="true"]')
+      ?? row.querySelector<HTMLElement>('button:not([disabled])')
+      ?? row.querySelector<HTMLElement>('.ui-field-error');
+    const canScroll = typeof row.scrollIntoView === 'function';
+    if (canScroll) row.scrollIntoView({ block: 'center' });
+    target?.focus({ preventScroll: canScroll });
   }
 }

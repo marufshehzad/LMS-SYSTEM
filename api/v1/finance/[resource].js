@@ -1967,6 +1967,231 @@ async function record(db, ctx, req) {
   }, { write: true });
 }
 
+// packages/server-core/src/csv.ts
+var CSV_BOM = "\uFEFF";
+var FORMULA_LEAD = /^[=+\-@\t\r]/;
+var PLAIN_NUMBER = /^[+-]?\d+(?:\.\d+)?$/;
+function csvCell(value) {
+  let v = value;
+  if (FORMULA_LEAD.test(v) && !PLAIN_NUMBER.test(v)) v = `'${v}`;
+  return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+function csvLine(values) {
+  return `${values.map(csvCell).join(",")}\r
+`;
+}
+
+// packages/server-core/src/csv-response.ts
+function beginCsvDownload(res, cors, o) {
+  res.writeHead(200, {
+    ...cors,
+    "Content-Type": "text/csv; charset=utf-8",
+    // `attachment` so the browser saves it instead of rendering a wall of
+    // text, and a plain ASCII filename so no edge has to guess an encoding.
+    "Content-Disposition": `attachment; filename="${o.filename}"`,
+    // Belt and braces with the service worker's network-only rule: a proxy
+    // between the school and us must not hold this either.
+    "Cache-Control": "no-store, private, max-age=0",
+    "Pragma": "no-cache",
+    // The file is a download, never a document to be framed or sniffed.
+    "X-Content-Type-Options": "nosniff"
+  });
+  res.write(CSV_BOM);
+  res.write(csvLine(o.headers));
+}
+function writeCsvRow(res, values) {
+  res.write(csvLine(values));
+}
+function csvFilename(dataset, on = /* @__PURE__ */ new Date()) {
+  const d = on.toISOString().slice(0, 10);
+  return `${dataset}-${d}.csv`;
+}
+
+// packages/server-core/src/export-dataset.ts
+var cell = (v) => v === null || v === void 0 ? "" : String(v);
+async function handleCsvExport(req, res, o) {
+  const cors = corsHeaders();
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, cors);
+    res.end();
+    return;
+  }
+  if (req.method !== "GET") {
+    json(res, 405, { error: "method_not_allowed" }, cors);
+    return;
+  }
+  try {
+    const claims = await authenticate(req);
+    requireRole(claims, o.roles);
+    const key = (query(req).get("dataset") ?? "").trim();
+    const def = Object.prototype.hasOwnProperty.call(o.datasets, key) ? o.datasets[key] : void 0;
+    if (!def) {
+      throw new HttpError(
+        400,
+        `dataset must be one of: ${Object.keys(o.datasets).join(", ")}`,
+        "unknown_dataset"
+      );
+    }
+    const db = await sharedDb();
+    const actor = { tenantId: claims.tid, userId: claims.sub, role: claims.role };
+    await db.withTenant(actor, async (client) => {
+      const rows = await def.select(client);
+      beginCsvDownload(res, cors, {
+        filename: csvFilename(key),
+        headers: def.headers
+      });
+      for (const r of rows) writeCsvRow(res, def.row(r));
+      await writeAudit(client, actor, {
+        action: "ops.data.export",
+        entityType: "export",
+        after: { dataset: key, rows: rows.length }
+      });
+    });
+    res.end();
+  } catch (err) {
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
+    if (err instanceof HttpError) {
+      json(res, err.status, { error: err.code, message: err.message }, cors);
+      return;
+    }
+    json(res, 500, { error: "internal_error" }, cors);
+  }
+}
+
+// services/finance-svc/api/export.ts
+var EXPORT_ROLES = ["principal", "school_owner", "it_admin", "accountant"];
+var INVOICE_BN = {
+  draft: "\u0996\u09B8\u09A1\u09BC\u09BE",
+  issued: "\u0987\u09B8\u09CD\u09AF\u09C1 \u0995\u09B0\u09BE",
+  partly_paid: "\u0986\u0982\u09B6\u09BF\u0995 \u09AA\u09B0\u09BF\u09B6\u09CB\u09A7\u09BF\u09A4",
+  paid: "\u09AA\u09B0\u09BF\u09B6\u09CB\u09A7\u09BF\u09A4",
+  overdue: "\u09AC\u0995\u09C7\u09AF\u09BC\u09BE",
+  waived: "\u09AE\u0993\u0995\u09C1\u09AB",
+  cancelled: "\u09AC\u09BE\u09A4\u09BF\u09B2"
+};
+var METHOD_BN2 = {
+  cash: "\u09A8\u0997\u09A6",
+  bkash: "\u09AC\u09BF\u0995\u09BE\u09B6",
+  nagad: "\u09A8\u0997\u09A6 (Nagad)",
+  rocket: "\u09B0\u0995\u09C7\u099F",
+  bank: "\u09AC\u09CD\u09AF\u09BE\u0982\u0995",
+  cheque: "\u099A\u09C7\u0995",
+  card: "\u0995\u09BE\u09B0\u09CD\u09A1",
+  other: "\u0985\u09A8\u09CD\u09AF\u09BE\u09A8\u09CD\u09AF"
+};
+var bnOf = (map, v) => v ? map[v] ?? v : "";
+var fees = {
+  headers: [
+    "\u0987\u09A8\u09AD\u09AF\u09BC\u09C7\u09B8 \u09A8\u09AE\u09CD\u09AC\u09B0",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0 \u0986\u0987\u09A1\u09BF",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0\u09B0 \u09A8\u09BE\u09AE",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF",
+    "\u09B6\u09BE\u0996\u09BE",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09AC\u09B0\u09CD\u09B7",
+    "\u09AC\u09BF\u09B2\u09BF\u0982 \u09B8\u09AE\u09AF\u09BC\u0995\u09BE\u09B2",
+    "\u0987\u09B8\u09CD\u09AF\u09C1\u09B0 \u09A4\u09BE\u09B0\u09BF\u0996",
+    "\u09B6\u09C7\u09B7 \u09A4\u09BE\u09B0\u09BF\u0996",
+    "\u0989\u09AA\u09AE\u09CB\u099F",
+    "\u09AE\u0993\u0995\u09C1\u09AB",
+    "\u09AC\u09BF\u09B2\u09AE\u09CD\u09AC \u09AB\u09BF",
+    "\u09AE\u09CB\u099F",
+    "\u09AA\u09B0\u09BF\u09B6\u09CB\u09A7\u09BF\u09A4",
+    "\u09AC\u0995\u09C7\u09AF\u09BC\u09BE",
+    "\u09AE\u09C1\u09A6\u09CD\u09B0\u09BE",
+    "\u0985\u09AC\u09B8\u09CD\u09A5\u09BE",
+    "\u09AB\u09BF \u0996\u09BE\u09A4",
+    "\u09B0\u09B8\u09BF\u09A6 \u09A8\u09AE\u09CD\u09AC\u09B0",
+    "\u09AA\u09B0\u09BF\u09B6\u09CB\u09A7\u09C7\u09B0 \u09AE\u09BE\u09A7\u09CD\u09AF\u09AE",
+    "\u09B8\u09B0\u09CD\u09AC\u09B6\u09C7\u09B7 \u09AA\u09B0\u09BF\u09B6\u09CB\u09A7",
+    "\u09AE\u09A8\u09CD\u09A4\u09AC\u09CD\u09AF"
+  ],
+  /**
+   * Every invoice, with what it was for and what has been paid against it.
+   *
+   * The fee HEADS and the RECEIPTS are aggregated into their own cells
+   * rather than joined. A three-line invoice paid in two instalments is
+   * still ONE bill; joining either would emit six rows for it and make the
+   * "মোট" column sum to six times the school's actual billing — a number a
+   * head teacher would act on.
+   *
+   * Cancelled and waived invoices are included, with their status named.
+   * They are part of the school's billing history and an export that showed
+   * only live bills would not reconcile against their own ledger.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT i.invoice_no,
+              sp.student_code,
+              u.full_name_bn      AS student_name,
+              c.name_bn           AS class_name,
+              s.name              AS section_name,
+              ay.label            AS year_label,
+              i.billing_period,
+              i.issued_on::text   AS issued_on,
+              i.due_on::text      AS due_on,
+              i.subtotal::text, i.waiver_total::text, i.late_fee::text,
+              i.total_amount::text, i.paid_amount::text, i.balance_amount::text,
+              i.currency, i.status::text AS status,
+              (SELECT string_agg(COALESCE(fh.name_bn, il.description_bn)
+                                 || ' (' || il.net_amount::text || ')', '; '
+                                 ORDER BY fh.name_bn)
+                 FROM invoice_lines il
+                 LEFT JOIN fee_heads fh ON fh.id = il.fee_head_id
+                WHERE il.invoice_id = i.id) AS heads,
+              (SELECT string_agg(pr.receipt_no, '; ' ORDER BY pr.issued_at)
+                 FROM payment_receipts pr WHERE pr.invoice_id = i.id) AS receipts,
+              (SELECT string_agg(DISTINCT pr.method::text, '; ')
+                 FROM payment_receipts pr WHERE pr.invoice_id = i.id) AS methods,
+              (SELECT max(pr.issued_at)::text
+                 FROM payment_receipts pr WHERE pr.invoice_id = i.id) AS last_paid_at,
+              i.notes
+         FROM invoices i
+         JOIN users u ON u.id = i.student_id AND u.deleted_at IS NULL
+         LEFT JOIN student_profiles sp ON sp.user_id = i.student_id
+         LEFT JOIN sections s ON s.id = i.section_id
+         LEFT JOIN classes  c ON c.id = s.class_id
+         LEFT JOIN academic_years ay ON ay.id = i.academic_year_id
+        ORDER BY i.issued_on DESC, i.invoice_no`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.invoice_no),
+    cell(r.student_code),
+    cell(r.student_name),
+    cell(r.class_name),
+    cell(r.section_name),
+    cell(r.year_label),
+    cell(r.billing_period),
+    cell(r.issued_on),
+    cell(r.due_on),
+    // Plain decimals — see the file header. A spreadsheet must be able to
+    // add these.
+    cell(r.subtotal),
+    cell(r.waiver_total),
+    cell(r.late_fee),
+    cell(r.total_amount),
+    cell(r.paid_amount),
+    cell(r.balance_amount),
+    cell(r.currency ?? "BDT"),
+    bnOf(INVOICE_BN, r.status),
+    cell(r.heads),
+    cell(r.receipts),
+    (r.methods ?? "").split("; ").filter(Boolean).map((m) => bnOf(METHOD_BN2, m)).join("; "),
+    cell(r.last_paid_at),
+    cell(r.notes)
+  ]
+};
+async function handler3(req, res) {
+  return handleCsvExport(req, res, {
+    roles: EXPORT_ROLES,
+    datasets: { fees }
+  });
+}
+
 // services/finance-svc/api/index.ts
 var SERVICE3 = "finance";
 var UUID_RE3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -2298,6 +2523,7 @@ async function ledger(req, res, cors) {
   json(res, 200, payload, cors);
 }
 var ROUTES = {
+  export: handler3,
   invoices,
   pay,
   receipts,
@@ -2306,7 +2532,7 @@ var ROUTES = {
   feestructures: handler,
   payments: handler2
 };
-async function handler3(req, res) {
+async function handler4(req, res) {
   const cors = corsHeaders([], "GET, POST, PATCH, DELETE, OPTIONS");
   if (req.method === "OPTIONS") {
     res.writeHead(204, cors);
@@ -2350,5 +2576,5 @@ async function handler3(req, res) {
   }
 }
 export {
-  handler3 as default
+  handler4 as default
 };

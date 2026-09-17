@@ -13,8 +13,27 @@
  *
  * ── The weekend comes from the tenant, never from a constant ────────────
  * `tenants.weekend_days` arrives in the response (0=Sun … 6=Sat). Monipur
- * runs {5,6}; many Madrasah run {5}. The month grid shades whatever it is
- * told, and there is no Friday in this file.
+ * runs {5,6}; many Madrasah run {5}. The month grid marks whatever it is
+ * told — on the column header, in each day's `data-state` and in each day's
+ * accessible name — and there is no Friday in this file.
+ *
+ * ── Ata Ekta (04 Guardian §05 mobile, 09 Comms §03 desktop) ─────────────
+ * One DOM, CSS decides at 1024px. The week starts শনি at both widths. Below
+ * it: a month row (chevron · month · chevron), one-letter weekday labels,
+ * square day cells FILLED with the colour of their event kind, a key, and the
+ * upcoming list. From 1024px: the month sits in the page header as a chip,
+ * weekday names are full, and each cell stays white with a small coloured
+ * label per event. Every kind has one colour everywhere it appears — cell,
+ * label, key swatch, upcoming date, card glyph and badge.
+ *
+ * ── Colour is never the only carrier (R-4, R8) ──────────────────────────
+ * The drawings mark a day by fill alone. Two of those fills have opposite
+ * effects — a holiday silences the day's SMS, a working weekend sends it —
+ * and red, amber and green collapse into one olive for a colour-blind head
+ * teacher. So on top of the drawn fill, CSS keys a SHAPE on `data-state`: a
+ * holiday has a heavy bottom rule, a working weekend a heavy top rule, and a
+ * plain weekend a grey ground. The key draws the same shapes beside their
+ * words, and the upcoming list writes the kind out.
  *
  * ── Exams are drawn, not owned ──────────────────────────────────────────
  * Entries arriving with `editable: false` come from `exams` and
@@ -37,20 +56,55 @@
  */
 import type { Auth } from './auth.ts';
 import {
-  skeleton, errorState, emptyState, successNote, confirmDialog, bnNum, bnDate,
+  skeleton, errorState, emptyState, successNote, bnNum, bnDate,
 } from './view-states.ts';
 import { pageHeader } from './ui/page-header.ts';
-import { permissionMessage, serverMessage,
-  sectionHeading, card, button, buttonRow, statusBadge, field, setFieldError,
-  clearFieldError, el, append,
+import { permissionMessage, permissionState, serverMessage,
+  sectionHeading, card, button, iconButton, buttonRow, badge, statusBadge, field,
+  setFieldError, clearFieldError, confirmOverlay, list, el, append, numText, numClass,
+  type BadgeTone, type CardTone,
 } from './ui/index.ts';
 
-/** The shared badge vocabulary, so a holiday tints like every other warning. */
-const KIND_BADGE: Record<string, string> = {
-  holiday: 'partial',
-  working_weekend: 'published',
-  exam: 'pending',
+/**
+ * One colour per kind (09 Comms §03: "প্রতিটি ঘটনার রং নির্দিষ্ট"), used the
+ * same way by the badge here and by the grid fill, the desktop label, the key
+ * swatch and the upcoming date in app.css (`--cal-tone`). ছুটি is drawn red;
+ * the red that may carry meaning is --danger — the accent belongs to the one
+ * primary button (R5). খোলা takes the drawn green slot.
+ */
+const KIND_TONE: Record<string, BadgeTone> = {
+  holiday: 'danger',
+  event: 'info',
+  exam: 'warn',
+  working_weekend: 'success',
+  ramadan_schedule: 'neutral',
 };
+/** The same colours on an entry card's glyph square. No tone is neutral. */
+const CARD_TONE: Record<string, CardTone | undefined> = {
+  holiday: 'danger',
+  event: 'info',
+  exam: 'warn',
+  working_weekend: 'success',
+};
+
+/**
+ * The key is fixed, in the drawn order — ছুটি, অনুষ্ঠান, পরীক্ষা, then the
+ * green slot — so a colour is always explained whether or not this month uses
+ * it. A kind outside these four is keyed only in a month that has one.
+ */
+const LEGEND_KINDS = ['holiday', 'event', 'exam', 'working_weekend'];
+
+/**
+ * Which kind fills a phone-width day cell when a day has several. Holiday
+ * first — the same precedence as `dayState()` and the SMS sender: a day the
+ * school has shut is shut, whatever else is on it.
+ */
+const DOMINANT_ORDER = ['holiday', 'exam', 'working_weekend', 'event', 'ramadan_schedule'];
+
+function dominantKind(entries: CalendarEntry[]): string | null {
+  for (const k of DOMINANT_ORDER) if (entries.some((e) => e.kind === k)) return k;
+  return entries[0]?.kind ?? null;
+}
 
 export interface CalendarEntry {
   id: string;
@@ -95,8 +149,16 @@ const SHIFT_BN: Record<string, string> = {
   morning: 'সকাল', day: 'দিবা', evening: 'সন্ধ্যা', single: 'একক',
 };
 
-/** Sunday-first, matching `weekend_days` (0=Sun) and the BD working week. */
+/**
+ * Weekday names INDEXED by `weekend_days`' numbering (0=Sun … 6=Sat), so the
+ * tenant's weekend is looked up, never assumed. The DISPLAY order is
+ * `COLUMN_DOW`: Saturday first, as both drawings start the week.
+ */
 const WEEKDAY_BN = ['রবি', 'সোম', 'মঙ্গল', 'বুধ', 'বৃহঃ', 'শুক্র', 'শনি'];
+/** The phone's one-letter labels (04 Guardian §05), same indexing. */
+const WEEKDAY_SHORT_BN = ['র', 'সো', 'ম', 'বু', 'বৃ', 'শু', 'শ'];
+/** Column order: শনি রবি সোম মঙ্গল বুধ বৃহঃ শুক্র. */
+const COLUMN_DOW = [6, 0, 1, 2, 3, 4, 5];
 const MONTH_BN = [
   'জানুয়ারি', 'ফেব্রুয়ারি', 'মার্চ', 'এপ্রিল', 'মে', 'জুন',
   'জুলাই', 'আগস্ট', 'সেপ্টেম্বর', 'অক্টোবর', 'নভেম্বর', 'ডিসেম্বর',
@@ -105,6 +167,37 @@ const MONTH_BN = [
 /** 'YYYY-MM-DD' in UTC — the same calendar the server stores dates in. */
 function iso(y: number, m: number, d: number): string {
   return `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+/** The day `by` days after an ISO date — calendar arithmetic, no clock. */
+function shiftIso(day: string, by: number): string {
+  const [y, m, dd] = day.split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, dd + by));
+  return iso(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate());
+}
+
+/** One row of the upcoming list: an entry, or the same entry on consecutive days. */
+interface Run { entry: CalendarEntry; from: string; to: string }
+
+/**
+ * Consecutive days carrying the same kind and title, as one run — the drawn
+ * "১৮–২০ অর্ধবার্ষিক পরীক্ষা" rather than three identical rows. Presentation
+ * only: the rows are the ones already loaded, in the server's day order, and
+ * the day panel still lists every entry on every day.
+ */
+function runsOf(entries: CalendarEntry[]): Run[] {
+  const runs: Run[] = [];
+  const open = new Map<string, Run>();
+  for (const e of entries) {
+    const key = JSON.stringify([e.kind, e.titleBn]);
+    const run = open.get(key);
+    if (run && run.to === e.day) continue;
+    if (run && shiftIso(run.to, 1) === e.day) { run.to = e.day; continue; }
+    const next: Run = { entry: e, from: e.day, to: e.day };
+    runs.push(next);
+    open.set(key, next);
+  }
+  return runs;
 }
 
 export class CalendarView {
@@ -253,6 +346,23 @@ export class CalendarView {
     void this.load();
   }
 
+  private goToday(): void {
+    const t = new Date();
+    this.year = t.getFullYear(); this.month = t.getMonth();
+    this.selectedDay = this.todayIso();
+    void this.load();
+  }
+
+  /**
+   * The same entry was also on the day before — a continuation day of a
+   * multi-day run, which the desktop cell labels "—" as drawn rather than
+   * repeating the title in every cell of the run.
+   */
+  private continues(e: CalendarEntry): boolean {
+    return this.entriesOn(shiftIso(e.day, -1))
+      .some((p) => p.kind === e.kind && p.titleBn === e.titleBn);
+  }
+
   // ── render ────────────────────────────────────────────────────────────
 
   private render(): void {
@@ -260,68 +370,108 @@ export class CalendarView {
     const root = this.o.root;
     root.textContent = '';
 
-    const header = pageHeader(d, {
-      title: 'শিক্ষাপঞ্জি',
-      subtitle: `${MONTH_BN[this.month]} ${bnNum(this.year)}`,
-    });
-    root.append(header);
+    const denied = this.error.includes('অনুমতি');
+    const ready = !this.loading && this.data !== null && !denied;
 
-    root.append(this.monthNav());
+    // Desktop bar (09 Comms §03): title, the month chip, then the one primary.
+    // The chip's arrows and আজ are not drawn but are how the month changes;
+    // on a phone the chip hides and the month row below carries the arrows.
+    // The primary is offered only when the form it opens can be drawn, and
+    // not while that form is open, so a single primary is on screen at once.
+    root.append(pageHeader(d, {
+      title: 'শিক্ষাপঞ্জি',
+      actions: [this.monthControls(), button(d, {
+        label: 'আজ', variant: 'ghost', size: 'sm', onClick: () => this.goToday(),
+      })],
+      primary: this.o.canManage && ready && !this.creating && !this.editing
+        ? this.createButton()
+        : undefined,
+    }));
 
     if (this.notice) root.append(successNote(d, this.notice));
     if (this.error) {
-      root.append(errorState(d, this.error,
-        this.error.includes('অনুমতি') ? undefined : () => void this.load()));
       // A refusal is the whole answer; a grid underneath it would say
       // "nothing is scheduled", which is a different and untrue claim.
-      if (this.error.includes('অনুমতি')) return;
+      if (denied) {
+        root.append(this.monthNav(), permissionState(d, { message: this.error }));
+        return;
+      }
+      root.append(errorState(d, this.error, () => void this.load()));
     }
 
-    if (this.loading) { root.append(skeleton(d, 5)); return; }
+    if (ready) {
+      root.append(this.filters());
+      if (this.creating || this.editing) root.append(this.form());
+    }
+
+    // The month row sits directly above the grid, as drawn.
+    root.append(this.monthNav());
+
+    if (this.loading) { root.append(skeleton(d, 3)); return; }
     if (!this.data) return;
 
-    root.append(this.filters());
-    if (this.o.canManage) root.append(this.createBar());
-    if (this.creating || this.editing) root.append(this.form());
-
-    root.append(this.grid());
-    root.append(this.legend());
+    root.append(el(d, 'div', { className: 'cal-board' }, this.grid(), this.legend()));
     root.append(this.dayPanel());
     root.append(this.upcoming());
   }
 
+  /**
+   * A month arrow. Named by MONTH, not "previous": identical "আগের" buttons
+   * on one screen are identical announcements.
+   */
+  private stepButton(by: -1 | 1): HTMLButtonElement {
+    const d = this.o.doc;
+    return by < 0
+      ? iconButton(d, {
+        glyph: 'chevron-left',
+        label: `আগের মাস — ${MONTH_BN[(this.month + 11) % 12]}`,
+        onClick: () => this.step(-1),
+      })
+      : iconButton(d, {
+        glyph: 'chevron-right',
+        label: `পরের মাস — ${MONTH_BN[(this.month + 1) % 12]}`,
+        onClick: () => this.step(1),
+      });
+  }
+
+  /** Desktop (≥1024px): arrows around the neutral month chip, in the header. */
+  private monthControls(): HTMLElement {
+    const d = this.o.doc;
+    return el(d, 'div', { className: 'cal-month-ctl' },
+      this.stepButton(-1),
+      badge(d, {
+        label: `${MONTH_BN[this.month]} ${bnNum(this.year)}`,
+        tone: 'neutral', className: 'cal-month-chip',
+      }),
+      this.stepButton(1));
+  }
+
+  /** Phone (<1024px): chevron · centred month · chevron, above the grid. */
   private monthNav(): HTMLElement {
     const d = this.o.doc;
-    return buttonRow(d,
-      button(d, {
-        label: 'আগের', variant: 'secondary', size: 'sm', glyph: 'arrow-left',
-        // Named by MONTH, not "previous": three identical "আগের" buttons on
-        // one screen are three identical announcements.
-        ariaLabel: `আগের মাস — ${MONTH_BN[(this.month + 11) % 12]}`,
-        onClick: () => this.step(-1),
-      }),
-      button(d, {
-        label: 'আজ', variant: 'ghost', size: 'sm',
-        onClick: () => {
-          const t = new Date();
-          this.year = t.getFullYear(); this.month = t.getMonth();
-          this.selectedDay = this.todayIso();
-          void this.load();
-        },
-      }),
-      button(d, {
-        label: 'পরের', variant: 'secondary', size: 'sm', glyph: 'arrow-right',
-        ariaLabel: `পরের মাস — ${MONTH_BN[(this.month + 1) % 12]}`,
-        onClick: () => this.step(1),
-      }),
-    );
+    return el(d, 'div', { className: 'cal-nav' },
+      this.stepButton(-1),
+      el(d, 'p', { className: 'cal-nav-month' },
+        ...numText(d, `${MONTH_BN[this.month]} ${bnNum(this.year)}`)),
+      this.stepButton(1));
+  }
+
+  private createButton(): HTMLButtonElement {
+    const d = this.o.doc;
+    return button(d, {
+      label: 'নতুন ঘটনা', variant: 'primary', size: 'sm',
+      onClick: () => {
+        this.creating = true; this.editing = null; this.notice = ''; this.render();
+      },
+    });
   }
 
   private filters(): HTMLElement {
     const d = this.o.doc;
     const wrap = d.createElement('div');
-    // The existing segmented control (.seg-bar/.seg-opt), not a new one.
-    wrap.className = 'seg-bar';
+    // The existing segmented control (.seg-bar/.seg-opt), not a new one —
+    // drawn as the 14 Components §03 chip row through `.cal-filter`.
+    wrap.className = 'seg-bar cal-filter';
     wrap.setAttribute('role', 'group');
     wrap.setAttribute('aria-label', 'ধরন অনুযায়ী ছাঁকুন');
 
@@ -345,44 +495,35 @@ export class CalendarView {
     return wrap;
   }
 
-  private createBar(): HTMLElement {
-    const d = this.o.doc;
-    return buttonRow(d, button(d, {
-      label: 'নতুন এন্ট্রি', variant: 'secondary', size: 'sm', glyph: 'calendar',
-      disabled: this.creating || this.editing !== null,
-      onClick: () => {
-        this.creating = true; this.editing = null; this.notice = ''; this.render();
-      },
-    }));
-  }
-
   /**
    * The month grid. A table, not a div soup: a calendar IS tabular data, and
    * `<th scope="col">` on the weekday row is what lets a screen reader say
    * "বুধবার, ১০" instead of reading a wall of numbers.
+   *
+   * Seven fixed columns that share the width, Saturday first. Nothing inside
+   * a cell can widen its column, so the month never scrolls sideways at 320px.
    */
   private grid(): HTMLElement {
     const d = this.o.doc;
-    const scroll = d.createElement('div');
-    // Its own class as well as the shared one: the month grid is seven fixed
-    // columns and needs the gutters back on a narrow phone, and that must not
-    // change every other `.table-scroll` in the app. See `.cal-scroll` in
-    // app.css for the measurement.
-    scroll.className = 'table-scroll cal-scroll';
+    const wrap = el(d, 'div', { className: 'cal-scroll' });
 
-    const table = d.createElement('table');
-    table.className = 'data-table cal-grid';
-    const caption = d.createElement('caption');
-    caption.className = 'visually-hidden';
-    caption.textContent = `${MONTH_BN[this.month]} ${bnNum(this.year)} মাসের শিক্ষাপঞ্জি`;
-    table.append(caption);
+    const table = el(d, 'table', { className: 'cal-grid' });
+    table.append(el(d, 'caption', { className: 'ui-sr-only' },
+      ...numText(d, `${MONTH_BN[this.month]} ${bnNum(this.year)} মাসের শিক্ষাপঞ্জি`)));
 
     const thead = d.createElement('thead');
     const hr = d.createElement('tr');
-    for (let dow = 0; dow < 7; dow++) {
+    for (const dow of COLUMN_DOW) {
       const th = d.createElement('th');
       th.scope = 'col';
-      th.textContent = WEEKDAY_BN[dow];
+      // The full name is the header a reader hears at both widths; the
+      // one-letter form is what a phone shows, and is hidden from readers.
+      th.append(
+        el(d, 'span', { className: 'cal-wd-full', text: WEEKDAY_BN[dow] }),
+        el(d, 'span', {
+          className: 'cal-wd-short', text: WEEKDAY_SHORT_BN[dow], attrs: { 'aria-hidden': 'true' },
+        }),
+      );
       if (this.isWeekend(dow)) th.classList.add('cal-weekend');
       hr.append(th);
     }
@@ -396,7 +537,10 @@ export class CalendarView {
 
     let cell = 0;
     let tr = d.createElement('tr');
-    for (; cell < first; cell++) tr.append(d.createElement('td'));
+    // Blanks before the 1st, counted from Saturday: a month starting on a
+    // Saturday (6) has none, one starting on a Sunday (0) has one.
+    const lead = (first + 1) % 7;
+    for (; cell < lead; cell++) tr.append(d.createElement('td'));
 
     for (let day = 1; day <= days; day++, cell++) {
       if (cell % 7 === 0 && cell > 0) { tbody.append(tr); tr = d.createElement('tr'); }
@@ -412,12 +556,19 @@ export class CalendarView {
       // weekend or normal — rather than two classes a reader has to combine.
       // A working weekend is still a weekend column; what changes is that
       // this particular date is open, so it must not look shut.
+      // CSS draws each state as a shape as well as a colour from this one
+      // attribute: a grey ground for the weekend, a heavy bottom rule for a
+      // holiday, a heavy top rule for a working weekend.
       td.setAttribute('data-state', state);
       if (this.isWeekend(dow)) td.classList.add('cal-weekend');
       if (state === 'holiday') td.classList.add('cal-holiday');
       if (state === 'working_weekend') td.classList.add('cal-working');
       if (dayIso === today) td.classList.add('cal-today');
       if (dayIso === this.selectedDay) td.classList.add('cal-selected');
+      // The kind whose colour fills the cell on a phone. The words are in the
+      // accessible name below, the key, and the day panel.
+      const dk = dominantKind(entries);
+      if (dk) td.setAttribute('data-kind', dk);
 
       const btn = d.createElement('button');
       btn.type = 'button';
@@ -433,24 +584,18 @@ export class CalendarView {
       btn.setAttribute('aria-label', parts.join(' · '));
       if (dayIso === this.selectedDay) btn.setAttribute('aria-current', 'date');
 
-      const num = d.createElement('span');
-      num.className = 'cal-num';
-      num.textContent = bnNum(day);
-      btn.append(num);
+      btn.append(el(d, 'span', { className: 'cal-num n', text: bnNum(day) }));
 
       if (entries.length > 0) {
-        const dots = d.createElement('span');
-        dots.className = 'cal-dots';
-        dots.setAttribute('aria-hidden', 'true');
-        // Capped at three: a fourth dot in a 40px cell is noise, and the
-        // count is in the accessible name and the day panel either way.
-        for (const e of entries.slice(0, 3)) {
-          const dot = d.createElement('span');
-          dot.className = 'cal-dot';
-          dot.setAttribute('data-kind', e.kind);
-          dots.append(dot);
-        }
-        btn.append(dots);
+        // The desktop cell's event labels, in the kind's colour (a phone
+        // hides them; its cell is filled instead). Capped at three: a fourth
+        // label in a 62px cell is noise, and every entry is in the accessible
+        // name and the day panel either way. aria-hidden, because the name
+        // already says all of it.
+        btn.append(el(d, 'span', { className: 'cal-dots', attrs: { 'aria-hidden': 'true' } },
+          ...entries.slice(0, 3).map((e) => el(d, 'span', {
+            className: 'cal-dot', data: { kind: e.kind },
+          }, ...numText(d, this.continues(e) ? '—' : e.titleBn)))));
       }
 
       btn.addEventListener('click', () => {
@@ -463,74 +608,61 @@ export class CalendarView {
     while (cell % 7 !== 0) { tr.append(d.createElement('td')); cell++; }
     tbody.append(tr);
     table.append(tbody);
-    scroll.append(table);
-    return scroll;
+    wrap.append(table);
+    return wrap;
   }
 
   /**
-   * The three day states, named.  (R-4.1)
+   * The key: a swatch and one word per kind, in the drawn order, then the
+   * tenant's weekend.
    *
-   * A shaded column and an underline are markers; a person seeing them for
-   * the first time has to guess what they mean, and "this Saturday is
-   * shaded but that one is not" is precisely the thing a working weekend
-   * introduces. So the states are written out under the grid.
+   * Every colour the grid can use is written out in words here, because a
+   * filled cell on a phone says its kind by colour — and colour is never the
+   * only carrier. The swatches carry the cells' shapes too (CSS), so the
+   * holiday's bottom rule and the working weekend's top rule sit beside
+   * their words. The kinds are fixed (see LEGEND_KINDS), so a person learns
+   * them once rather than month by month.
    *
-   * Rendered only when a state is actually present in the month on screen —
-   * a legend explaining a marker nobody can see is furniture.
+   * The weekend is keyed whenever the tenant has one. It is the state every
+   * other mark is read against — a green "খোলা" Saturday means nothing unless
+   * the Saturdays around it visibly are not — and a school with no weekend
+   * has nothing to explain.
    */
   private legend(): HTMLElement {
     const d = this.o.doc;
-    const wrap = d.createElement('ul');
-    wrap.className = 'cal-legend';
-    wrap.setAttribute('aria-label', 'দিনের ধরন');
-
-    const present = new Set<string>();
-    const first = new Date(Date.UTC(this.year, this.month, 1)).getUTCDay();
-    const total = new Date(Date.UTC(this.year, this.month + 1, 0)).getUTCDate();
-    for (let day = 1; day <= total; day++) {
-      present.add(this.dayState(iso(this.year, this.month, day), (first + day - 1) % 7));
-    }
-
-    const items: [string, string][] = [
-      ['holiday', 'ছুটি — বন্ধ, হাজিরার এসএমএস যাবে না'],
-      ['working_weekend', 'সাপ্তাহিক ছুটির দিনে খোলা — স্বাভাবিক কর্মদিবসের মতো'],
-      ['weekend', 'সাপ্তাহিক ছুটি'],
+    const present = new Set((this.data?.entries ?? []).map((e) => e.kind));
+    const kinds = [
+      ...LEGEND_KINDS,
+      ...Object.keys(KIND_BN).filter((k) => !LEGEND_KINDS.includes(k) && present.has(k)),
     ];
-    for (const [state, labelBn] of items) {
-      if (!present.has(state)) continue;
-      const li = d.createElement('li');
-      li.className = 'cal-legend-item';
-      const swatch = d.createElement('span');
-      swatch.className = 'cal-legend-swatch';
-      swatch.setAttribute('data-state', state);
-      swatch.setAttribute('aria-hidden', 'true');
-      const text = d.createElement('span');
-      text.textContent = labelBn;
-      li.append(swatch, text);
-      wrap.append(li);
-    }
-    return wrap;
+    const item = (swatch: { kind?: string; state?: string }, word: string) =>
+      el(d, 'li', { className: 'cal-legend-item' },
+        el(d, 'span', {
+          className: 'cal-legend-swatch', data: swatch, attrs: { 'aria-hidden': 'true' },
+        }),
+        el(d, 'span', { text: word }));
+    return el(d, 'ul', { className: 'cal-legend', attrs: { 'aria-label': 'রঙের অর্থ' } },
+      ...kinds.map((k) => item({ kind: k }, KIND_BN[k])),
+      (this.data?.weekendDays.length ?? 0) > 0
+        ? item({ state: 'weekend' }, 'সাপ্তাহিক ছুটি')
+        : null);
   }
 
   /** What is on the selected day, or a prompt to pick one. */
   private dayPanel(): HTMLElement {
     const d = this.o.doc;
-    const wrap = d.createElement('section');
-    wrap.setAttribute('aria-live', 'polite');
+    const wrap = el(d, 'section', {
+      className: 'cal-day-panel', attrs: { 'aria-live': 'polite' },
+    });
 
     if (!this.selectedDay) {
-      const p = d.createElement('p');
-      p.className = 'att-sub';
-      p.style.padding = 'var(--s-3) var(--s-4)';
-      p.textContent = 'বিস্তারিত দেখতে একটি তারিখে চাপ দিন।';
-      wrap.append(p);
+      wrap.append(el(d, 'p', {
+        className: 'cal-hint', text: 'বিস্তারিত দেখতে একটি তারিখে চাপ দিন।',
+      }));
       return wrap;
     }
 
-    const h = d.createElement('h2');
-    h.className = 'section-heading';
-    h.textContent = bnDate(this.selectedDay);
-    wrap.append(h);
+    wrap.append(sectionHeading(d, { title: bnDate(this.selectedDay) }));
 
     const entries = this.entriesOn(this.selectedDay);
     if (entries.length === 0) {
@@ -568,18 +700,22 @@ export class CalendarView {
       meta.push(`যোগ করেছেন ${e.createdByNameBn}`);
     }
 
+    // Text nodes only (numText), never innerHTML: typed by a person at the
+    // school and rendered in every reader's browser.
+    const note = (text: string) => el(d, 'p', { className: 'ui-card-note' }, ...numText(d, text));
     const host = card(d, {
       title: e.titleBn,
       glyph: e.kind === 'exam' ? 'award' : 'calendar',
-      tone: e.kind === 'holiday' ? 'warn' : e.kind === 'working_weekend' ? 'success' : 'info',
+      // The kind's own colour, as in the grid and the key.
+      tone: CARD_TONE[e.kind],
       headingLevel: 3,
-      action: statusBadge(d, { state: KIND_BADGE[e.kind] ?? 'draft', label: KIND_BN[e.kind] ?? e.kind }),
+      action: statusBadge(d, {
+        state: e.kind, label: KIND_BN[e.kind] ?? e.kind, tone: KIND_TONE[e.kind] ?? 'neutral',
+      }),
     },
-      // textContent via `text`, never innerHTML: typed by a person at the
-      // school and rendered in every reader's browser.
-      e.descriptionBn ? el(d, 'p', { className: 'ui-card-note', text: e.descriptionBn }) : null,
-      ...notes.map((n) => el(d, 'p', { className: 'ui-card-note', text: n })),
-      meta.length ? el(d, 'p', { className: 'ui-card-note', text: meta.join(' · ') }) : null,
+      e.descriptionBn ? note(e.descriptionBn) : null,
+      ...notes.map(note),
+      meta.length ? note(meta.join(' · ')) : null,
     );
 
     if (this.o.canManage && e.editable) {
@@ -593,12 +729,14 @@ export class CalendarView {
           },
         }),
         button(d, {
-          label: 'মুছে ফেলুন', variant: 'ghost', size: 'sm',
+          // Destructive, so it looks destructive (14 Components §01).
+          label: 'মুছে ফেলুন', variant: 'danger', size: 'sm',
           ariaLabel: `${e.titleBn} শিক্ষাপঞ্জি থেকে সরান`,
           disabled: this.busy,
           onClick: () => {
-            host.append(confirmDialog({
-              doc: d,
+            // §7: a destructive action states its consequence in the shared
+            // overlay — a bottom sheet on a phone, a dialog from 1024px.
+            confirmOverlay(d, {
               title: 'শিক্ষাপঞ্জি থেকে সরানো',
               // Both of these kinds change whether messages go out that day,
               // in opposite directions. Saying only "this will be removed"
@@ -613,8 +751,8 @@ export class CalendarView {
                   : `"${e.titleBn}" (${bnDate(e.day)}) শিক্ষাপঞ্জি থেকে সরানো হবে।`,
               confirmLabel: 'সরান',
               danger: true,
-              onConfirm: () => void this.remove(e),
-            }));
+              onConfirm: () => this.remove(e),
+            });
           },
         }),
       ));
@@ -622,15 +760,20 @@ export class CalendarView {
     return host;
   }
 
-  /** The next things coming, across the whole month on screen. */
+  /**
+   * The next things coming, across the whole month on screen: a bordered
+   * list of the day (in the kind's colour) and the title, as drawn — plus the
+   * kind in words under the title, which the drawing leaves to colour alone
+   * and R5 does not. The full date is in each row's name for a reader, since
+   * the bare day number is what a sighted reader gets.
+   */
   private upcoming(): HTMLElement {
     const d = this.o.doc;
-    const wrap = d.createElement('section');
-    wrap.append(sectionHeading(d, { title: 'আসন্ন' }));
+    const wrap = el(d, 'section', { className: 'cal-upcoming' },
+      el(d, 'h2', { className: 'ui-sr-only', text: 'আসন্ন' }));
 
     const today = this.todayIso();
-    const next = (this.data?.entries ?? [])
-      .filter((e) => e.day >= today)
+    const next = runsOf((this.data?.entries ?? []).filter((e) => e.day >= today))
       .slice(0, 6);
 
     if (next.length === 0) {
@@ -649,23 +792,33 @@ export class CalendarView {
       return wrap;
     }
 
-    const list = d.createElement('div');
-    list.className = 'system-list';
-    for (const e of next) {
-      const row = d.createElement('button');
-      row.type = 'button';
-      row.className = 'system-row';
-      const t = d.createElement('span');
-      t.className = 'system-title';
-      t.textContent = e.titleBn;
-      const desc = d.createElement('span');
-      desc.className = 'system-desc';
-      desc.textContent = `${bnDate(e.day)} · ${KIND_BN[e.kind] ?? e.kind}`;
-      row.append(t, desc);
-      row.addEventListener('click', () => { this.selectedDay = e.day; this.render(); });
-      list.append(row);
-    }
-    wrap.append(list);
+    // The day of the month, as drawn. An exam period that began in an earlier
+    // month arrives dated on its first day, so a day outside the month on
+    // screen carries its month too ("২৫/৯") rather than posing as this one's.
+    const dayNum = (day: string) => {
+      const n = bnNum(Number(day.slice(8, 10)));
+      return day.slice(0, 7) === iso(this.year, this.month, 1).slice(0, 7)
+        ? n : `${n}/${bnNum(Number(day.slice(5, 7)))}`;
+    };
+    wrap.append(list(d, 'আসন্ন', ...next.map(({ entry: e, from, to }) => {
+      const date = from === to ? dayNum(from) : `${dayNum(from)}–${dayNum(to)}`;
+      const spoken = from === to ? bnDate(from) : `${bnDate(from)} থেকে ${bnDate(to)}`;
+      return el(d, 'li', { className: 'ui-list-item' },
+        el(d, 'button', {
+          className: 'ui-list-hit',
+          attrs: { type: 'button' },
+          on: { click: () => { this.selectedDay = from; this.render(); } },
+        },
+          el(d, 'span', {
+            className: numClass('cal-up-date', date), text: date,
+            data: { kind: e.kind }, attrs: { 'aria-hidden': 'true' },
+          }),
+          el(d, 'span', { className: 'ui-list-main' },
+            el(d, 'span', { className: 'ui-list-title' }, ...numText(d, e.titleBn)),
+            el(d, 'span', { className: 'ui-sr-only' }, ...numText(d, ` — ${spoken}`)),
+            // The word beside the coloured date: the kind is never colour alone.
+            el(d, 'span', { className: 'ui-list-sub', text: KIND_BN[e.kind] ?? e.kind }))));
+    })));
     return wrap;
   }
 
@@ -796,16 +949,15 @@ export class CalendarView {
       // Notifying is the irreversible half: a notice cannot be recalled once
       // it is in nine hundred people's bells.
       if (notify.checked) {
-        form.append(confirmDialog({
-          doc: d,
+        confirmOverlay(d, {
           title: 'নোটিশ পাঠানো নিশ্চিত করুন',
           body: `"${title.value().trim()}" সম্পর্কে প্রতিষ্ঠানের সবাইকে নোটিশ যাবে` +
                 (sms.checked ? ', এবং অভিভাবকদের এসএমএসও যাবে' : '') +
                 '। নোটিশ পাঠানোর পর ফিরিয়ে নেওয়া যায় না।',
           confirmLabel: 'পাঠান',
           danger: true,
-          onConfirm: go,
-        }));
+          onConfirm: () => this.save(payload, e?.id ?? null),
+        });
       } else {
         go();
       }

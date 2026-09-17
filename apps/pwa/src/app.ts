@@ -18,7 +18,7 @@ import { Auth } from './auth.ts';
 // `/demo.js`, and only when a demo visitor asks for it.
 import type { DemoAuth as DemoAuthClass } from './demo.ts';
 import { LoginView } from './login-view.ts';
-import { Shell, type ShellRoute } from './shell.ts';
+import { Shell, type ShellRoute, autoFlush } from './shell.ts';
 import { RosterView } from './roster-view.ts';
 import { RoutineView } from './routine-view.ts';
 import { MarksView } from './marks-view.ts';
@@ -48,6 +48,10 @@ import { AcademicView } from './academic-view.ts';
 import { PublishView } from './publish-view.ts';
 import { InvoiceView } from './invoice-view.ts';
 import { AdminSettingsView } from './admin-settings-view.ts';
+// P11. The school's own copy of its own data.
+import { ExportView } from './export-view.ts';
+// B-120. Where am I signed in, and how do I stop it.
+import { SecurityView } from './security-view.ts';
 import { RolloverView } from './rollover-view.ts';
 import { UsersView } from './users-view.ts';
 import { StaffAttendanceView } from './staff-attendance-view.ts';
@@ -66,7 +70,8 @@ import {
   tenantKeyFromHost,
 } from './branding.ts';
 import { brandName } from '../../../packages/ui-core/src/branding.ts';
-import { todayLocalIso } from '../../../packages/ui-core/src/format.ts';
+import { iconSvg } from './icon.ts';
+import { todayLocalIso, formatCount } from '../../../packages/ui-core/src/format.ts';
 import {
   purgeLocalData, sweepNow, isTenantSwitch, sessionTenantId,
 } from './local-data.ts';
@@ -418,7 +423,13 @@ async function main() {
   // when OTP is disabled it offers the activation-code path, which is how
   // every newly onboarded school signs in anyway. The dead-end the fallback
   // existed to avoid does not exist.
-  const realAuth = new Auth({ apiBase, deviceId: deviceId('d') });
+  const realAuth = new Auth({
+    apiBase,
+    deviceId: deviceId('d'),
+    // B-121. Only fires when the server refuses the refresh on
+    // authentication grounds — never for a network failure or a 5xx.
+    onSessionEnded: (reason) => { showSessionEnded(reason); },
+  });
   const demoMode = params.get('demo') === '1' || isDemoSurface();
   const auth = demoMode ? new (await loadDemoAuth())() : realAuth;
   // F-1503. One tracker for the session; flushed on boot (draining
@@ -473,16 +484,33 @@ async function main() {
     : fetchPublicBranding(brandingKey);
 
   function startShell(): Shell {
+    lastOwner = { tenantId: auth.tenantId || 'demo', actorId: auth.userId };
     const transport = new FetchTransport({ auth });
+    // Set once the shell exists (below): the engine is built first because the
+    // routes need it, and the banner it reports to is built from those routes.
+    let reportQueue: ((st: { pending: number; inflight: number }) => void) | null = null;
+    let flusher: ReturnType<typeof autoFlush> | null = null;
     const engine = new SyncEngine({
       deviceId: deviceId('d'),
       tenantId: auth.tenantId || 'demo',
       actorId: auth.userId,
       store,
       transport,
+      onProgress: (st) => reportQueue?.(st),
     });
-    navigator.serviceWorker?.addEventListener('message', (e) => {
+    const onSwMessage = (e: MessageEvent) => {
       if ((e.data as { type?: string })?.type === 'outbox-flush') void engine.flush();
+    };
+    navigator.serviceWorker?.addEventListener('message', onSwMessage);
+    // Queued work leaves by itself: at boot, when the connection returns and
+    // when the app comes back to the foreground, with a retry while anything
+    // is still waiting. Before this the only automatic trigger was the
+    // service-worker message above, for a Background Sync nothing registered,
+    // so a register saved offline waited for the teacher's next save.
+    flusher = autoFlush({
+      flush: () => engine.flush(),
+      state: () => engine.state(),
+      doc: document,
     });
 
     const routes: ShellRoute[] = [
@@ -525,7 +553,12 @@ async function main() {
             return;
           }
           const { primary, secondary } = dashboardFor(auth.role);
-          const learner = ['student', 'guardian'].includes(auth.role);
+          // Only a student has a "what should I study next" list, and the
+          // student returned above. A guardian was handed it too, and their
+          // home opened with a child's to-do list in a student's voice,
+          // leading into student screens (and in production read against the
+          // guardian's own id). Their home starts with the child card instead.
+          const learner = auth.role === 'student';
           new HomeView({
             root: container,
             doc: document,
@@ -567,7 +600,12 @@ async function main() {
         mount: (container) => {
           new SubjectsView({
             root: container, doc: document, auth,
-            onOpenSubject: () => { location.hash = '#/learn'; },
+            // F-802: the subject tapped travels with the link, the same way a
+            // guardian's child id reaches the results route. It only picks
+            // the chapter strip's starting subject; nothing extra is fetched.
+            onOpenSubject: (subjectId) => {
+              location.hash = `#/learn?subjectId=${encodeURIComponent(subjectId)}`;
+            },
           });
         },
       },
@@ -576,14 +614,29 @@ async function main() {
         labelBn: 'পড়াশোনা',
         glyph: 'book-open',
         mount: (container) => {
-          new LearnView({ root: container, doc: document, auth, outbox: engine });
+          const subjectId = new URLSearchParams(
+            (location.hash.split('?')[1] ?? '')).get('subjectId') ?? undefined;
+          new LearnView({ root: container, doc: document, auth, outbox: engine, subjectId });
         },
+        queuesOffline: true,
       },
       {
         path: 'attendance',
         labelBn: 'হাজিরা',
         glyph: 'check-square',
         unmount: () => { attendanceScreen?.destroy(); attendanceScreen = null; },
+        queuesOffline: true,
+        // A register marked but not submitted exists only on this screen.
+        // Leaving (a tab, the bell, Android back) used to throw it away
+        // without a word. The screen answers whether it holds such marks.
+        hasUnsavedChanges: () => Boolean(
+          (attendanceScreen as { hasUnsavedChanges?: () => boolean } | null)
+            ?.hasUnsavedChanges?.()),
+        unsavedPrompt: {
+          title: 'হাজিরা জমা দেওয়া হয়নি',
+          body: 'হাজিরা এখনো জমা দেওয়া হয়নি। এখন চলে গেলে চিহ্নগুলো হারিয়ে যাবে।',
+          confirmLabel: 'বাদ দিন',
+        },
         mount: (container) => {
           // P3. The screen now asks the SERVER which sections this teacher
           // has and loads the roster itself, instead of reading a cache that
@@ -615,7 +668,10 @@ async function main() {
         labelBn: 'রুটিন',
         glyph: 'clock',
         hidden: true,
-        mount: (container) => { new RoutineView({ root: container, doc: document, auth }); },
+        // The instance is kept so unmount can release what the view holds
+        // (its `online` listener) once the view has a destroy().
+        mount: (container) => { routineView = new RoutineView({ root: container, doc: document, auth }); },
+        unmount: () => { destroyView(routineView); routineView = null; },
       },
       {
         path: 'roster',
@@ -629,7 +685,19 @@ async function main() {
         glyph: 'edit',
         hidden: true,
         mount: (container) => {
-          new MarksView({ root: container, doc: document, auth, outbox: engine });
+          marksView = new MarksView({ root: container, doc: document, auth, outbox: engine });
+        },
+        unmount: () => { destroyView(marksView); marksView = null; },
+        queuesOffline: true,
+        // Marks typed but not saved exist only on this sheet. Choosing another
+        // paper already asks (R7); leaving the route by a sidebar link, a tab,
+        // the bell or Android back threw them away without a word. The same
+        // question attendance asks, answered by the view.
+        hasUnsavedChanges: () => Boolean(marksView?.hasUnsavedChanges()),
+        unsavedPrompt: {
+          title: 'নম্বর সংরক্ষণ করা হয়নি',
+          body: 'লেখা নম্বর এখনো সংরক্ষণ করা হয়নি। এখন চলে গেলে এই নম্বরগুলো হারিয়ে যাবে।',
+          confirmLabel: 'বাদ দিন',
         },
       },
       {
@@ -677,10 +745,12 @@ async function main() {
               { path: 'users', glyph: 'users', titleBn: 'ব্যবহারকারী', subtitleBn: 'শিক্ষক ও কর্মীর অ্যাকাউন্ট, নিষ্ক্রিয়করণ' },
               { path: 'rollover', glyph: 'repeat', titleBn: 'বার্ষিক উন্নয়ন', subtitleBn: 'পরবর্তী শিক্ষাবর্ষে উন্নীতকরণ' },
               { path: 'adminsettings', glyph: 'settings', titleBn: 'সেটিংস', subtitleBn: 'নোটিশ এসএমএসের দৈর্ঘ্য ও খরচ' },
-              { path: 'documents', glyph: 'book', titleBn: 'নথি ও ছাপা', subtitleBn: 'প্রতিষ্ঠানের লোগো, সিল ও স্বাক্ষরসহ ছাপার নথি' },
+              { path: 'documents', glyph: 'book', titleBn: 'নথি ও ছাপা', subtitleBn: 'রসিদ, প্রগতি পত্র, প্রবেশপত্র' },
               { path: 'students', glyph: 'search', titleBn: 'শিক্ষার্থী খুঁজুন', subtitleBn: 'স্থায়ী আইডি বা নাম — বছরওয়ারি পূর্ণ ইতিহাসসহ' },
-              { path: 'calendar', glyph: 'calendar', titleBn: 'শিক্ষাপঞ্জি', subtitleBn: 'ছুটি, পরীক্ষা ও অনুষ্ঠান — সব ভূমিকার জন্য' },
+              { path: 'calendar', glyph: 'calendar', titleBn: 'শিক্ষাপঞ্জি', subtitleBn: 'ছুটি, পরীক্ষা ও অনুষ্ঠান' },
               { path: 'audit', glyph: 'lock', titleBn: 'কার্যবিবরণী', subtitleBn: 'কে কখন কী পরিবর্তন করেছেন — শুধু পড়ার জন্য' },
+              { path: 'export', glyph: 'download', titleBn: 'তথ্য রপ্তানি', subtitleBn: 'দশটি তালিকা CSV ফাইলে — এক্সেলে খোলে' },
+              { path: 'security', glyph: 'lock', titleBn: 'নিরাপত্তা', subtitleBn: 'কোন কোন যন্ত্রে খোলা আছে' },
               { path: 'branding', glyph: 'star', titleBn: 'প্রতিষ্ঠানের পরিচয়', subtitleBn: 'নাম, লোগো, রং ও ছাপা কাগজের শীর্ষভাগ' },
               { path: 'system', glyph: 'settings', titleBn: 'সিস্টেম ও ইন্টিগ্রেশন', subtitleBn: 'ওয়ার্কার · কিল-সুইচ · অদৃশ্য গ্যারান্টি' },
             ],
@@ -705,7 +775,14 @@ async function main() {
         labelBn: 'বেতন',
         glyph: 'wallet',
         hidden: true,
-        mount: (container) => { new FeesView({ root: container, doc: document, auth }); },
+        mount: (container) => {
+          // `?studentId=` is the child a guardian tapped ফি পরিশোধ করুন on.
+          const studentId = new URLSearchParams(
+            (location.hash.split('?')[1] ?? '')).get('studentId') ?? undefined;
+          const options = { root: container, doc: document, auth, studentId };
+          feesView = new FeesView(options);
+        },
+        unmount: () => { destroyView(feesView); feesView = null; },
       },
       {
         path: 'substitute',
@@ -748,8 +825,16 @@ async function main() {
         mount: (container) => {
           new GuardianView({
             root: container, doc: document, auth,
-            onOpenFees: () => { location.hash = '#/fees'; },
-            onOpenResults: () => { location.hash = '#/results'; },
+            // The child travels with the link, as it does for results: a
+            // parent of two must land on the fees of the child they tapped.
+            onOpenFees: (studentId) => {
+              location.hash = `#/fees?studentId=${encodeURIComponent(studentId)}`;
+            },
+            // The child's id travels with the link: the results API reads the
+            // caller's own id when none is given, and a guardian has none.
+            onOpenResults: (studentId) => {
+              location.hash = `#/results?studentId=${encodeURIComponent(studentId)}`;
+            },
           });
         },
       },
@@ -839,15 +924,25 @@ async function main() {
         glyph: 'clipboard',
         hidden: true,
         mount: (container) => {
-          new AssignmentsView({ root: container, doc: document, auth, outbox: engine });
+          assignmentsView = new AssignmentsView({ root: container, doc: document, auth, outbox: engine });
         },
+        unmount: () => { destroyView(assignmentsView); assignmentsView = null; },
+        // Only a student's submission goes to the outbox. A teacher's grade
+        // (and anything staff do here) is a direct POST that fails offline,
+        // so staff are told saving needs a connection, not that it is kept.
+        queuesOffline: auth.role === 'student',
       },
       {
         path: 'results',
         labelBn: 'ফলাফল',
         glyph: 'award',
         hidden: true,
-        mount: (container) => { new ResultsView({ root: container, doc: document, auth }); },
+        mount: (container) => {
+          const studentId = new URLSearchParams(
+            (location.hash.split('?')[1] ?? '')).get('studentId') ?? undefined;
+          resultsView = new ResultsView({ root: container, doc: document, auth, studentId });
+        },
+        unmount: () => { destroyView(resultsView); resultsView = null; },
       },
       // ── R-3: the management surface ───────────────────────────────
       // Every route stays REGISTERED for every role, as the comment on
@@ -1120,6 +1215,24 @@ async function main() {
         mount: (container) => { new AuditView({ root: container, doc: document, auth }); },
       },
       {
+        path: 'security',
+        labelBn: 'নিরাপত্তা',
+        glyph: 'lock',
+        hidden: true,
+        mount: (container) => {
+          new SecurityView({ root: container, doc: document, auth });
+        },
+      },
+      {
+        path: 'export',
+        labelBn: 'তথ্য রপ্তানি',
+        glyph: 'download',
+        hidden: true,
+        mount: (container) => {
+          new ExportView({ root: container, doc: document, auth });
+        },
+      },
+      {
         path: 'adminsettings',
         labelBn: 'সেটিংস',
         glyph: 'settings',
@@ -1207,7 +1320,7 @@ async function main() {
     ];
 
     const brand = cachedBranding(brandingKey);
-    return new Shell({
+    const built = new Shell({
       root,
       doc: document,
       routes,
@@ -1252,13 +1365,48 @@ async function main() {
           }
         : undefined,
     });
+    // IMPLEMENTATION §7: the offline state says how much is waiting. The shell
+    // holds no queue, so the outbox reports its own size — once on boot, and
+    // again on every change the engine emits (a queued op, a drained one).
+    // `pending + inflight` is what has not landed on the server yet; conflicts
+    // and failures are not "waiting", and the outbox screen owns those.
+    reportQueue = (st) => { built.setPending(st.pending + st.inflight); };
+    // Every change also reaches the automatic flush, which arms its retry
+    // and asks for a Background Sync while anything is waiting.
+    const paintQueue = reportQueue;
+    reportQueue = (st) => { paintQueue(st); flusher?.progress(st); };
+    built.onDestroy(() => {
+      flusher?.stop();
+      flusher = null;
+      navigator.serviceWorker?.removeEventListener('message', onSwMessage);
+    });
+    void engine.state().then(reportQueue).catch(() => { /* no store yet: the figure stays hidden */ });
+    return built;
   }
 
   let shell: Shell | null = null;
+  /**
+   * Whose queued work the session-ended card counts. Captured when the shell
+   * starts, because `onSessionEnded` fires after auth has cleared its state —
+   * and on a shared phone the outbox may also hold somebody else's register.
+   */
+  let lastOwner: { tenantId: string; actorId: string } | null = null;
   // Held so the route's `unmount` can drop the screen's connectivity
   // listeners. Without it, navigating away and back stacks one pair of
   // online/offline handlers per visit.
   let attendanceScreen: AttendanceScreen | null = null;
+  // Held so the marks route can ask whether typed marks are still unsaved,
+  // and drop the sheet's outbox listener when it is left.
+  let marksView: MarksView | null = null;
+  // Same reason, for the screens that listen for the connection coming back.
+  let routineView: RoutineView | null = null;
+  let feesView: FeesView | null = null;
+  let assignmentsView: AssignmentsView | null = null;
+  let resultsView: ResultsView | null = null;
+  /** `destroy()` when the view has one; a view without it holds nothing. */
+  function destroyView(view: object | null): void {
+    (view as { destroy?: () => void } | null)?.destroy?.();
+  }
 
   /**
    * Pull the unread count and paint the badge.
@@ -1286,6 +1434,128 @@ async function main() {
     applyBranding(document, b, { tenantKey: brandingKey });
     shell?.setInstitution({ name: brandName(b), logoUrl: b.logoUrl });
   });
+
+  /**
+   * The session is over.  (B-121)
+   *
+   * What this replaces: a dead session fell through `authedFetch` as a
+   * thrown `AuthError`, every view caught it with its generic handler, and
+   * the person got "কিছু সমস্যা হয়েছে। আবার চেষ্টা করুন।" above a retry
+   * button that could never succeed — because the credential, not the
+   * network, was finished. Observed by the owner on the হাজিরা tab.
+   *
+   * ── What is cleared, and what is NOT ──────────────────────────────────
+   * The same `purgeLocalData('logout')` a real logout runs: the session key
+   * and every read-through screen cache, so the next person's first paint
+   * is not this person's roster.
+   *
+   * The IndexedDB OUTBOX is deliberately untouched, exactly as in
+   * `doLogout` — a teacher's unsent attendance exists nowhere else, and a
+   * revoked session is not a reason to lose a morning's register. The sync
+   * engine only ever sends ops matching the signed-in identity, so it
+   * cannot be posted by whoever signs in next. Device facts (the device id)
+   * survive for the same reason they survive a logout: they identify the
+   * machine, not the person.
+   */
+  function showSessionEnded(reason: 'expired' | 'account_inactive'): void {
+    // Once, however many views were in flight.
+    //
+    // A screen has several sections loading at boot, so a dead credential
+    // refuses several requests within a few milliseconds and this fires once
+    // per request. Re-rendering each time would clear the alert out from
+    // under a screen reader and snatch focus back to the button while
+    // somebody is already reading it — and would re-run the purge for no
+    // reason. The marker lives on the node rather than in a variable so it
+    // cannot go stale: `showLogin` replaces the node, which resets it.
+    if (root.querySelector('[data-session-ended]')) return;
+
+    shell?.destroy();
+    shell = null;
+    root.textContent = '';
+
+    // Cleared BEFORE the screen is drawn, so nothing can re-cache behind it.
+    void purgeLocalData('logout').finally(() => { sweepNow('logout'); });
+
+    // 01 Shell & Auth §ক "সময় শেষ": the login card's frame, a glyph, the
+    // heading, one sentence, the queued-work panel and one primary.
+    const outer = document.createElement('div');
+    outer.className = 'login-wrap';
+    const wrap = document.createElement('div');
+    wrap.className = 'card login-card session-ended';
+    wrap.setAttribute('role', 'alert');
+    wrap.setAttribute('data-session-ended', reason);
+
+    // Two endings, two screens — heading, sentence and button together.
+    // Telling somebody whose account was suspended that their "session
+    // ended" and offering them a login sends them round a loop only the
+    // office can break, and they will press the button until somebody tells
+    // them why it does not work.
+    //
+    // A session revoked from the নিরাপত্তা screen (B-120) lands in the
+    // `expired` case, and that is correct rather than a gap: the server
+    // cannot tell the three apart (see `SessionEndReason`), and "sign in
+    // again" is the true and useful instruction for all of them.
+    const inactive = reason === 'account_inactive';
+
+    const glyph = document.createElement('span');
+    glyph.className = 'session-ended-glyph';
+    glyph.setAttribute('aria-hidden', 'true');
+    glyph.dataset.tone = inactive ? 'neutral' : 'warn';
+    glyph.innerHTML = iconSvg(inactive ? 'lock' : 'clock');
+    wrap.append(glyph);
+
+    const h = document.createElement('h1');
+    h.className = 'session-ended-title';
+    h.textContent = inactive ? 'অ্যাকাউন্টটি সক্রিয় নেই' : 'সময় শেষ হয়ে গেছে';
+    wrap.append(h);
+
+    const p = document.createElement('p');
+    p.className = 'session-ended-text';
+    // The drawing says "যা লিখেছিলেন তা এই যন্ত্রে জমা আছে". Only SUBMITTED
+    // work is kept (the outbox survives the purge); a register still being
+    // filled in is not saved anywhere, so the sentence is not promised here.
+    p.textContent = inactive
+      ? 'আপনার অ্যাকাউন্টটি এখন সক্রিয় নেই। প্রতিষ্ঠানের অফিসে যোগাযোগ করুন।'
+      : 'নিরাপত্তার জন্য আপনাকে বের করে দেওয়া হয়েছে। আবার প্রবেশ করুন।';
+    wrap.append(p);
+
+    // The queued count, when there is one. The outbox is never purged on a
+    // session end, so this work is still on the phone and will be sent after
+    // the next sign-in by the same person.
+    const queue = document.createElement('p');
+    queue.className = 'login-panel login-cooldown session-ended-queue';
+    queue.setAttribute('role', 'status');
+    queue.hidden = true;
+    wrap.append(queue);
+    if (lastOwner) {
+      const owner = lastOwner;
+      void store.counts(owner).then((c) => {
+        const n = c.pending + c.inflight;
+        if (n <= 0 || !queue.isConnected) return;
+        queue.textContent = '';
+        const num = document.createElement('span');
+        num.className = 'n';
+        num.textContent = formatCount(n, 'bn');
+        queue.append(num, `টি কাজ পাঠানো বাকি আছে — এই যন্ত্রে জমা আছে, আবার প্রবেশ করলে পাঠানো হবে।`);
+        queue.hidden = false;
+      }).catch(() => { /* no store: nothing to count, nothing to claim */ });
+    }
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn-primary btn-block ui-btn';
+    // The way back exists either way — a shared device may hold somebody
+    // else's account — but it is not dressed up as a login that will work.
+    btn.textContent = inactive ? 'লগইন স্ক্রিনে ফিরে যান' : 'আবার প্রবেশ করুন';
+    btn.addEventListener('click', () => { showLogin(); });
+    wrap.append(btn);
+
+    outer.append(wrap);
+    root.append(outer);
+    // Focus the one action, so a keyboard or screen-reader user lands on it
+    // rather than at the top of an empty page.
+    btn.focus();
+  }
 
   function showLogin(): void {
     shell?.destroy();

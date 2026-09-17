@@ -60,6 +60,7 @@ function stubAuth(home: unknown, wards = [ANIKA, BIJOY], seen: string[] = []) {
 
 async function mount(home: unknown, wards = [ANIKA, BIJOY], seen: string[] = []) {
   localStorage.clear();
+  dom.window.sessionStorage.clear();   // the child shared with ফলাফল (R4)
   const root = dom.window.document.getElementById('root') as HTMLElement;
   root.textContent = '';
   new GuardianView({
@@ -116,41 +117,47 @@ describe('guardian home (§9.1)', () => {
     // words on every main line would contradict the wireframe. What must
     // hold is that removing the colour leaves the card still readable —
     // which it does via the heading, a glyph, and the sub-line.
+    //
+    // Ata Ekta 04 §02 draws four figures with no glyph squares, and the tone
+    // sits on the figure itself (`.ui-stat[data-tone]`) only where it means
+    // something — বকেয়া in --danger. What this test guards is unchanged:
+    // every figure still reads with its colour removed.
     const cards = [...root.querySelectorAll('.ui-stat')];
-    assert.equal(cards.length, 2);
+    assert.equal(cards.length, 4);
     for (const card of cards) {
-      // The tone moved to the tinted glyph square when these became shared
-      // stat cards; what it means, and what this test guards, is unchanged.
-      const tone = card.querySelector('.ui-stat-glyph')?.getAttribute('data-tone');
-      assert.ok(tone, 'the card has a tone at all');
       const words = (card.textContent ?? '').replace(/[✓✗◔◑⌾⚠৳\s,.\d০-৯%–·\/]/g, '');
       assert.ok(words.length > 3, `"${card.textContent}" survives losing its colour`);
     }
+    // The coloured figure is there to be read without its colour.
+    assert.equal(root.querySelector('.ward-stat-fees')?.getAttribute('data-tone'), 'danger');
     // And the one that can be said in a word, is.
-    assert.match(cards[0].querySelector('.ui-stat-value')?.textContent ?? '', /উপস্থিত/);
+    assert.match(root.querySelector('.ward-stat-att .ui-stat-note')?.textContent ?? '', /উপস্থিত/);
   });
 
   test('attendance shows today and the month, in Bangla numerals', () => {
-    const card = root.querySelectorAll('.ui-stat')[0];
+    // Drawn as the label "এ মাসে হাজিরা" over the value, so the month and
+    // its percentage are no longer adjacent text.
+    const card = root.querySelector('.ward-stat-att') as HTMLElement;
     assert.match(card.textContent ?? '', /✓ উপস্থিত/);
-    assert.match(card.textContent ?? '', /এ মাসে ৯৪%/);
+    assert.match(card.querySelector('.ui-stat-label')?.textContent ?? '', /এ মাসে/);
+    assert.equal(card.querySelector('.ui-stat-value')?.textContent, '৯৪%');
   });
 
   test('fees show the amount and the NEXT due date', () => {
-    const card = root.querySelectorAll('.ui-stat')[1];
+    // 04 §02's grid order puts বকেয়া third, so it is found by name, not index.
+    const card = root.querySelector('.ward-stat-fees') as HTMLElement;
     assert.match(card.textContent ?? '', /2,500/);
     assert.match(card.textContent ?? '', /শেষ তারিখ/);
   });
 
   test('an overdue bill reads differently from one merely due', async () => {
     const r = await mount({ ...HOME, fees: { outstanding: 2500, earliestDue: '2026-07-15', overdueCount: 2 } });
-    const card = r.querySelectorAll('.ui-stat')[1];
-    // The P2 stat card's tones are the palette's semantic set — there is no
-    // `danger` step, and overdue takes `warn`. That is a rename, not a
-    // loosening: the property this test exists to guard is that an overdue
-    // bill READS differently, and F-812 requires that difference to be in
-    // words rather than in a tint. So the words are what is asserted.
-    assert.equal(card.querySelector('.ui-stat-glyph')?.getAttribute('data-tone'), 'warn');
+    const card = r.querySelector('.ward-stat-fees') as HTMLElement;
+    // Ata Ekta §3: বকেয়া is --danger, on the figure itself, overdue or not.
+    // The property this test exists to guard is that an overdue bill READS
+    // differently, and F-812 requires that difference to be in words rather
+    // than in a tint. So the words are what is asserted.
+    assert.equal(card.getAttribute('data-tone'), 'danger');
     assert.match(card.textContent ?? '', /২টি বিল সময় পেরিয়েছে/);
     // …and demonstrably different from the merely-due wording.
     assert.doesNotMatch(card.textContent ?? '', /শেষ তারিখ/);
@@ -158,23 +165,30 @@ describe('guardian home (§9.1)', () => {
 
   test('nothing owed is stated as good news, not as an empty card', async () => {
     const r = await mount({ ...HOME, fees: { outstanding: 0, earliestDue: null, overdueCount: 0 } });
-    const card = r.querySelectorAll('.ui-stat')[1];
+    const card = r.querySelector('.ward-stat-fees') as HTMLElement;
     assert.match(card.textContent ?? '', /✓ বকেয়া নেই/);
     assert.match(card.textContent ?? '', /সব পরিশোধিত/);
   });
 
-  test('the rank is never shown without its cohort', () => {
+  test('the rank is never shown without its cohort', async () => {
     // "৭" alone is meaningless; "৭/৫২" is a fact. §9.1 draws it that way.
-    // The GPA and the rank are the result card's subtitle now; the rule they
-    // guard is unchanged — a rank is never shown without its cohort.
-    assert.match(root.querySelector('.ui-card-sub')?.textContent ?? '',
-                 /GPA 4\.56 · মেধাক্রম ৭\/৫২/);
+    // The GPA and the rank are figures in 04 §02's grid now, the GPA in
+    // Bangla digits as the results screen writes it; the rule they guard is
+    // unchanged — a rank is never shown without its cohort.
+    assert.equal(root.querySelector('.ward-stat-gpa .ui-stat-value')?.textContent, '৪.৫৬');
+    assert.match(root.querySelector('.ward-stat-rank')?.textContent ?? '', /মেধাক্রম/);
+    assert.equal(root.querySelector('.ward-stat-rank .ui-stat-value')?.textContent, '৭/৫২');
+    const r = await mount({ ...HOME, result: { ...HOME.result, sectionSize: null } });
+    assert.equal(r.querySelector('.ward-stat-rank'), null, 'no cohort, no rank');
+    assert.doesNotMatch(r.textContent ?? '', /মেধাক্রম/, 'not as a figure, and not anywhere else');
   });
 
   test('no published result means no result card at all', async () => {
     const r = await mount({ ...HOME, result: null });
-    assert.equal(r.querySelector('.ui-card-sub'), null,
-                 'an empty results card would read as "your child has no marks"');
+    assert.equal(r.querySelector('.ward-stat-gpa'), null,
+                 'an empty results figure would read as "your child has no marks"');
+    assert.equal(r.querySelector('.ward-stat-rank'), null);
+    assert.doesNotMatch(r.textContent ?? '', /GPA|মেধাক্রম/, 'nothing on the page claims marks');
   });
 
   test('payment is one tap from home', () => {

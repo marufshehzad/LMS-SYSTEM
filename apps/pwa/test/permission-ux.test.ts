@@ -146,7 +146,9 @@ SCREENS.push({
   // The GPA, not the exam name: with a single result the name lives only in
   // the tab strip, which is not rendered. The GPA is on screen and is exactly
   // as privileged — it is the thing a refused reader must not still see.
-  secret: '5\.00',
+  // Either digit set: the Ata Ekta hero paints it '৫.০০' (03 Student §04), and
+  // a pattern that only knew '5.00' would pass a leak of the Bangla figure.
+  secret: '[5৫][.][0০][0০]',
   cached: [{
     examId: 'e1', examNameBn: 'গোপন-পরীক্ষা', examType: 'terminal',
     totalMarks: '500', totalMax: '500', percentage: '100', gpa: '5.00',

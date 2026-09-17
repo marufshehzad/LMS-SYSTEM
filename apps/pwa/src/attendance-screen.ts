@@ -1,10 +1,9 @@
 /**
  * The attendance screen. (UI integration plan, P3 — highest priority)
  *
- * `AttendanceView` renders the grid and owns the save path; it is deliberately
- * untouched by this phase, because that path is the product's one durable
- * write and §"Do NOT restructure the outbox/save/sync implementation merely
- * for UI" is the right rule. **This module is everything around it**: which
+ * `AttendanceView` renders the register and owns the save path — the product's
+ * one durable write. Since Ata Ekta path খ it sends only the students the
+ * teacher marked, behind three guards (see attendance-view.ts). **This module is everything around it**: which
  * section, which roster, and the eleven moments before and after the grid is
  * on screen.
  *
@@ -24,22 +23,26 @@
  * ── The states §"ATTENDANCE" names, and where each lives ───────────────────
  *   1 loading        · this module — skeleton while sections/roster load
  *   2 empty          · this module — no sections, or a section with no students
- *   3 loaded         · AttendanceView's grid
- *   4 saving         · the save button's busy state (P2 `onClickBusy`)
- *   5 saved          · the "সংরক্ষিত" snackbar + the chip
+ *   3 loaded         · AttendanceView's register (path খ: rows start unset)
+ *   4 saving         · the confirm sheet's "জমা দিন" busy state (`onClickBusy`)
+ *   5 saved          · this module's toast, in words: on the device vs sending;
+ *                      then the register's footer, for as long as the marks
+ *                      are unchanged (saved, when, the tally, sent or not)
  *   6 offline        · the shell banner + an explicit line in the status strip
- *   7 queued         · the sync chip, with the count
- *   8 syncing        · the chip, while a flush is in flight
- *   9 sync failed    · the chip + a RETRY button that did not exist
- *  10 retry          · this module — `outbox.flush()` on demand
+ *   7 queued         · the sync line, with the count
+ *   8 syncing        · the sync line, while a flush is in flight
+ *   9 sync failed    · the sync line + a RETRY button that did not exist
+ *  10 retry          · this module — `outbox.flush({ ignoreBackoff })` on demand
  *  11 permission     · this module — 403 from sections/roster
  *  12 error          · this module — anything else, through `humanError`
- *  13 success        · the snackbar, and the chip returning to "সিঙ্ক হয়েছে"
+ *  13 success        · the toast, and the sync line clearing
  *
  * ── What the teacher must always be able to see ────────────────────────────
- * Section · date · subject/period · student count · **how many marked** ·
- * whether saved · whether only queued locally. The status strip below carries
- * all seven, in words. Colour never carries any of them alone.
+ * Section and subject: the picker strip. How many are marked, and how many are
+ * left: the register's progress strip (only students the teacher marked).
+ * The date: the confirm sheet, which every submit passes through. Whether
+ * saved or only queued locally: the toast, the register's saved footer and
+ * the sync line. In words; colour never carries any of them alone.
  */
 import type { Auth } from './auth.ts';
 import type {
@@ -50,7 +53,8 @@ import type { Student } from '../../../packages/ui-core/src/attendance-grid.ts';
 import { AttendanceView, type OutboxLike } from './attendance-view.ts';
 import {
   el, append, icon, button, pageHeader, field, emptyState, errorState,
-  permissionState, listSkeleton, humanError, announce, toast, badge,
+  permissionState, listSkeleton, humanError, announce, toast, badge, confirmOverlay,
+  focusIsLost, permissionMessageWithContact, type OverlayHandle,
 } from './ui/index.ts';
 import { formatCount } from '../../../packages/ui-core/src/format.ts';
 
@@ -112,9 +116,43 @@ export class AttendanceScreen {
   private view: AttendanceView | null = null;
   private gridHost!: HTMLElement;
   private statusHost!: HTMLElement;
-  private saveBtn: HTMLButtonElement | null = null;
-  private marked = 0;
+  private busy = false;
   private onConnectivity?: () => void;
+  /**
+   * The shell's automatic flush reports every attempt as `shikhon:outbox` on
+   * the document. The sync line used to read the queue only when this screen
+   * painted, so a register sent by that flush — at boot, on reconnect, after
+   * a visit to another tab — left "১টি অপেক্ষমাণ … পাঠানো হচ্ছে" standing
+   * over an empty queue for as long as the screen stayed open.
+   */
+  private onOutbox?: () => void;
+  /**
+   * The sync line on screen, and the badge it shows (`state|label`). The line
+   * lives in the status strip's aria-live region, so it is built once and then
+   * changed in place — only the part whose words changed — and never removed
+   * and drawn again while there is still something to say.
+   */
+  private syncLine: HTMLElement | null = null;
+  private syncKey = '';
+  /** "এখন অফলাইন …", while the device is offline. Same rule as the sync line. */
+  private offlineNote: HTMLElement | null = null;
+  /** Sync-line paints run one after another; see paintSync. */
+  private syncRunning: Promise<void> = Promise.resolve();
+  private syncQueued: Promise<void> | null = null;
+  /**
+   * The page header and the picker strip outlive a render. The section select
+   * used to be rebuilt by every render — twice per section change (loading,
+   * then ready) — so the control a person was using vanished under them: one
+   * ArrowDown switched the section and dropped focus to <body>.
+   */
+  private headerEl: HTMLElement | null = null;
+  private regEl: HTMLElement | null = null;
+  private pickersEl: HTMLElement | null = null;
+  private sectionSelect: HTMLSelectElement | null = null;
+  /** The section list the picker strip was built from. */
+  private pickersFor = '';
+  /** The "discard these marks?" question, while it is open. */
+  private switchAsk: OverlayHandle | null = null;
 
   constructor(options: AttendanceScreenOptions) {
     this.o = options;
@@ -126,6 +164,14 @@ export class AttendanceScreen {
     this.onConnectivity = () => this.paintStatus();
     addEventListener('online', this.onConnectivity);
     addEventListener('offline', this.onConnectivity);
+    // After every flush attempt the queue is read again: the sync line, and
+    // the register's saved footer ("এখনো পাঠানো হয়নি" → "জমা হয়েছে").
+    this.onOutbox = () => {
+      if (!this.statusHost?.isConnected) return;
+      void this.view?.refreshSaved();
+      void this.paintSync();
+    };
+    this.o.doc.addEventListener('shikhon:outbox', this.onOutbox);
   }
 
   destroy(): void {
@@ -133,6 +179,17 @@ export class AttendanceScreen {
       removeEventListener('online', this.onConnectivity);
       removeEventListener('offline', this.onConnectivity);
     }
+    if (this.onOutbox) this.o.doc.removeEventListener('shikhon:outbox', this.onOutbox);
+  }
+
+  /**
+   * A register with marks that no save holds. The shell asks this before a
+   * tab, the bell or Android back leaves the route; the section picker asks
+   * it before switching. Nothing marked, or nothing changed since the last
+   * save, is nothing to lose.
+   */
+  hasUnsavedChanges(): boolean {
+    return this.view?.hasUnsavedChanges() ?? false;
   }
 
   /* ── data ───────────────────────────────────────────────────────────── */
@@ -173,19 +230,28 @@ export class AttendanceScreen {
     this.phase = 'loading';
     this.render();
 
+    // This section's cached roster, or none. Keeping the previous section's
+    // children here drew them under the new section's name whenever the new
+    // one had no cache and the fetch failed — and a save would have sent them.
     const cached = read<RosterStudent[]>(rosterCache(sectionId));
-    if (cached?.length) this.roster = cached;
+    this.roster = cached?.length ? cached : [];
 
     try {
       const res = await this.o.auth.authedFetch(
         `/api/v1/academics/roster?sectionId=${encodeURIComponent(sectionId)}`);
+      // A later choice owns the screen now. With focus kept on the select,
+      // quick arrow presses overlap these fetches, and a late answer must not
+      // draw its roster under another section's label.
+      if (sectionId !== this.sectionId) return;
       if (res.status === 403) { this.phase = 'denied'; this.render(); return; }
       if (!res.ok) throw new Status(res.status);
       const body = (await res.json()) as { roster: RosterStudent[] };
+      if (sectionId !== this.sectionId) return;
       this.roster = body.roster ?? [];
       write(rosterCache(sectionId), this.roster);
       safeSet(LAST_SECTION_KEY, sectionId);
     } catch (err) {
+      if (sectionId !== this.sectionId) return;
       if (!this.roster.length) {
         this.phase = 'error';
         this.errText = humanError(navigator.onLine ? null : 'offline',
@@ -208,18 +274,52 @@ export class AttendanceScreen {
   private render(): void {
     const d = this.o.doc;
     const root = this.o.root;
-    root.textContent = '';
     this.view = null;
-    this.saveBtn = null;
 
-    const sec = this.section();
-    append(root, pageHeader(d, {
-      title: 'হাজিরা',
-      subtitle: sec
-        ? 'আজকের ক্লাসের উপস্থিতি নিন — অফলাইনেও কাজ করে, সংযোগ পেলে নিজেই জমা হয়।'
-        : 'শ্রেণির উপস্থিতি নিন।',
-      actions: this.sections.length > 1 ? [this.sectionPicker()] : [],
-    }));
+    // The register: one full-bleed column of strips. The picker strip stays
+    // above every state but "denied", so a teacher can always leave a section
+    // that has no students or failed to load.
+    const showPickers = this.sections.length > 0 && this.phase !== 'denied';
+    const pickersFor = showPickers
+      ? JSON.stringify(this.sections.map((s) => [s.id, sectionLabel(s)]))
+      : '';
+    const keep = showPickers && pickersFor === this.pickersFor
+      && this.headerEl?.parentNode === root
+      && this.regEl?.parentNode === root
+      && this.pickersEl?.parentNode === this.regEl;
+
+    if (keep) {
+      // Same sections: keep the header and the picker strip — with the select
+      // the person may be using — and replace only what sits below them.
+      for (const n of [...root.childNodes]) {
+        if (n !== this.headerEl && n !== this.regEl) n.remove();
+      }
+      for (const n of [...this.regEl!.childNodes]) {
+        if (n !== this.pickersEl) n.remove();
+      }
+      if (this.sectionSelect && this.sectionId && this.sectionSelect.value !== this.sectionId) {
+        this.sectionSelect.value = this.sectionId;
+      }
+    } else {
+      root.textContent = '';
+      // §02 draws no page title on a phone; the h1 stays in the DOM (visually
+      // hidden below 1024px by .att-page-header) for the heading outline.
+      this.headerEl = pageHeader(d, { title: 'হাজিরা', className: 'att-page-header' });
+      append(root, this.headerEl);
+      this.regEl = el(d, 'div', { className: 'att-register' });
+      this.pickersEl = null;
+      this.sectionSelect = null;
+      this.pickersFor = '';
+      if (showPickers) {
+        this.pickersEl = el(d, 'div', { className: 'att-pickers' },
+          this.sectionPicker(),
+          this.o.subjectBn ? this.subjectPicker() : null);
+        append(this.regEl, this.pickersEl);
+        append(root, this.regEl);
+        this.pickersFor = pickersFor;
+      }
+    }
+    const reg = this.regEl!;
 
     switch (this.phase) {
       case 'loading':
@@ -227,17 +327,18 @@ export class AttendanceScreen {
         return;
 
       case 'denied':
-        append(root, permissionState(d, {
-          message: 'এই সেকশনের হাজিরা নেওয়ার অনুমতি আপনার নেই।',
-          contact: 'প্রধান শিক্ষক',
-        }));
+        // The canonical refusal (lead decision 4). The screen's own sentence
+        // went through permissionState's contact line, which printed
+        // "প্রধান শিক্ষক-এর" instead of "প্রধান শিক্ষকের".
+        append(root, permissionState(d, { message: permissionMessageWithContact() }));
         return;
 
       case 'error':
         append(root, errorState(d, this.errText, () => { void this.boot(); }));
         return;
 
-      case 'empty':
+      case 'empty': {
+        const sec = this.section();
         append(root, this.sections.length
           ? emptyState(d, {
               // Named, and with the way out. "No data" on a screen a teacher
@@ -252,26 +353,26 @@ export class AttendanceScreen {
               action: { label: 'রুটিন দেখুন', onClick: () => { location.hash = '/routine'; } },
             }));
         return;
+      }
 
       case 'ready':
         break;
     }
 
-    // The status strip: section · date · subject · count · marked · saved.
+    const sec = this.section()!;
+    // Offline and sync state, in words.
     this.statusHost = el(d, 'div', { className: 'att-status', attrs: { 'aria-live': 'polite' } });
-    append(root, this.statusHost);
-
     this.gridHost = el(d, 'div', { className: 'att-host' });
-    append(root, this.gridHost);
+    append(reg, this.statusHost, this.gridHost);
 
     this.view = new AttendanceView({
       root: this.gridHost,
       doc: d,
       students: this.roster.map(toStudent),
       section: {
-        id: sec!.id,
-        labelBn: sectionLabel(sec!),
-        academicYearId: sec!.academicYearId,
+        id: sec.id,
+        labelBn: sectionLabel(sec),
+        academicYearId: sec.academicYearId,
       },
       takenOn: this.o.takenOn,
       periodNo: this.o.periodNo ?? null,
@@ -280,11 +381,13 @@ export class AttendanceScreen {
       newId: this.o.newId,
       now: this.o.now,
       embedded: true,
+      onConfirm: () => this.submit(),
+      // The register reached the server in a background flush: the sync line
+      // must not still count it as waiting under a footer that says sent.
+      onDeliveryChange: () => { void this.paintSync(); },
     });
 
-    this.adoptSaveButton();
-    this.watchMarks();
-    this.paintStatus();
+    void this.paintStatus();
   }
 
   private sectionPicker(): HTMLElement {
@@ -294,170 +397,266 @@ export class AttendanceScreen {
       kind: 'select',
       value: this.sectionId ?? '',
       options: this.sections.map((x) => ({ value: x.id, label: sectionLabel(x) })),
-      onChange: (v) => {
-        this.sectionId = v;
-        void this.loadRoster(v);
-      },
-      className: 'att-section-picker',
+      onChange: (v) => this.chooseSection(v),
     });
+    this.sectionSelect = f.input as HTMLSelectElement;
     return f.root;
   }
 
   /**
-   * Give the grid's save button a busy state and a single-flight guard.
-   *
-   * Done by adopting the existing button rather than by changing
-   * `AttendanceView.save()`: the save path stays exactly the code that has
-   * been tested since R-0, and the double-submit guard §17 requires is added
-   * around it. Two taps on a slow phone used to enqueue two sessions with two
-   * different opIds for the same register.
+   * A section chosen in the picker. Switching loads another roster and builds
+   * a fresh register, so marks not yet submitted would be gone — silently,
+   * and on desktop from a single ArrowDown on the focused select. With such
+   * marks on screen the select goes back to the current section and the
+   * teacher is asked first; "বাতিল" keeps the register, "বাদ দিন" switches.
    */
-  private adoptSaveButton(): void {
-    const btn = this.gridHost.querySelector<HTMLButtonElement>('button[data-action="save"]');
-    if (!btn || !this.view) return;
-    this.saveBtn = btn;
-    const clone = btn.cloneNode(true) as HTMLButtonElement;   // drops the old listener
-    btn.replaceWith(clone);
-    this.saveBtn = clone;
-    clone.classList.add('ui-btn', 'btn-block');
-
-    let busy = false;
-    clone.addEventListener('click', async () => {
-      if (busy) return;
-      busy = true;
-      clone.disabled = true;
-      clone.setAttribute('aria-busy', 'true');
-      try {
-        const result = await this.view!.save();
-        this.paintStatus();
-        // Says which state it reached, in words: saved locally is not the
-        // same promise as delivered, and on this network the difference is
-        // the whole day's work.
-        toast(this.o.doc, {
-          message: navigator.onLine
-            ? 'হাজিরা সংরক্ষিত — জমা হচ্ছে'
-            : 'হাজিরা এই যন্ত্রে সংরক্ষিত — সংযোগ পেলে নিজেই জমা হবে',
-          tone: 'success',
-        });
-        await result.flushed;
-        void this.view!.paintChip();
-        this.paintStatus();
-      } catch (err) {
-        // Enqueue itself failing means IndexedDB refused — genuinely rare and
-        // genuinely fatal to this register, so it is said plainly and the
-        // marks stay on screen to be saved again.
-        toast(this.o.doc, {
-          message: 'হাজিরা সংরক্ষণ করা যায়নি। আবার চেষ্টা করুন।',
-          tone: 'error',
-        });
-        console.error('[attendance] enqueue failed', err);
-      } finally {
-        busy = false;
-        clone.disabled = false;
-        clone.removeAttribute('aria-busy');
-      }
+  private chooseSection(v: string): void {
+    if (v === this.sectionId) return;
+    if (!this.hasUnsavedChanges()) { this.switchSection(v); return; }
+    if (this.sectionSelect && this.sectionId) this.sectionSelect.value = this.sectionId;
+    // One question at a time. A dialog closed from outside (a route change
+    // closes every overlay) calls neither answer, so ask the DOM, not the flag.
+    if (this.switchAsk?.el.isConnected) return;
+    this.switchAsk = confirmOverlay(this.o.doc, {
+      title: 'হাজিরা জমা দেওয়া হয়নি',
+      body: 'এই সেকশনের হাজিরা এখনো জমা দেওয়া হয়নি। সেকশন বদলালে চিহ্নগুলো হারিয়ে যাবে।',
+      confirmLabel: 'বাদ দিন',
+      danger: true,
+      // Focus returns to the select (the dialog's opener), which the switch
+      // keeps in place.
+      onConfirm: () => { this.switchAsk = null; this.switchSection(v); },
+      onCancel: () => { this.switchAsk = null; },
     });
   }
 
-  /**
-   * How many the teacher has actually decided about.
-   *
-   * NOT a count of tiles with a status: `AttendanceGrid` starts every student
-   * at `present`, so that number is the class size from the first frame and
-   * would be a reassuring lie. `touched` is the honest measure — the students
-   * whose status this teacher has set by hand — and it is labelled "হাতে
-   * চিহ্নিত" rather than "চিহ্নিত" so it cannot be read as "the register is
-   * only half done". The authoritative tally stays the grid's own
-   * present/absent/late counters, which have been there since R-0.
-   */
-  private watchMarks(): void {
-    const recount = () => {
-      const snap = this.view?.state;
-      if (!snap) return;
-      const n = snap.entries.filter((e) => e.touched).length;
-      if (n !== this.marked) { this.marked = n; this.paintStatus(); }
-    };
-    this.gridHost.addEventListener('click', () => setTimeout(recount, 0));
-    this.gridHost.addEventListener('keyup', () => setTimeout(recount, 0));
-    recount();
+  private switchSection(v: string): void {
+    this.sectionId = v;
+    void this.loadRoster(v);
   }
 
   /**
-   * The seven facts, in words.
-   *
-   * §"The teacher must always know: what section, what date, what
-   * subject/period, how many students, how many marked, whether changes are
-   * saved, whether changes are only queued locally." Colour echoes; the text
-   * carries.
+   * The subject, stated. The screen is handed one subject and has no list to
+   * choose from, so this select is disabled — it names, it does not pick.
    */
-  private paintStatus(): void {
-    if (!this.statusHost) return;
+  private subjectPicker(): HTMLElement {
+    return field(this.o.doc, {
+      label: 'বিষয়',
+      name: 'subject',
+      kind: 'select',
+      value: 'subject',
+      options: [{ value: 'subject', label: this.o.subjectBn! }],
+      disabled: true,
+    }).root;
+  }
+
+  /**
+   * The confirm sheet's "জমা দিন". Single-flight: a second call while one is
+   * in flight enqueues nothing. It holds only until the register is durable on
+   * the device (the enqueue), then closes the sheet and says which state it
+   * reached in words — saved locally is not the same promise as delivered.
+   * The flush runs on in the background and repaints the sync line.
+   *
+   * The sheet is closed BEFORE the toast: while it is open every other body
+   * child is aria-hidden, the toast host included, and a message written
+   * there is never announced.
+   *
+   * Resolves `false` on failure, so the sheet stays open with the marks and
+   * the view shows the failure inside the sheet (role=alert).
+   */
+  private async submit(): Promise<boolean> {
+    if (this.busy || !this.view) return false;
+    this.busy = true;
     const d = this.o.doc;
-    const sec = this.section();
-    this.statusHost.textContent = '';
-
-    const facts = el(d, 'div', { className: 'att-facts' });
-    const fact = (label: string, value: string) => {
-      append(facts, el(d, 'span', { className: 'att-fact' },
-        el(d, 'span', { className: 'att-fact-label', text: label }),
-        el(d, 'span', { className: 'att-fact-value', text: value })));
-    };
-    fact('সেকশন', sec ? sectionLabel(sec) : '—');
-    fact('তারিখ', bnDate(this.o.takenOn));
-    if (this.o.subjectBn) fact('বিষয়', this.o.subjectBn);
-    if (this.o.periodNo != null) fact('পিরিয়ড', formatCount(this.o.periodNo, 'bn'));
-    fact('শিক্ষার্থী', `${formatCount(this.roster.length, 'bn')} জন`);
-    fact('হাতে চিহ্নিত', `${formatCount(this.marked, 'bn')} / ${formatCount(this.roster.length, 'bn')}`);
-    append(this.statusHost, facts);
-
-    if (!navigator.onLine) {
-      append(this.statusHost, el(d, 'p', { className: 'att-offline-note' },
-        icon(d, 'wifi-off', 'att-offline-glyph'),
-        el(d, 'span', {
-          text: 'এখন অফলাইন — হাজিরা নিন, এই যন্ত্রে জমা থাকবে এবং সংযোগ পেলে নিজেই পাঠানো হবে।',
-        })));
+    try {
+      const view = this.view;
+      const result = await view.save();
+      view.closeConfirm();
+      void this.paintStatus();
+      const message = navigator.onLine
+        ? 'হাজিরা সংরক্ষিত — জমা হচ্ছে'
+        : 'হাজিরা এই যন্ত্রে সংরক্ষিত — সংযোগ পেলে নিজেই জমা হবে';
+      // Next task: the page's aria-hidden is lifted and focus has returned
+      // to the opener before the live region changes.
+      setTimeout(() => toast(d, { message, tone: 'success' }), 0);
+      void result.flushed.then(() => this.paintStatus());
+      return true;
+    } catch (err) {
+      // Enqueue itself failing means IndexedDB refused — genuinely rare and
+      // genuinely fatal to this register, so it is said plainly and the
+      // marks stay on screen to be saved again. The sheet is still open, so
+      // the view repeats this inside it where a screen reader can hear it.
+      toast(d, {
+        message: 'হাজিরা সংরক্ষণ করা যায়নি। আবার চেষ্টা করুন।',
+        tone: 'error',
+      });
+      console.error('[attendance] enqueue failed', err);
+      return false;
+    } finally {
+      this.busy = false;
     }
-    void this.paintSync();
+  }
+
+  /**
+   * Offline and sync, in words. Section and subject live in the picker strip,
+   * the date in the confirm sheet, and how many are marked in the register's
+   * own progress strip — which counts only students the teacher marked.
+   */
+  private paintStatus(): Promise<void> {
+    const host = this.statusHost;
+    if (!host) return Promise.resolve();
+    const d = this.o.doc;
+
+    // The strip is an aria-live region, and it used to be emptied and filled
+    // again on every paint — a reconnect, a submit, a retry — so the offline
+    // note and the sync line were read out again with nothing new to say.
+    // Each part is now added when it becomes true and removed when it stops.
+    const note = this.offlineNote?.parentNode === host ? this.offlineNote : null;
+    if (!navigator.onLine) {
+      if (!note) {
+        this.offlineNote = el(d, 'p', { className: 'att-offline-note' },
+          icon(d, 'wifi-off', 'att-offline-glyph'),
+          el(d, 'span', {
+            text: 'এখন অফলাইন — জমা দিলে এই যন্ত্রে থাকবে, সংযোগ পেলে নিজেই পাঠানো হবে।',
+          }));
+        host.insertBefore(this.offlineNote, host.firstChild);
+      }
+    } else if (note) {
+      note.remove();
+      this.offlineNote = null;
+    }
+    // The register's own "saved" footer says whether it has left the device;
+    // it re-reads the queue whenever the sync line does.
+    void this.view?.refreshSaved();
+    return this.paintSync();
   }
 
   /**
    * The sync line, and the retry that never existed.
    *
-   * The chip in the grid's header has said "৩টি পাঠানো যায়নি" since R-0 with
-   * no way to act on it — a teacher reading it could only reload and hope.
+   * A queue that said "৩টি পাঠানো যায়নি" with no way to act on it left a
+   * teacher only reload-and-hope.
+   *
+   * Paints run one after another, each reading the queue when its turn comes.
+   * Run side by side, an older read that answered last (a flush report, the
+   * register's own delivery change and a reconnect can all ask at once) drew
+   * "১টি অপেক্ষমাণ" back over a queue a newer read had found empty. A request
+   * made while a paint is still waiting for its turn joins that paint: it has
+   * not read yet, so it will see the same change.
    */
-  private async paintSync(): Promise<void> {
-    const d = this.o.doc;
-    const old = this.statusHost.querySelector('.att-sync-line');
-    old?.remove();
-    let s: { pending: number; failed: number };
-    try { s = await this.o.outbox.state(); } catch { return; }
-    if (s.pending === 0 && s.failed === 0) return;
+  private paintSync(): Promise<void> {
+    if (this.syncQueued) return this.syncQueued;
+    const next = this.syncRunning.then(() => {
+      this.syncQueued = null;
+      return this.paintSyncNow();
+    });
+    this.syncQueued = next;
+    this.syncRunning = next.catch(() => { /* a failed paint never blocks the next */ });
+    return next;
+  }
 
-    const line = el(d, 'p', { className: 'att-sync-line', data: { state: s.failed ? 'failed' : 'queued' } });
-    append(line, badge(d, {
-      label: s.failed
-        ? `${formatCount(s.failed, 'bn')}টি পাঠানো যায়নি`
-        : `${formatCount(s.pending, 'bn')}টি অপেক্ষমাণ`,
-      tone: s.failed ? 'danger' : 'warn',
-      glyph: s.failed ? 'alert-triangle' : 'clock',
-    }));
-    append(line, el(d, 'span', {
-      className: 'att-sync-text',
-      text: s.failed
-        ? 'কিছু হাজিরা সার্ভারে পৌঁছায়নি। তথ্য এই যন্ত্রে নিরাপদ আছে।'
-        : 'হাজিরা এই যন্ত্রে জমা আছে, পাঠানো হচ্ছে।',
-    }));
-    append(line, button(d, {
+  private async paintSyncNow(): Promise<void> {
+    const d = this.o.doc;
+    const host = this.statusHost;
+    if (!host) return;
+    let s: Awaited<ReturnType<OutboxLike['state']>>;
+    try { s = await this.o.outbox.state(); } catch { return; }
+    // The screen drew a new status strip while the queue was being read.
+    if (host !== this.statusHost) return;
+
+    const old = this.syncLine?.parentNode === host ? this.syncLine : null;
+    // An op being sent right now has not arrived: it is still waiting. The
+    // engine reports it as `inflight`, not `pending`, and reading only
+    // `pending` took the line away for the length of every push — and a push
+    // that failed drew it back, so the live region read it out again.
+    const waiting = (s.pending ?? 0) + (s.inflight ?? 0);
+    const failed = s.failed ?? 0;
+    if (waiting === 0 && failed === 0) {
+      this.syncLine = null;
+      this.syncKey = '';
+      if (!old) return;
+      const hadFocus = old.contains(d.activeElement);
+      old.remove();
+      // The line (and a focused "আবার পাঠান") went because the queue emptied.
+      // The register's saved line, if there is one, says where it went.
+      if (hadFocus && focusIsLost(d)) this.view?.focusSaved();
+      return;
+    }
+
+    const state = failed ? 'failed' : 'queued';
+    const label = failed
+      ? `${formatCount(failed, 'bn')}টি পাঠানো যায়নি`
+      : `${formatCount(waiting, 'bn')}টি অপেক্ষমাণ`;
+    const text = failed
+      ? 'কিছু হাজিরা সার্ভারে পৌঁছায়নি। তথ্য এই যন্ত্রে নিরাপদ আছে।'
+      // Offline nothing is being sent, and the line said it was.
+      : navigator.onLine
+        ? 'হাজিরা এই যন্ত্রে জমা আছে, পাঠানো হচ্ছে।'
+        : 'হাজিরা এই যন্ত্রে জমা আছে, সংযোগ পেলে পাঠানো হবে।';
+    const key = `${state}|${label}`;
+    const newBadge = () => badge(d, {
+      label, tone: failed ? 'danger' : 'warn', glyph: failed ? 'alert-triangle' : 'clock',
+    });
+
+    if (!old) {
+      const line = el(d, 'p', { className: 'att-sync-line', data: { state } },
+        newBadge(),
+        el(d, 'span', { className: 'att-sync-text', text }),
+        this.retryButton());
+      append(host, line);
+      this.syncLine = line;
+      this.syncKey = key;
+      return;
+    }
+
+    // The line is already on screen: change only what now reads differently.
+    // A report that changes nothing touches nothing, so the live region stays
+    // quiet, and "আবার পাঠান" is the same button — a focused one keeps focus.
+    if (old.dataset.state !== state) old.dataset.state = state;
+    if (key !== this.syncKey) {
+      const shown = [...old.children].find((c) => c.classList.contains('ui-badge'));
+      if (shown) shown.replaceWith(newBadge());
+      else old.insertBefore(newBadge(), old.firstChild);
+      this.syncKey = key;
+    }
+    const words = [...old.children].find((c) => c.classList.contains('att-sync-text'));
+    if (words && words.textContent !== text) words.textContent = text;
+  }
+
+  /** The sync line's "আবার পাঠান". Built once per line; the line keeps it. */
+  private retryButton(): HTMLButtonElement {
+    const d = this.o.doc;
+    return button(d, {
       label: 'আবার পাঠান', variant: 'secondary', size: 'sm', glyph: 'refresh',
       onClick: async () => {
         announce(d, 'আবার পাঠানোর চেষ্টা হচ্ছে');
-        try { await this.o.outbox.flush(); } catch { /* stays queued */ }
-        void this.view?.paintChip();
-        this.paintStatus();
+        // A press means now. A plain flush() skips every op still waiting out
+        // the backoff of a failed send — up to minutes once a few sends have
+        // failed — so the press sent nothing and the line went on saying
+        // "পাঠানো হচ্ছে". Offline there is nothing to try now, and a failed
+        // attempt would only lengthen the wait the reconnect then has to sit
+        // out, so offline it stays the automatic flush.
+        try {
+          await (navigator.onLine
+            ? this.o.outbox.flush({ ignoreBackoff: true })
+            : this.o.outbox.flush());
+        } catch { /* stays queued */ }
+        if (!navigator.onLine) {
+          // Offline the line comes back reading exactly as before, so the
+          // press looked like it did nothing. Say what happened.
+          toast(d, {
+            message: 'ইন্টারনেট নেই — হাজিরা এই যন্ত্রে নিরাপদ আছে, সংযোগ পেলে নিজেই পাঠানো হবে।',
+            tone: 'info',
+          });
+        }
+        await this.paintStatus();
+        // The queue emptied, so this line and its button are gone and focus
+        // went with them. The register's saved line now says it arrived.
+        // (While anything is still queued the line, and this button, stay.)
+        if (focusIsLost(d) && !this.statusHost?.querySelector('.att-sync-line')) {
+          this.view?.focusSaved();
+        }
       },
-    }));
-    append(this.statusHost, line);
+    });
   }
 
   /** Test seam. */
@@ -496,13 +695,4 @@ function safeGet(key: string): string | null {
 }
 function safeSet(key: string, value: string): void {
   try { localStorage.setItem(key, value); } catch { /* quota */ }
-}
-
-const MONTHS_BN = ['জানুয়ারি', 'ফেব্রুয়ারি', 'মার্চ', 'এপ্রিল', 'মে', 'জুন', 'জুলাই',
-  'আগস্ট', 'সেপ্টেম্বর', 'অক্টোবর', 'নভেম্বর', 'ডিসেম্বর'];
-
-function bnDate(iso: string): string {
-  const [y, m, dd] = iso.split('-').map(Number);
-  if (!y || !m || !dd) return iso;
-  return `${formatCount(dd, 'bn')} ${MONTHS_BN[m - 1]} ${formatCount(y, 'bn')}`;
 }

@@ -3,26 +3,31 @@
  * tabs (04-UIUX: 360 px reference width); every additional feature page
  * lives here as a hash link, so deep links like #/fees keep working too.
  *
- * ── P6 ────────────────────────────────────────────────────────────────────
+ * ── Ata Ekta (01 Shell & Auth §ঘ, “আরও — সব পাতা, ছাঁকা হয় না”) ──────────
  *
- * This screen had **no page header at all** and rendered thirty-six
- * full-width `.more-item` strips down a 1110px column at desktop — the
- * longest stretched phone layout in the product, on the one screen every
- * role reaches.
+ * The design draws this page as ONE flush row list: a glyph, the page's name
+ * over a one-line description, and a chevron, in a 56px row with a hairline
+ * under it. No cards, no tinted glyph squares, no accent. So the markup is
+ * `pageHeader` (the one h1, title only — the design draws no subtitle, and the
+ * old one claimed a role filter the caption says does not exist) and a single
+ * `list()` of `listItem()` rows, in the order and number app.ts passes: every
+ * page, unfiltered. The same list serves both widths; at ≥1024px the sheet
+ * caps it (no desktop rendering is drawn).
  *
- * It is now `pageHeader` + `ui-card-grid`, which is the right primitive for
- * exactly this: the rows are a CHOICE with a sentence each, not records with
- * fields, so cards rather than a table. Three across at 1440, one on a phone.
+ * P6 replaced thirty-six full-width `.more-item` strips with a card grid;
+ * that grid painted the accent into every glyph square, against Ata Ekta's
+ * one-accent rule, and put an h3 inside each <button>, where heading
+ * navigation never reached it.
  *
- * The theme control keeps its own card. It lives on this screen rather than
- * in a settings screen because a tenant's settings screen is about the
- * SCHOOL's decisions — SMS length, push policy — and this is about the person
- * holding the phone. The storage rule and the three options stay in
- * `./ui/theme.ts`, shared with the shell's profile menu, so only one of them
- * owns how it is stored.
+ * Each row still names itself by its title alone, as the interactive card
+ * did: the button is labelled by the title and described by the subtitle, so
+ * a reader hears "বাড়ির কাজ, বোতাম" and then the sentence, not both run
+ * together as the name. Numbers in either line take the `.n` face — listItem
+ * wraps them where they stand ("১০ ভূমিকা · RLS আইসোলেশন").
+ *
+ * There is no theme card: Ata Ekta has no dark mode (§5).
  */
-import { pageHeader, card, el, append } from './ui/index.ts';
-import { readTheme, setTheme, THEME_OPTIONS, type ThemePref } from './ui/theme.ts';
+import { pageHeader, list, listItem, emptyState, uid } from './ui/index.ts';
 
 export interface MoreItem {
   path: string;
@@ -42,64 +47,45 @@ export class MoreView {
     const d = o.doc;
     o.root.textContent = '';
 
-    o.root.append(pageHeader(d, {
-      title: 'আরও',
-      subtitle: 'এই ভূমিকার জন্য যেসব পাতা আছে',
-    }));
+    o.root.append(pageHeader(d, { title: 'আরও' }));
 
-    const grid = el(d, 'div', { className: 'ui-card-grid' });
-    for (const item of o.items) {
-      append(grid, card(d, {
+    // Nothing is fetched here, so there is no loading, error or denied phase:
+    // each destination owns its own. Empty is unreachable in production (app.ts
+    // always passes the full list), but it must still say what is missing and
+    // where to go — never an invisible, borderless nothing.
+    if (!o.items.length) {
+      o.root.append(emptyState(d, {
+        glyph: 'more-horizontal',
+        message: 'এখনো কোনো পাতা নেই।',
+        detail: 'হোম থেকে আপনার কাজ শুরু করুন।',
+        action: { label: 'হোমে যান', onClick: () => { location.hash = '/home'; } },
+      }));
+      return;
+    }
+
+    const rows = o.items.map((item) => {
+      const li = listItem(d, {
         title: item.titleBn,
         subtitle: item.subtitleBn,
         glyph: item.glyph,
-        variant: 'interactive',
-        headingLevel: 3,
         onClick: () => { location.hash = `/${item.path}`; },
-      }));
-    }
-    o.root.append(grid);
-
-    o.root.append(themePicker(d));
-  }
-}
-
-/**
- * F-1607. Theme choice: follow the phone, or pin light or dark.
- *
- * A `radiogroup` of three, not a select: three options that are all visible
- * is one glance, and the choice is about what the person is looking at.
- */
-function themePicker(d: Document): HTMLElement {
-  const group = el(d, 'div', {
-    className: 'theme-options',
-    attrs: { role: 'radiogroup', 'aria-label': 'রঙের ধরন' },
-  });
-
-  const current: ThemePref = readTheme();
-
-  for (const opt of THEME_OPTIONS) {
-    const btn = el(d, 'button', {
-      className: 'theme-option', text: opt.labelBn, attrs: { type: 'button', role: 'radio' },
-    });
-    const chosen = current === opt.value;
-    btn.setAttribute('aria-checked', String(chosen));
-    btn.dataset.chosen = String(chosen);
-    btn.addEventListener('click', () => {
-      setTheme(opt.value);
-      for (const other of group.querySelectorAll('.theme-option')) {
-        const isThis = other === btn;
-        other.setAttribute('aria-checked', String(isThis));
-        (other as HTMLElement).dataset.chosen = String(isThis);
+      });
+      const hit = li.querySelector<HTMLElement>('.ui-list-hit');
+      const title = li.querySelector<HTMLElement>('.ui-list-title');
+      const sub = li.querySelector<HTMLElement>('.ui-list-sub');
+      if (hit && title) {
+        title.id = uid('more');
+        hit.setAttribute('aria-labelledby', title.id);
+        if (sub) {
+          sub.id = uid('more');
+          hit.setAttribute('aria-describedby', sub.id);
+        }
       }
+      return li;
     });
-    append(group, btn);
-  }
 
-  return card(d, {
-    title: 'রঙের ধরন',
-    subtitle: 'এই যন্ত্রে সংরক্ষিত হবে — প্রতিষ্ঠানের কারও জন্য বদলাবে না।',
-    glyph: 'star',
-    headingLevel: 2,
-  }, group);
+    const ul = list(d, 'সব পাতা', ...rows);
+    ul.classList.add('more-list');
+    o.root.append(ul);
+  }
 }

@@ -155,6 +155,70 @@ describe('P2 — one declaration, two renderings', () => {
     const ul = list(doc(), 'নোটিশসমূহ', li);
     assert.equal(ul.getAttribute('aria-label'), 'নোটিশসমূহ');
   });
+
+  test('the table/list swap is scoped to a shell that holds both shapes', () => {
+    // Hand-built rule-০৩ matrices also sit in `.ui-data > .ui-table-scroll`;
+    // without the marker the 1024px swap would blank them on a phone.
+    const t = dataTable(doc(), {
+      columns: COLS, rows: STUDENTS, rowKey: (r) => r.id, caption: 'x',
+    });
+    assert.equal(t.dataset.shape, 'table-list');
+    const empty = dataTable(doc(), {
+      columns: COLS, rows: [], rowKey: (r: Student) => r.id, caption: 'x',
+    });
+    assert.equal(empty.hasAttribute('data-shape'), false);
+  });
+
+  test('numbers are set in the .n face without changing what is read', () => {
+    const t = dataTable(doc(), {
+      columns: COLS, rows: STUDENTS, rowKey: (r) => r.id, caption: 'x',
+    });
+    const rolls = [...t.querySelectorAll('tbody td[data-col="roll"]')];
+    assert.equal(rolls.length, STUDENTS.length);
+    for (const td of rolls) assert.ok(td.classList.contains('n'), 'a numeric cell is a figure');
+    for (const th of t.querySelectorAll('th[scope="row"]')) {
+      assert.equal(th.classList.contains('n'), false, 'a name has no digits');
+    }
+    const meta = t.querySelector('.ui-list-meta')!;
+    assert.ok([...meta.querySelectorAll('span.n')].some((n) => n.textContent === '01712345678'));
+    assert.match(meta.textContent ?? '', /অভিভাবকের ফোন:/);
+
+    const title = listItem(doc(), { title: '১৯ মে সমাবেশ' }).querySelector('.ui-list-title')!;
+    const num = title.querySelector('span.n');
+    assert.equal(num?.textContent, '১৯');
+    assert.equal(num?.parentElement, title);
+    assert.equal(title.classList.contains('n'), false);
+    assert.equal(title.textContent, '১৯ মে সমাবেশ');
+  });
+
+  test('the action column header is a real cell with a hidden label', () => {
+    const t = dataTable(doc(), {
+      columns: COLS, rows: STUDENTS, rowKey: (r) => r.id, caption: 'x',
+      onRowClick: () => {},
+    });
+    const th = t.querySelector('thead th.ui-table-action[scope="col"]')!;
+    assert.ok(th, 'the action column has no header cell');
+    assert.equal(th.querySelector('.ui-sr-only')?.textContent, 'ক্রিয়া');
+    assert.equal(t.querySelector('thead tr')!.children.length,
+      t.querySelector('tbody tr')!.children.length, 'the header band stops a column short');
+  });
+
+  test('an empty table without a caller message still says something human', () => {
+    const t = dataTable(doc(), {
+      columns: COLS, rows: [], rowKey: (r: Student) => r.id, caption: 'শিক্ষার্থী',
+    });
+    assert.match(t.textContent ?? '', /এখনো কিছু নেই/);
+    assert.equal(t.querySelector('table'), null);
+  });
+
+  test('a status figure can carry its meaning tone', () => {
+    const toned = listItem(doc(), { title: 'x', status: '৯৬%', statusTone: 'success' })
+      .querySelector('.ui-list-status')!;
+    assert.equal(toned.getAttribute('data-tone'), 'success');
+    assert.ok(toned.classList.contains('n'));
+    assert.equal(listItem(doc(), { title: 'x', status: '৯৬%' })
+      .querySelector('.ui-list-status')?.hasAttribute('data-tone'), false);
+  });
 });
 
 describe('P2 — pagination and timeline', () => {
@@ -174,6 +238,14 @@ describe('P2 — pagination and timeline', () => {
     const pos = p.querySelector('.ui-page-pos')!;
     assert.equal(pos.getAttribute('aria-live'), 'polite');
     assert.equal(pos.textContent, '৩ / ১২');
+    // §04: position first, then two worded buttons whose names start with the
+    // visible word (label-in-name), and no arrow glyphs.
+    assert.ok(pos.classList.contains('n'));
+    assert.equal(p.firstElementChild, pos);
+    const btns = [...p.querySelectorAll('button')];
+    assert.deepEqual(btns.map((b) => b.textContent), ['আগে', 'পরে']);
+    assert.deepEqual(btns.map((b) => b.getAttribute('aria-label')), ['আগের পাতা', 'পরের পাতা']);
+    assert.equal(p.querySelector('.ui-icon'), null);
   });
 
   test('a timeline is an ordered list; the dots are decoration', () => {
@@ -183,6 +255,14 @@ describe('P2 — pagination and timeline', () => {
     });
     assert.equal(t.tagName, 'OL');
     assert.equal(t.querySelector('.ui-timeline-mark')?.getAttribute('aria-hidden'), 'true');
+    // A glyph is ignored: the mark stays an empty dot on the rail, and a
+    // figure "when" is set in the number face.
+    const dated = timeline(doc(), {
+      label: 'কার্যবিবরণী',
+      entries: [{ when: '২০২৬', title: 'পুরস্কার', tone: 'success', glyph: 'award' }],
+    });
+    assert.equal(dated.querySelector('.ui-timeline-mark')?.childElementCount, 0);
+    assert.ok(dated.querySelector('.ui-timeline-when')?.classList.contains('n'));
   });
 });
 
@@ -337,6 +417,22 @@ describe('P2 — tabs', () => {
     assert.equal(t.getAttribute('aria-label'), 'হাজিরা ছাঁকনি');
     assert.equal(t.querySelector('button')?.getAttribute('role'), 'tab');
   });
+
+  test('figures carry the number face and text is unchanged', () => {
+    // homework-filter and p5-screens read tab textContent; it must not move.
+    const t = tabs(doc(), {
+      items: [{ id: 'a', label: 'বার্ষিক ২০২৬', count: 12 }],
+      active: 'a', onSelect: () => {}, label: 'x',
+    });
+    const b = t.querySelector('button')!;
+    assert.equal(b.textContent, 'বার্ষিক ২০২৬১২');
+    assert.ok(b.querySelector('.ui-tab-count')?.classList.contains('n'));
+    const labelSpan = b.firstElementChild!;
+    assert.equal(labelSpan.classList.contains('n'), false, 'the words stay in the text face');
+    const nums = labelSpan.querySelectorAll('span.n');
+    assert.equal(nums.length, 1);
+    assert.equal(nums[0].textContent, '২০২৬');
+  });
 });
 
 describe('P2 — filters', () => {
@@ -385,6 +481,22 @@ describe('P2 — filters', () => {
     const f = filterBar(doc(), { filters: none, onChange: () => {}, onClearAll: () => {} });
     assert.equal(f.querySelector('.ui-filter-chip'), null);
     assert.equal(f.querySelector('.ui-filters-open')?.getAttribute('aria-label'), 'ছাঁকনি');
+  });
+
+  test('the phone filter panel opens as a bottom sheet', () => {
+    // The button only shows below 1024px, so its panel is a full-width sheet
+    // (13 Responsive ০৭), not a side drawer.
+    const f = filterBar(doc(), { filters: FILTERS, onChange: () => {}, onClearAll: () => {} });
+    host().append(f);
+    f.querySelector<HTMLButtonElement>('.ui-filters-open')!.click();
+    const scrim = doc().querySelector<HTMLElement>('.ui-scrim');
+    assert.equal(scrim?.dataset.kind, 'sheet');
+    const dialog = scrim!.querySelector('[role="dialog"]')!;
+    assert.equal(dialog.getAttribute('aria-modal'), 'true');
+    assert.equal(dialog.querySelectorAll('.ui-filter-field.is-stacked select').length, 2);
+    // Close it, so the page is restored for whatever runs next.
+    doc().dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    assert.equal(doc().querySelector('.ui-scrim'), null);
   });
 });
 
@@ -459,6 +571,19 @@ describe('P2 — feedback', () => {
     assert.equal(bar.getAttribute('aria-valuenow'), '340');
     assert.equal(bar.getAttribute('aria-valuemax'), '1000');
     assert.equal(bar.getAttribute('aria-valuetext'), '৩৪০ / ১০০০ সারি');
+  });
+
+  test('a number in caller text gets the number face; the percentage is not read twice', () => {
+    // duration 0: no auto-hide timer left running after the suite.
+    toast(doc(), { message: '৩টি পরিবর্তন সংরক্ষণ হয়েছে', tone: 'success', duration: 0 });
+    const t = doc().querySelector('.ui-toast-text')!;
+    assert.equal(t.textContent, '৩টি পরিবর্তন সংরক্ষণ হয়েছে');
+    assert.equal(t.querySelector('.n')?.textContent, '৩');
+
+    const p = progress(doc(), { value: 340, max: 1000, label: '৩৪০ / ১০০০ সারি' });
+    const pct = p.querySelector('.ui-progress-pct');
+    assert.equal(pct?.getAttribute('aria-hidden'), 'true', 'the progressbar already announces it');
+    assert.equal(pct?.textContent, '৩৪%');
   });
 
   test('a list skeleton is shaped like the list it precedes', () => {

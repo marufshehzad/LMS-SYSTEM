@@ -12,7 +12,8 @@
  *   2. **A busy button cannot be pressed twice.** The brief's §17 rule ("never
  *      allow double-submit") cannot be met by remembering it at 130 call
  *      sites. `busy` here disables the control, keeps its width so the layout
- *      does not jump, swaps the label for a spinner, and announces itself.
+ *      does not jump, puts a spinner where the glyph was (the label stays, so
+ *      the accessible name never changes), and announces itself.
  *
  * ── The hierarchy, and what each level means ───────────────────────────────
  * `primary`   the one action this screen exists for. At most one per view.
@@ -26,7 +27,7 @@
  * button that looks like the primary one is how a person deletes a section
  * while reaching for "save".
  */
-import { el, icon, type Child } from './dom.ts';
+import { el, icon, append, type Child } from './dom.ts';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'success';
 export type ButtonSize = 'md' | 'sm';
@@ -60,6 +61,46 @@ const VARIANT: Record<ButtonVariant, string> = {
   success: 'btn-success',
 };
 
+/** A digit, Latin 0-9 or Bangla ০-৯. */
+const DIGIT = /[0-9০-৯]/;
+/**
+ * One number as a reader sees it: digits, with the separators that sit
+ * between digits ("১২,৫০০.৭৫", "১০:৪৫", "২০২৫–২৬"), and a trailing % or + ("৯+").
+ * The same pattern badge, card, field, filter, overlay and table use.
+ */
+const NUMBER = '[0-9০-৯]+(?:[.,:/\\u2013-][0-9০-৯]+)*[%+]?';
+const NUMBER_RUN = new RegExp(NUMBER, 'g');
+const ONLY_NUMBER = new RegExp(`^\\s*${NUMBER}\\s*$`);
+
+/**
+ * The label span, with every number in the `.n` face (R6).
+ *
+ * `.n` switches font-family to the numeral face, so it must not sit on words:
+ * 14 Components §01 sets every button label in the text face. A label that is
+ * only a number ("৫") gets `.n` on the span itself. A number inside words
+ * ("বাকি ২ জনে যান") gets the smallest element that holds it — a
+ * `<span class="n">` around the digits — and the words stay in the text face.
+ * Built from text nodes only (labels can be school data, never markup), so
+ * textContent is exactly the label and the accessible name does not change.
+ */
+function labelSpan(doc: Document, label: string): HTMLElement {
+  if (!DIGIT.test(label)) return el(doc, 'span', { className: 'btn-label', text: label });
+  if (ONLY_NUMBER.test(label)) return el(doc, 'span', { className: 'btn-label n', text: label });
+  const span = el(doc, 'span', { className: 'btn-label' });
+  let at = 0;
+  for (const m of label.matchAll(NUMBER_RUN)) {
+    const i = m.index ?? 0;
+    if (i > at) append(span, label.slice(at, i));
+    append(span, el(doc, 'span', { className: 'n', text: m[0] }));
+    at = i + m[0].length;
+  }
+  if (at < label.length) append(span, label.slice(at));
+  return span;
+}
+
+/** The glyph a busy button set aside, so release can put it back. */
+const PARKED_GLYPH = new WeakMap<HTMLButtonElement, Element>();
+
 export function button(doc: Document, o: ButtonOptions): HTMLButtonElement {
   const cls = [
     // `ui-btn` is a marker, not a look: it resets the `width: 100%` that
@@ -70,7 +111,11 @@ export function button(doc: Document, o: ButtonOptions): HTMLButtonElement {
     // bar they were written for until their screen's phase migrates them.
     'ui-btn',
     VARIANT[o.variant ?? 'secondary'],
-    o.size === 'sm' ? 'btn-small' : '',
+    // `btn-sm` is the sheet's small size (14 Components §01: 36px, 13px,
+    // --r-sm). The older `btn-small` resolves only to a carried legacy rule
+    // (44px, 14px, --r-md) that stays for the hand-typed call sites. Never
+    // emit both: the carried rule sits later in app.css and would win.
+    o.size === 'sm' ? 'btn-sm' : '',
     o.block ? 'btn-block' : '',
     o.className ?? '',
   ].filter(Boolean).join(' ');
@@ -86,7 +131,10 @@ export function button(doc: Document, o: ButtonOptions): HTMLButtonElement {
     },
   });
 
-  const label = el(doc, 'span', { className: 'btn-label', text: o.label });
+  // Numbers carry `n` (R6). Labels come from callers — 'বাকি ২ জনে যান',
+  // '৩টি অপেক্ষমাণ' — so this is the one place the rule can be kept for all
+  // of them. See labelSpan: the class goes on the number, not the words.
+  const label = labelSpan(doc, o.label);
   if (o.glyph) btn.append(icon(doc, o.glyph, 'btn-glyph'));
   btn.append(label);
 
@@ -103,10 +151,15 @@ export function button(doc: Document, o: ButtonOptions): HTMLButtonElement {
  * stops when the request answers — recreating the element would lose focus
  * mid-action, which on a phone means the keyboard closes.
  *
- * The width is pinned before the label is replaced. Without that, a 96px
- * "সংরক্ষণ করুন" becomes a 32px spinner and every control to its right jumps
- * left — on a form that is merely ugly, on a row of table actions it means the
- * next button slides under the finger already travelling towards it.
+ * The width is pinned before the glyph is swapped for the spinner. The label
+ * stays (14 Components §01 draws the busy button as spinner + label), but a
+ * spinner and a glyph are not the same width, and without the pin every
+ * control to the right would shift — on a form that is merely ugly, on a row
+ * of table actions it means the next button slides under the finger already
+ * travelling towards it.
+ *
+ * Release puts the glyph back. It is parked, not destroyed, so a button that
+ * has been busy once does not lose its icon for the rest of the screen.
  */
 export function setBusy(btn: HTMLButtonElement, busy: boolean): void {
   const doc = btn.ownerDocument;
@@ -122,7 +175,11 @@ export function setBusy(btn: HTMLButtonElement, busy: boolean): void {
     const spin = el(doc, 'span', {
       className: 'btn-spinner', attrs: { 'aria-hidden': 'true' },
     });
-    btn.querySelector('.btn-glyph')?.remove();
+    const glyph = btn.querySelector('.btn-glyph');
+    if (glyph) {
+      PARKED_GLYPH.set(btn, glyph);
+      glyph.remove();
+    }
     btn.prepend(spin);
   } else {
     if (btn.dataset.busy !== 'true') return;
@@ -131,6 +188,9 @@ export function setBusy(btn: HTMLButtonElement, busy: boolean): void {
     btn.removeAttribute('aria-busy');
     btn.style.minWidth = '';
     btn.querySelector('.btn-spinner')?.remove();
+    const glyph = PARKED_GLYPH.get(btn);
+    PARKED_GLYPH.delete(btn);
+    if (glyph && !btn.querySelector('.btn-glyph')) btn.prepend(glyph);
   }
 }
 
@@ -197,10 +257,11 @@ export function iconButton(doc: Document, o: {
  * A row of buttons with one primary.
  *
  * Order is the point, and it is ONE order: DOM order is priority order, least
- * important first. On a phone that column puts the primary at the bottom,
- * under the thumb; on desktop the same source order becomes a row and the
- * primary finishes the line on the right. Callers pass "cancel, save" and the
- * layout is right in both places without a second rule.
+ * important first, so the primary finishes the line. `.ui-button-row` is one
+ * wrapping row with an 8px gap (`--space-2`) at every width — there is no
+ * phone column — so a row that runs out of room wraps rather than reflowing.
+ * Callers pass "cancel, save" and the layout is right at both widths without
+ * a second rule.
  */
 export function buttonRow(doc: Document, ...children: Child[]): HTMLElement {
   return el(doc, 'div', { className: 'ui-button-row' }, ...children);

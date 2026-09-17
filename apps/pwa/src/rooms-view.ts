@@ -16,14 +16,24 @@
  * The list of what a room can be is whatever the school's subjects actually
  * require. A hard-coded list here would drift the day a school adds a subject,
  * and would offer capabilities that could never match anything.
+ *
+ * ── Ata Ekta (06 Routine §01, roomsScreen) ──────────────────────────────
+ * One title bar and one table: the title with a small primary "নতুন কক্ষ",
+ * then কক্ষ · ধরন · ধারণক্ষমতা · সাপ্তাহিক ব্যবহার · a chip under a blank
+ * header. The chip is the bookable state this screen already has — the drawn
+ * utilisation chip needs a threshold the API does not send. The office's row
+ * actions stay, after the chip, because without them editing and taking a
+ * room out of service would be unreachable. On a phone the table is a list
+ * (13 Responsive ০১): the room is the title, the rest one grey line.
  */
 import type { Auth } from './auth.ts';
-import { skeleton, errorState, emptyState, successNote, bnNum } from './view-states.ts';
+import { skeleton, errorState, successNote, bnNum } from './view-states.ts';
 import { pageHeader } from './ui/page-header.ts';
+import { toLatinDigits } from '../../../packages/ui-core/src/format.ts';
 import {
-  el, append, button, buttonRow, field, dataTable, statusBadge,
+  el, append, uid, numText, button, buttonRow, field, dataTable, statusBadge,
   permissionState, permissionMessage, openDrawer, confirmOverlay,
-  setBusy, announce, type OverlayHandle,
+  setBusy, announce, type OverlayHandle, type Column,
 } from './ui/index.ts';
 
 interface Room {
@@ -60,6 +70,12 @@ const CAPABILITY_BN: Record<string, string> = {
   computer: 'কম্পিউটার ল্যাব',
 };
 const capLabel = (c: string) => CAPABILITY_BN[c] ?? c;
+
+/**
+ * Columns whose header the design leaves blank. The words stay for a screen
+ * reader — an empty column header names nothing — and only the eye loses them.
+ */
+const QUIET_HEADERS = ['state', 'actions'];
 
 export class RoomsView {
   private data: Body | null = null;
@@ -133,10 +149,21 @@ export class RoomsView {
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';
+    const data = this.data;
 
+    // The drawn bar: the title, and the office's one primary on the right.
+    // It lives in the header, not in a row of its own under it.
     root.append(pageHeader(d, {
       title: 'কক্ষ ব্যবস্থাপনা',
-      subtitle: 'শ্রেণিকক্ষ ও ল্যাব — রুটিন ও পরীক্ষার আসন বিন্যাসে এগুলোই ব্যবহার হয়',
+      primary: data?.canManage && !this.denied
+        ? button(d, {
+          label: 'নতুন কক্ষ',
+          variant: 'primary',
+          size: 'sm',
+          disabled: this.busy || this.loading,
+          onClick: () => this.openForm(null),
+        })
+        : undefined,
     }));
 
     if (this.denied) {
@@ -150,70 +177,80 @@ export class RoomsView {
     if (this.notice) root.append(successNote(d, this.notice));
     if (this.error) root.append(errorState(d, this.error, () => void this.load()));
 
-    if (this.loading) { root.append(skeleton(d, 4)); return; }
-    const data = this.data;
+    if (this.loading) { root.append(skeleton(d, 3)); return; }
     if (!data) return;
 
+    root.append(this.table(data));
+  }
+
+  private table(data: Body): HTMLElement {
+    const d = this.o.doc;
+    const columns: Array<Column<Room>> = [
+      {
+        key: 'code', header: 'কক্ষ', mobile: 'title',
+        cell: (r) => (r.nameBn ? `${r.nameBn} (${r.code})` : r.code),
+      },
+      {
+        // A room with no special capability is an ordinary classroom.
+        key: 'type', header: 'ধরন', mobile: 'meta',
+        cell: (r) => (r.capabilities.length ? r.capabilities.map(capLabel).join(' · ') : 'শ্রেণিকক্ষ'),
+      },
+      {
+        key: 'capacity', header: 'ধারণক্ষমতা', mobile: 'meta', numeric: true,
+        cell: (r) => (r.capacity === null ? '—' : bnNum(r.capacity)),
+      },
+      {
+        // The routine is a weekly grid, so its slots in this room are the
+        // room's classes in a week.
+        key: 'usage', header: 'সাপ্তাহিক ব্যবহার', mobile: 'meta', numeric: true,
+        cell: (r) => `${bnNum(r.slotCount)} ক্লাস`,
+      },
+      {
+        key: 'state', header: 'অবস্থা', mobile: 'status',
+        cell: (r) => statusBadge(d, {
+          state: r.isBookable ? 'published' : 'overdue',
+          label: r.isBookable ? 'ব্যবহারযোগ্য' : 'বন্ধ',
+        }),
+      },
+    ];
     if (data.canManage) {
-      root.append(buttonRow(d, button(d, {
-        label: 'নতুন কক্ষ',
-        variant: 'primary',
-        disabled: this.busy,
-        onClick: () => this.openForm(null),
-      })));
+      columns.push({
+        key: 'actions', header: 'ব্যবস্থা', mobile: 'meta',
+        cell: (r) => this.rowActions(r),
+      });
     }
 
-    if (data.rooms.length === 0) {
-      root.append(emptyState(d, {
+    const wrap = dataTable(d, {
+      caption: 'কক্ষের তালিকা',
+      className: 'rooms-table',
+      rows: data.rooms,
+      rowKey: (r) => r.id,
+      columns,
+      empty: {
+        glyph: 'layers',
         message: 'এখনো কোনো কক্ষ যোগ করা হয়নি। রুটিন তৈরি করতে অন্তত একটি কক্ষ দরকার।',
         action: data.canManage
           ? { label: 'প্রথম কক্ষ যোগ করুন', onClick: () => this.openForm(null) }
           : undefined,
-      }));
-      return;
-    }
+      },
+    });
 
-    root.append(dataTable(d, {
-      caption: 'কক্ষের তালিকা',
-      rows: data.rooms,
-      rowKey: (r) => r.id,
-      columns: [
-        {
-          key: 'code', header: 'কোড', mobile: 'title',
-          cell: (r) => (r.nameBn ? `${r.nameBn} (${r.code})` : r.code),
-          width: 'minmax(0, 2fr)',
-        },
-        {
-          key: 'where', header: 'অবস্থান', mobile: 'subtitle',
-          cell: (r) => [r.building, r.floorNo === null ? '' : `${bnNum(r.floorNo)} তলা`]
-            .filter(Boolean).join(' · ') || '—',
-        },
-        {
-          key: 'capacity', header: 'ধারণক্ষমতা', mobile: 'meta', numeric: true,
-          cell: (r) => (r.capacity === null ? '—' : `${bnNum(r.capacity)} জন`),
-        },
-        {
-          key: 'caps', header: 'সুবিধা', mobile: 'meta',
-          cell: (r) => (r.capabilities.length ? r.capabilities.map(capLabel).join(' · ') : '—'),
-        },
-        {
-          key: 'state', header: 'অবস্থা', mobile: 'status',
-          cell: (r) => statusBadge(d, {
-            state: r.isBookable ? 'published' : 'overdue',
-            label: r.isBookable ? 'ব্যবহারযোগ্য' : 'বন্ধ',
-          }),
-        },
-        ...(data.canManage ? [{
-          key: 'actions', header: 'ব্যবস্থা',
-          cell: (r: Room) => this.rowActions(r),
-        }] : []),
-      ],
-    }));
+    for (const key of QUIET_HEADERS) {
+      const th = wrap.querySelector(`thead th[data-col="${key}"]`);
+      if (th) th.replaceChildren(el(d, 'span', { className: 'ui-sr-only', text: th.textContent ?? '' }));
+    }
+    return wrap;
   }
 
+  /**
+   * Secondary, both of them. They repeat on every row, and taking a room out
+   * of service is undone by "চালু করুন" — `danger` is for what cannot be
+   * (ui/button.ts). The warning lives where the decision is made: the
+   * confirmation's danger button and triangle.
+   */
   private rowActions(r: Room): HTMLElement {
     const d = this.o.doc;
-    return buttonRow(d,
+    const row = buttonRow(d,
       button(d, {
         label: 'সম্পাদনা', size: 'sm', disabled: this.busy,
         onClick: () => this.openForm(r),
@@ -221,10 +258,12 @@ export class RoomsView {
       button(d, {
         label: r.isBookable ? 'বন্ধ করুন' : 'চালু করুন',
         size: 'sm',
-        variant: r.isBookable ? 'danger' : 'secondary',
+        variant: 'secondary',
         disabled: this.busy,
         onClick: () => this.confirmToggle(r),
       }));
+    row.classList.add('rooms-actions');
+    return row;
   }
 
   /** No drawer survives these, so a refusal is raised on the page instead. */
@@ -278,40 +317,44 @@ export class RoomsView {
       label: 'ভবন', name: 'building', value: existing?.building ?? '',
       helper: 'ঐচ্ছিক', attrs: { maxlength: 60 },
     });
+    // A floor and a head count are counts, so they are shown in Bangla digits
+    // (R6). They are read back through toLatinDigits, which leaves a Latin
+    // entry exactly as typed and turns ৪০ into 40 — Number('৪০') is NaN.
     const floorNo = field(d, {
       label: 'তলা', name: 'floorNo', kind: 'number',
-      value: existing?.floorNo === null || existing?.floorNo === undefined ? '' : String(existing.floorNo),
+      value: existing?.floorNo === null || existing?.floorNo === undefined ? '' : bnNum(existing.floorNo),
       helper: 'ঐচ্ছিক', attrs: { min: -2, max: 20, step: 1 },
     });
     const capacity = field(d, {
       label: 'ধারণক্ষমতা', name: 'capacity', kind: 'number', required: true,
-      value: String(existing?.capacity ?? 60),
+      value: bnNum(existing?.capacity ?? 60),
       helper: 'কতজন শিক্ষার্থী বসতে পারে — পরীক্ষার আসন বিন্যাস এই সংখ্যাটি ব্যবহার করে।',
       attrs: { min: 1, max: 1000, step: 1 },
     });
 
     append(form, code.root, nameBn.root, building.root, floorNo.root, capacity.root);
 
-    // Capabilities as checkboxes: the set is small, server-supplied, and a
-    // multi-select is a worse control on a phone.
     // Toggle buttons, not checkboxes: this design system has no checkbox field
     // kind, and the same control served the staff register in M6 — a filled
     // button reads as an answer rather than an open question, and it is a
-    // thumb-sized target on a phone.
+    // thumb-sized target on a phone. A chosen one is an ink-filled secondary,
+    // never the accent: the drawer's save is its one primary (R5).
     const chosen = new Set(existing?.capabilities ?? []);
     if (opts.length) {
-      const group = el(d, 'div', { className: 'ui-fieldset' });
-      append(group, el(d, 'p', { className: 'ui-field-label', text: 'বিশেষ সুবিধা' }));
+      const labelId = uid('rooms-caps');
+      const group = el(d, 'div', { className: 'ui-fieldset rooms-caps' });
+      append(group, el(d, 'p', {
+        className: 'ui-field-label', text: 'বিশেষ সুবিধা', attrs: { id: labelId },
+      }));
       const row = buttonRow(d);
+      row.setAttribute('role', 'group');
+      row.setAttribute('aria-labelledby', labelId);
       for (const cap of opts) {
         const btn = button(d, {
           label: capLabel(cap),
-          variant: chosen.has(cap) ? 'primary' : 'secondary',
+          variant: 'secondary',
           onClick: () => {
             if (chosen.has(cap)) chosen.delete(cap); else chosen.add(cap);
-            btn.className = btn.className.replace(
-              chosen.has(cap) ? 'btn-secondary' : 'btn-primary',
-              chosen.has(cap) ? 'btn-primary' : 'btn-secondary');
             btn.setAttribute('aria-pressed', chosen.has(cap) ? 'true' : 'false');
           },
         });
@@ -319,7 +362,7 @@ export class RoomsView {
         append(row, btn);
       }
       append(group, row, el(d, 'p', {
-        className: 'att-sub',
+        className: 'ui-field-help',
         text: 'যে বিষয়ের জন্য ল্যাব দরকার, রুটিন তৈরির সময় সেটি কেবল এই সুবিধাযুক্ত কক্ষেই বসবে।',
       }));
       append(form, group);
@@ -342,13 +385,13 @@ export class RoomsView {
       label: existing ? 'সংরক্ষণ করুন' : 'যোগ করুন',
       variant: 'primary',
       onClick: async () => {
-        const floorRaw = floorNo.input.value.trim();
+        const floorRaw = toLatinDigits(floorNo.input.value.trim());
         const payload: Record<string, unknown> = {
           code: code.input.value.trim(),
           nameBn: nameBn.input.value.trim(),
           building: building.input.value.trim(),
           floorNo: floorRaw === '' ? null : Number(floorRaw),
-          capacity: Number(capacity.input.value),
+          capacity: Number(toLatinDigits(capacity.input.value)),
           capabilities: [...chosen].sort(),
         };
         if (existing) payload.id = existing.id;
@@ -362,7 +405,10 @@ export class RoomsView {
           existing ? 'সংরক্ষণ করা হয়েছে।' : 'যোগ করা হয়েছে।');
         setBusy(save, false);
         if (!msg) { handle.close(); return; }
-        errLine.textContent = msg;
+        // The server's sentence can name a figure ("১ থেকে ১০০০"): its
+        // numbers go in the numeral face, the words stay in the text face.
+        errLine.textContent = '';
+        append(errLine, ...numText(d, msg));
         errLine.removeAttribute('hidden');
         // Announced as well as shown: focus is on the button just pressed, and
         // a message that only appears is one a screen-reader user never gets.

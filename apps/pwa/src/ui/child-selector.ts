@@ -30,7 +30,7 @@
  */
 import { el, append, icon, uid, type Child } from './dom.ts';
 import { avatar } from './card.ts';
-import { openDrawer } from './overlay.ts';
+import { openOverlay } from './overlay.ts';
 import { announce } from './feedback.ts';
 import { formatIdentifier } from '../../../../packages/ui-core/src/format.ts';
 
@@ -53,6 +53,17 @@ export interface ChildSelectorOptions {
 }
 
 const DEFAULT_INLINE_MAX = 3;
+
+/**
+ * The base class, plus `n` when the text holds a digit of any script.
+ *
+ * Every element with a digit in it gets `n` (IMPLEMENTATION §2), and the
+ * strings here come from the caller: "৯ম — ক" has one, "নবম–ক" does not, and a
+ * digit-free label should keep Hind Siliguri. `\p{Nd}` rather than a digit
+ * range so it covers Bangla ০-৯ and Latin 0-9 alike.
+ */
+const numClass = (base: string, text: string): string =>
+  (/\p{Nd}/u.test(text) ? `${base} n` : base);
 
 /**
  * The selector, or nothing when there is nothing to select.
@@ -92,10 +103,14 @@ function inlineStrip(doc: Document, o: ChildSelectorOptions): HTMLElement {
       },
       data: { id: c.studentId },
     },
-      avatar(doc, { name: c.nameBn, size: 'sm' }),
+      // Two lines of text and nothing else (14 Components §07): no avatar. The
+      // selected state is the white ground and the underline, set in CSS on
+      // [aria-selected] — the same attribute a screen reader hears.
       el(doc, 'span', { className: 'ui-child-opt-text' },
-        el(doc, 'span', { className: 'ui-child-opt-name', text: c.nameBn }),
-        el(doc, 'span', { className: 'ui-child-opt-meta', text: c.sectionLabel })));
+        el(doc, 'span', { className: numClass('ui-child-opt-name', c.nameBn), text: c.nameBn }),
+        el(doc, 'span', {
+          className: numClass('ui-child-opt-meta', c.sectionLabel), text: c.sectionLabel,
+        })));
     b.addEventListener('click', () => pick(doc, o, c));
     append(strip, b);
   });
@@ -131,15 +146,23 @@ function sheetButton(doc: Document, o: ChildSelectorOptions): HTMLElement {
   },
     avatar(doc, { name: current.nameBn, size: 'md' }),
     el(doc, 'span', { className: 'ui-child-opt-text' },
-      el(doc, 'span', { className: 'ui-child-opt-name', text: current.nameBn }),
-      el(doc, 'span', { className: 'ui-child-opt-meta', text: current.sectionLabel })),
+      el(doc, 'span', {
+        className: numClass('ui-child-opt-name', current.nameBn), text: current.nameBn,
+      }),
+      el(doc, 'span', {
+        className: numClass('ui-child-opt-meta', current.sectionLabel), text: current.sectionLabel,
+      })),
     icon(doc, 'chevron-down', 'ui-child-caret'));
 
   btn.addEventListener('click', () => {
     const list = el(doc, 'ul', {
       className: 'ui-child-list', attrs: { 'aria-label': 'সন্তান' },
     });
-    const handle = openDrawer(doc, { title: 'কোন সন্তান?', body: list });
+    // `auto`, not a drawer: a centred dialog on a desktop and a full-width
+    // bottom sheet on a phone (13 Responsive rule 07). Nothing behind this list
+    // needs to stay visible while choosing, which is what a drawer is for.
+    // Focus trap, Escape, scrim dismiss and focus return are the same code.
+    const handle = openOverlay(doc, { title: 'কোন সন্তান?', body: list, kind: 'auto' });
     for (const c of o.children) {
       const selected = c.studentId === o.selectedId;
       const row = el(doc, 'button', {
@@ -152,8 +175,9 @@ function sheetButton(doc: Document, o: ChildSelectorOptions): HTMLElement {
       },
         avatar(doc, { name: c.nameBn, size: 'md' }),
         el(doc, 'span', { className: 'ui-child-opt-text' },
-          el(doc, 'span', { className: 'ui-child-opt-name', text: c.nameBn }),
-          el(doc, 'span', { className: 'ui-child-opt-meta',
+          el(doc, 'span', { className: numClass('ui-child-opt-name', c.nameBn), text: c.nameBn }),
+          // Always `n`: this line always carries the roll.
+          el(doc, 'span', { className: 'ui-child-opt-meta n',
             text: [c.sectionLabel, `রোল ${formatIdentifier(c.rollNo)}`,
                    c.relationBn].filter(Boolean).join(' · ') })),
         // A word, not only a tint: this row IS the answer to "which child",
@@ -189,8 +213,9 @@ export function childIdentity(doc: Document, c: ChildOption, extra?: Child): HTM
   append(box,
     avatar(doc, { name: c.nameBn, size: 'lg' }),
     el(doc, 'div', { className: 'ui-child-identity-text' },
-      el(doc, 'p', { className: 'ui-child-identity-name', text: c.nameBn }),
-      el(doc, 'p', { className: 'ui-child-identity-meta',
+      el(doc, 'p', { className: numClass('ui-child-identity-name', c.nameBn), text: c.nameBn }),
+      // Always `n`: the roll is always here.
+      el(doc, 'p', { className: 'ui-child-identity-meta n',
         // Latin roll: it is an identifier, and it is what a guardian reads
         // down the phone to the office.
         text: `${c.sectionLabel} · রোল ${formatIdentifier(c.rollNo)}` })),

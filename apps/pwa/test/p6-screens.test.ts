@@ -61,7 +61,7 @@ function auth(role: string, routes: Record<string, { status: number; body?: unkn
 describe('P6 — every screen has a page header', () => {
   // Three screens had none at all: `more`, `sikhok`, `shikho`. On `more` that
   // is the one screen every role reaches.
-  test('আরও is a header and a card grid, not 36 full-width strips', () => {
+  test('আরও is a header and one row list (01 Shell ঘ), not 36 full-width strips', () => {
     root().textContent = '';
     new MoreView({
       root: root(), doc: dom.window.document,
@@ -70,20 +70,26 @@ describe('P6 — every screen has a page header', () => {
       })),
     });
     assert.ok(root().querySelector('.page-header'), 'it had none');
-    assert.ok(root().querySelector('.ui-card-grid'), 'a grid at desktop, one column on a phone');
-    // Every destination is a real card, and the theme control is its own.
-    assert.equal(root().querySelectorAll('.ui-card-grid .ui-card').length, 6);
+    assert.ok(root().querySelector('ul.ui-list.more-list[aria-label]'),
+              'one named row list, as 01 Shell ঘ draws it');
+    // Every destination is rendered, and every one is a real control.
+    assert.equal(root().querySelectorAll('.more-list .ui-list-item').length, 6);
+    for (const b of root().querySelectorAll('.more-list .ui-list-hit')) {
+      assert.equal(b.localName, 'button', 'every destination is a real control');
+    }
+    assert.equal(root().querySelectorAll('.ui-card').length, 0);
     assert.equal(root().querySelectorAll('.more-item').length, 0);
   });
 
-  test('the theme choice stays, and says where it is stored', () => {
+  test('there is no theme choice — Ata Ekta has one theme (§5)', () => {
+    // The More screen used to carry a follow-phone / light / dark card. With
+    // no dark mode there is nothing to choose, and a picker offering one
+    // option is worse than none.
     root().textContent = '';
     new MoreView({ root: root(), doc: dom.window.document, items: [] });
-    assert.match(text(), /রঙের ধরন/);
-    // It is a device preference, not a school setting — and the difference
-    // matters on a shared phone.
-    assert.match(text(), /এই যন্ত্রে সংরক্ষিত/);
-    assert.equal(root().querySelectorAll('[role="radio"]').length, 3);
+    assert.doesNotMatch(text(), /রঙের ধরন/);
+    assert.equal(root().querySelectorAll('[role="radio"]').length, 0);
+    assert.equal(root().querySelectorAll('.theme-option, .theme-options').length, 0);
   });
 
   test('শিক্ষক সহায়ক AI has a header and real fields', async () => {
@@ -92,9 +98,22 @@ describe('P6 — every screen has a page header', () => {
     await settle();
     assert.ok(root().querySelector('.page-header'));
     // Five hand-rolled `.login-input`/`.section-picker` controls with no
-    // visible labels became five `field()`s that carry them.
-    assert.equal(root().querySelectorAll('.ui-field').length, 5);
+    // visible labels became five `field()`s that carry them. Ata Ekta 02
+    // Teacher §07 then drew the task type as four tiles, so four remain
+    // `field()`s and the fifth is a named group of real buttons.
+    assert.equal(root().querySelectorAll('.ui-field').length, 4);
     assert.equal(root().querySelectorAll('.login-input, .ai-field').length, 0);
+    const group = root().querySelector('[role="group"]:has(> button.sikhok-task)') as HTMLElement;
+    assert.ok(group, 'the task choice is a group');
+    assert.ok((group.getAttribute('aria-label') ?? '').trim(), 'and the group is named, as the select was labelled');
+    const tiles = [...group.querySelectorAll(':scope > button.sikhok-task[type="button"]')] as HTMLButtonElement[];
+    assert.equal(tiles.length, 4);
+    for (const t of tiles) assert.ok((t.textContent ?? '').trim(), 'every tile says in words what it makes');
+    // One chosen, and the choice is announced — as a select's would be.
+    const pressed = () => tiles.flatMap((t, i) => (t.getAttribute('aria-pressed') === 'true' ? [i] : []));
+    assert.deepEqual(pressed(), [0]);
+    tiles[1].click();
+    assert.deepEqual(pressed(), [1], 'choosing another tile moves the one chosen');
   });
 });
 
@@ -151,7 +170,7 @@ describe('P6 — emptyState draws the icon it is given', () => {
     const box = emptyState(dom.window.document, {
       glyph: 'check-square', message: 'কিছু নেই',
     });
-    const g = box.querySelector('.empty-glyph');
+    const g = box.querySelector('.ui-state-glyph');
     assert.ok(g, 'the glyph node exists');
     assert.ok(g!.querySelector('svg'), 'and it is a drawn icon');
     assert.notEqual(g!.textContent, '·');
@@ -161,12 +180,18 @@ describe('P6 — emptyState draws the icon it is given', () => {
     const box = emptyState(dom.window.document, {
       glyph: 'not-a-real-icon', message: 'কিছু নেই',
     });
-    assert.equal(box.querySelector('.empty-glyph')?.textContent, '·');
+    assert.equal(box.querySelector('.ui-state-glyph')?.textContent, '·');
   });
 
-  test('no glyph asked for means no glyph node', () => {
+  test('no glyph asked for means the design empty glyph, never the dot', () => {
+    // Ata Ekta (14 Components §06) draws every empty card with `inbox`. The
+    // guarantee this test keeps is the one it was written for: a caller who
+    // named no glyph never gets the unknown-icon dot.
     const box = emptyState(dom.window.document, { message: 'কিছু নেই' });
-    assert.equal(box.querySelector('.empty-glyph'), null);
+    const g = box.querySelector('.ui-state-glyph');
+    assert.ok(g, 'the default glyph is drawn');
+    assert.ok(g!.querySelector('svg'), 'as a real icon');
+    assert.notEqual(g!.textContent, '·', 'and never the placeholder dot');
   });
 });
 
@@ -222,32 +247,75 @@ describe('P6 — বদলি শিক্ষক', () => {
 
 // ═══════════════════════════════════════════════════════════════════════
 describe('P6 — ভূমিকা ও অ্যাক্সেস is a matrix, so it is a table', () => {
-  test('ten roles compared on the same three questions', () => {
+  test('ten roles compared on the same five questions, in one table', () => {
     root().textContent = '';
     new RolesView({ root: root(), doc: dom.window.document });
-    // Grouped by tier, each tier its own table — it was 11 full-width
-    // `.role-card` strips at 1110px, where comparing two roles meant holding
-    // one in your head.
-    assert.ok(root().querySelectorAll('table.ui-table').length >= 4);
+    // 08 Admin & IT §05: one role × capability matrix replaces the five tier
+    // tables. Still a real table — it was 11 full-width `.role-card` strips
+    // at 1110px, where comparing two roles meant holding one in your head.
+    assert.equal(root().querySelectorAll('table.ui-table').length, 1);
     const heads = [...root().querySelectorAll('thead th')].map((h) => h.textContent);
-    assert.ok(heads.includes('ভূমিকা'));
-    assert.ok(heads.includes('কী করতে পারেন'));
-    assert.ok(heads.includes('পরিসর'));
+    assert.deepEqual(heads, ['ভূমিকা', 'হাজিরা', 'নম্বর', 'প্রকাশ', 'টাকা', 'সেটিংস']);
+    const rows = [...root().querySelectorAll('tbody tr')];
+    assert.equal(rows.length, 10);
+    for (const tr of rows) {
+      // Every row is named by a row header, and every glyph-only cell carries
+      // a word for a screen reader.
+      assert.equal(tr.querySelectorAll('th[scope="row"]').length, 1);
+      for (const td of tr.querySelectorAll('td')) {
+        assert.match(td.querySelector('.ui-sr-only')?.textContent ?? '', /^অনুমোদিত( নয়)?$/);
+      }
+    }
     assert.equal(root().querySelectorAll('.role-card').length, 0);
+    // The chip's count is the number of rows shown.
+    assert.match(root().querySelector('.page-header .ui-badge')?.textContent ?? '', /১০ ভূমিকা/);
   });
 
-  test('the scope is a word, not a database key', () => {
+  test('a role is a word, not a database key', () => {
     root().textContent = '';
     new RolesView({ root: root(), doc: dom.window.document });
-    assert.match(text(), /পুরো প্ল্যাটফর্ম/);
-    assert.match(text(), /নিজের প্রতিষ্ঠান/);
-    // `platform` and `tenant` are the values; neither belongs on screen.
+    assert.match(text(), /প্রধান শিক্ষক/);
+    // `platform` and `tenant` are values; neither belongs on screen — and
+    // neither does any role code.
     assert.doesNotMatch(text(), /\bplatform\b|\btenant\b/);
+    assert.doesNotMatch(text(),
+      /\b(super_admin|school_owner|principal|academic_coordinator|dept_head|class_teacher|subject_teacher|accountant|it_admin|student|guardian)\b/);
   });
 
   test('the isolation guarantee says it cannot be switched off', () => {
     root().textContent = '';
     new RolesView({ root: root(), doc: dom.window.document });
     assert.match(text(), /বন্ধ করার উপায় নেই/);
+  });
+
+  test('the page says access is enforced on the server, not by what is hidden', () => {
+    root().textContent = '';
+    new RolesView({ root: root(), doc: dom.window.document });
+    assert.match(text(), /অনুমতি সবসময় সার্ভারে যাচাই হয়/);
+    assert.match(text(), /পর্দায় লুকানো মানে নিরাপত্তা নয়/);
+    assert.match(text(), /RLS/);
+  });
+
+  test('the matrix says what the server enforces, not what the drawing guessed', () => {
+    root().textContent = '';
+    new RolesView({ root: root(), doc: dom.window.document });
+    const heads = [...root().querySelectorAll('thead th')].map((h) => h.textContent ?? '');
+    const allowed = (role: string) => {
+      const tr = [...root().querySelectorAll('tbody tr')]
+        .find((r) => r.querySelector('th')?.textContent === role);
+      assert.ok(tr, `row ${role}`);
+      return [...tr!.querySelectorAll('td')]
+        .filter((td) => td.querySelector('.ui-sr-only')?.textContent === 'অনুমোদিত')
+        .map((td) => heads[(td as HTMLTableCellElement).cellIndex]);
+    };
+    // SETTINGS_ROLES, services/ops-svc/api/settings.ts
+    for (const role of ['প্রধান শিক্ষক', 'প্রতিষ্ঠান মালিক', 'আইটি অ্যাডমিন', 'একাডেমিক সমন্বয়কারী']) {
+      assert.ok(allowed(role).includes('সেটিংস'), role);
+    }
+    // PUBLISH_ROLES + BILLING/COLLECT/LEDGER_ROLES: the owner is on the page.
+    assert.deepEqual(allowed('প্রতিষ্ঠান মালিক'), ['প্রকাশ', 'টাকা', 'সেটিংস']);
+    assert.deepEqual(allowed('হিসাবরক্ষক'), ['টাকা']);
+    assert.deepEqual(allowed('শিক্ষার্থী'), []);
+    assert.deepEqual(allowed('অভিভাবক'), []);
   });
 });

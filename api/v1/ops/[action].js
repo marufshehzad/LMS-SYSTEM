@@ -2081,7 +2081,7 @@ async function handler4(req, res) {
   }, cors);
 }
 
-// services/ops-svc/api/manifest.ts
+// services/ops-svc/src/manifest-build.ts
 var DEFAULT_ICONS = [
   { src: "/icons/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
   { src: "/icons/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" }
@@ -2114,6 +2114,8 @@ function buildManifest(branding, tenantId, locale = "bn") {
     ] : DEFAULT_ICONS
   };
 }
+
+// services/ops-svc/api/manifest.ts
 async function handler5(req, res) {
   const cors = corsHeaders();
   if (req.method === "OPTIONS") {
@@ -2362,7 +2364,7 @@ async function handler6(req, res) {
     const ctx = { tenantId: claims.tid, userId: claims.sub, role: claims.role, service: SERVICE };
     if (req.method === "GET") {
       const limit = Math.min(100, Math.max(1, Number(query(req).get("limit") ?? 50)));
-      const notices = await db.withTenant(ctx, async (c) => {
+      const notices2 = await db.withTenant(ctx, async (c) => {
         const { rows } = await c.query(
           `SELECT id, title, body, category, audience, send_sms, status,
                   published_at, recipient_count, created_at
@@ -2373,7 +2375,7 @@ async function handler6(req, res) {
         );
         return rows;
       });
-      json(res, 200, { notices }, cors);
+      json(res, 200, { notices: notices2 }, cors);
       return;
     }
     if (req.method !== "POST") {
@@ -2692,7 +2694,7 @@ async function handler8(req, res) {
           LIMIT 5`,
         [year2.id]
       );
-      const { rows: notices } = await c.query(
+      const { rows: notices2 } = await c.query(
         `SELECT id, title, category::text AS category,
                 published_at::text AS published_at, recipient_count
            FROM notices
@@ -2787,7 +2789,7 @@ async function handler8(req, res) {
           startsOn: e.starts_on,
           status: e.status
         })),
-        recentNotices: notices.map((n) => ({
+        recentNotices: notices2.map((n) => ({
           id: n.id,
           title: n.title,
           category: n.category,
@@ -3001,7 +3003,7 @@ async function candidates(db, ctx, sectionId) {
         ORDER BY sub.name_bn`,
       [sectionId, sec[0].class_id, sec[0].year_id]
     );
-    const { rows: teachers } = await c.query(
+    const { rows: teachers2 } = await c.query(
       `SELECT u.id, u.full_name_bn AS name_bn, sp.employee_code,
               COALESCE(array_agg(DISTINCT tse.subject_id::text)
                        FILTER (WHERE tse.subject_id IS NOT NULL), '{}') AS subject_ids,
@@ -3022,7 +3024,7 @@ async function candidates(db, ctx, sectionId) {
         nameBn: s.name_bn,
         assigned: s.assigned_teacher ? { id: s.assigned_teacher, nameBn: s.assigned_name ?? "" } : null
       })),
-      teachers: teachers.map((t) => ({
+      teachers: teachers2.map((t) => ({
         id: t.id,
         nameBn: t.name_bn,
         employeeCode: t.employee_code,
@@ -4364,13 +4366,25 @@ async function permissions(db, ctx, req) {
   }
   return db.withTenant(ctx, async (c) => {
     const { rows: before } = await c.query(
+      // `revoked_at` is SELECTED, not filtered out, so the two cases can be
+      // told apart: a link that never existed is a 404, a link that was
+      // ENDED is a refusal that says so.
       `SELECT gs.relation, gs.is_primary, gs.receives_sms, gs.can_pay_fees,
-              g.full_name_bn AS name_bn
+              gs.revoked_at, g.full_name_bn AS name_bn
          FROM guardianships gs JOIN users g ON g.id = gs.guardian_id
-        WHERE gs.student_id = $1 AND gs.guardian_id = $2`,
+        WHERE gs.student_id = $1 AND gs.guardian_id = $2
+        ORDER BY gs.revoked_at NULLS FIRST
+        LIMIT 1`,
       [studentId, guardianId]
     );
     if (before.length === 0) throw new HttpError(404, "\u09B8\u0982\u09AF\u09CB\u0997 \u09AA\u09BE\u0993\u09AF\u09BC\u09BE \u09AF\u09BE\u09AF\u09BC\u09A8\u09BF", "not_found");
+    if (before[0].revoked_at !== null) {
+      throw new HttpError(
+        409,
+        "\u098F\u0987 \u09B8\u0982\u09AF\u09CB\u0997\u099F\u09BF \u09AA\u09CD\u09B0\u09A4\u09CD\u09AF\u09BE\u09B9\u09BE\u09B0 \u0995\u09B0\u09BE \u09B9\u09AF\u09BC\u09C7\u099B\u09C7 \u2014 \u09B8\u09AE\u09CD\u09AA\u09BE\u09A6\u09A8\u09BE \u0995\u09B0\u09BE \u09AF\u09BE\u09AC\u09C7 \u09A8\u09BE\u0964 \u09AA\u09CD\u09B0\u09AF\u09BC\u09CB\u099C\u09A8\u09C7 \u09A8\u09A4\u09C1\u09A8 \u0995\u09B0\u09C7 \u0985\u09AD\u09BF\u09AD\u09BE\u09AC\u0995 \u09AF\u09C1\u0995\u09CD\u09A4 \u0995\u09B0\u09C1\u09A8\u0964",
+        "link_revoked"
+      );
+    }
     const prev = before[0];
     const relation = (b.relation ?? prev.relation).trim();
     if (!RELATIONS.has(relation)) {
@@ -7194,8 +7208,588 @@ async function mark(db, ctx, req) {
   }, { write: true });
 }
 
+// packages/server-core/src/csv.ts
+var CSV_BOM = "\uFEFF";
+var FORMULA_LEAD = /^[=+\-@\t\r]/;
+var PLAIN_NUMBER = /^[+-]?\d+(?:\.\d+)?$/;
+function csvCell(value) {
+  let v = value;
+  if (FORMULA_LEAD.test(v) && !PLAIN_NUMBER.test(v)) v = `'${v}`;
+  return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+function csvLine(values) {
+  return `${values.map(csvCell).join(",")}\r
+`;
+}
+
+// packages/server-core/src/csv-response.ts
+function beginCsvDownload(res, cors, o) {
+  res.writeHead(200, {
+    ...cors,
+    "Content-Type": "text/csv; charset=utf-8",
+    // `attachment` so the browser saves it instead of rendering a wall of
+    // text, and a plain ASCII filename so no edge has to guess an encoding.
+    "Content-Disposition": `attachment; filename="${o.filename}"`,
+    // Belt and braces with the service worker's network-only rule: a proxy
+    // between the school and us must not hold this either.
+    "Cache-Control": "no-store, private, max-age=0",
+    "Pragma": "no-cache",
+    // The file is a download, never a document to be framed or sniffed.
+    "X-Content-Type-Options": "nosniff"
+  });
+  res.write(CSV_BOM);
+  res.write(csvLine(o.headers));
+}
+function writeCsvRow(res, values) {
+  res.write(csvLine(values));
+}
+function csvFilename(dataset, on = /* @__PURE__ */ new Date()) {
+  const d = on.toISOString().slice(0, 10);
+  return `${dataset}-${d}.csv`;
+}
+
+// packages/server-core/src/export-dataset.ts
+var cell = (v) => v === null || v === void 0 ? "" : String(v);
+async function handleCsvExport(req, res, o) {
+  const cors = corsHeaders();
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, cors);
+    res.end();
+    return;
+  }
+  if (req.method !== "GET") {
+    json(res, 405, { error: "method_not_allowed" }, cors);
+    return;
+  }
+  try {
+    const claims = await authenticate(req);
+    requireRole(claims, o.roles);
+    const key = (query(req).get("dataset") ?? "").trim();
+    const def = Object.prototype.hasOwnProperty.call(o.datasets, key) ? o.datasets[key] : void 0;
+    if (!def) {
+      throw new HttpError(
+        400,
+        `dataset must be one of: ${Object.keys(o.datasets).join(", ")}`,
+        "unknown_dataset"
+      );
+    }
+    const db = await sharedDb();
+    const actor = { tenantId: claims.tid, userId: claims.sub, role: claims.role };
+    await db.withTenant(actor, async (client) => {
+      const rows = await def.select(client);
+      beginCsvDownload(res, cors, {
+        filename: csvFilename(key),
+        headers: def.headers
+      });
+      for (const r of rows) writeCsvRow(res, def.row(r));
+      await writeAudit(client, actor, {
+        action: "ops.data.export",
+        entityType: "export",
+        after: { dataset: key, rows: rows.length }
+      });
+    });
+    res.end();
+  } catch (err) {
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
+    if (err instanceof HttpError) {
+      json(res, err.status, { error: err.code, message: err.message }, cors);
+      return;
+    }
+    json(res, 500, { error: "internal_error" }, cors);
+  }
+}
+
+// services/ops-svc/api/export.ts
+var EXPORT_ROLES = ["principal", "school_owner", "it_admin"];
+var bnOf = (map, v) => v ? map[v] ?? v : "";
+var ROLE_BN = {
+  principal: "\u09AA\u09CD\u09B0\u09A7\u09BE\u09A8 \u09B6\u09BF\u0995\u09CD\u09B7\u0995",
+  school_owner: "\u09AA\u09CD\u09B0\u09A4\u09BF\u09B7\u09CD\u09A0\u09BE\u09A8 \u0995\u09B0\u09CD\u09A4\u09C3\u09AA\u0995\u09CD\u09B7",
+  academic_coordinator: "\u098F\u0995\u09BE\u09A1\u09C7\u09AE\u09BF\u0995 \u09B8\u09AE\u09A8\u09CD\u09AC\u09AF\u09BC\u0995",
+  it_admin: "\u0986\u0987\u099F\u09BF \u0985\u09CD\u09AF\u09BE\u09A1\u09AE\u09BF\u09A8",
+  accountant: "\u09B9\u09BF\u09B8\u09BE\u09AC\u09B0\u0995\u09CD\u09B7\u0995",
+  class_teacher: "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF \u09B6\u09BF\u0995\u09CD\u09B7\u0995",
+  subject_teacher: "\u09AC\u09BF\u09B7\u09AF\u09BC \u09B6\u09BF\u0995\u09CD\u09B7\u0995",
+  dept_head: "\u09AC\u09BF\u09AD\u09BE\u0997\u09C0\u09AF\u09BC \u09AA\u09CD\u09B0\u09A7\u09BE\u09A8",
+  guardian: "\u0985\u09AD\u09BF\u09AD\u09BE\u09AC\u0995",
+  student: "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0"
+};
+var USER_STATUS_BN = {
+  invited: "\u0986\u09AE\u09A8\u09CD\u09A4\u09CD\u09B0\u09BF\u09A4",
+  active: "\u0995\u09B0\u09CD\u09AE\u09B0\u09A4",
+  suspended: "\u09B8\u09CD\u09A5\u0997\u09BF\u09A4",
+  left: "\u099A\u09B2\u09C7 \u0997\u09C7\u099B\u09C7\u09A8",
+  deleted: "\u09AE\u09C1\u099B\u09C7 \u09AB\u09C7\u09B2\u09BE"
+};
+var RELATION_BN = {
+  father: "\u09AA\u09BF\u09A4\u09BE",
+  mother: "\u09AE\u09BE\u09A4\u09BE",
+  guardian: "\u0985\u09AD\u09BF\u09AD\u09BE\u09AC\u0995",
+  brother: "\u09AD\u09BE\u0987",
+  sister: "\u09AC\u09CB\u09A8",
+  uncle: "\u099A\u09BE\u099A\u09BE/\u09AE\u09BE\u09AE\u09BE",
+  aunt: "\u099A\u09BE\u099A\u09BF/\u09AE\u09BE\u09AE\u09BF",
+  other: "\u0985\u09A8\u09CD\u09AF\u09BE\u09A8\u09CD\u09AF"
+};
+var STREAM_BN2 = {
+  bangla_medium: "\u09AC\u09BE\u0982\u09B2\u09BE \u09AE\u09BE\u09A7\u09CD\u09AF\u09AE",
+  english_version: "\u0987\u0982\u09B0\u09C7\u099C\u09BF \u09AD\u09BE\u09B0\u09CD\u09B8\u09A8",
+  english_medium: "\u0987\u0982\u09B0\u09C7\u099C\u09BF \u09AE\u09BE\u09A7\u09CD\u09AF\u09AE",
+  madrasah: "\u09AE\u09BE\u09A6\u09CD\u09B0\u09BE\u09B8\u09BE",
+  technical: "\u0995\u09BE\u09B0\u09BF\u0997\u09B0\u09BF"
+};
+var SHIFT_BN2 = {
+  morning: "\u09B8\u0995\u09BE\u09B2",
+  day: "\u09A6\u09BF\u09AC\u09BE",
+  evening: "\u09B8\u09A8\u09CD\u09A7\u09CD\u09AF\u09BE",
+  single: "\u098F\u0995\u0995"
+};
+var NOTICE_STATUS_BN = {
+  draft: "\u0996\u09B8\u09A1\u09BC\u09BE",
+  scheduled: "\u09A8\u09BF\u09B0\u09CD\u09A7\u09BE\u09B0\u09BF\u09A4",
+  published: "\u09AA\u09CD\u09B0\u0995\u09BE\u09B6\u09BF\u09A4",
+  archived: "\u09B8\u0982\u09B0\u0995\u09CD\u09B7\u09BF\u09A4"
+};
+var yesNo = (v) => v === null ? "" : v ? "\u09B9\u09CD\u09AF\u09BE\u0981" : "\u09A8\u09BE";
+var teachers = {
+  headers: [
+    "\u0995\u09B0\u09CD\u09AE\u099A\u09BE\u09B0\u09C0 \u0986\u0987\u09A1\u09BF",
+    "\u09A8\u09BE\u09AE",
+    "\u09A8\u09BE\u09AE (\u0987\u0982\u09B0\u09C7\u099C\u09BF)",
+    "\u09AE\u09CB\u09AC\u09BE\u0987\u09B2",
+    "\u0987\u09AE\u09C7\u0987\u09B2",
+    "\u09AA\u09A6\u09AC\u09BF",
+    "\u09AD\u09C2\u09AE\u09BF\u0995\u09BE",
+    "\u09AF\u09CB\u0997\u09A6\u09BE\u09A8\u09C7\u09B0 \u09A4\u09BE\u09B0\u09BF\u0996",
+    "\u09A8\u09BF\u09AF\u09BC\u09CB\u0997\u09C7\u09B0 \u09A7\u09B0\u09A8",
+    "\u09B8\u09B0\u09CD\u09AC\u09CB\u099A\u09CD\u099A \u09A1\u09BF\u0997\u09CD\u09B0\u09BF",
+    "\u0985\u09AC\u09B8\u09CD\u09A5\u09BE",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF \u09B6\u09BF\u0995\u09CD\u09B7\u0995",
+    "\u09AF\u09C7 \u09AC\u09BF\u09B7\u09AF\u09BC \u09AA\u09A1\u09BC\u09BE\u09A8"
+  ],
+  /**
+   * Everyone who works at the school, with what they do.
+   *
+   * ── Who counts as staff ───────────────────────────────────────────────
+   * Anyone holding a role that is not `student` or `guardian`. Not "everyone
+   * with a `staff_profiles` row": that table is optional — a principal
+   * created through the onboarding wizard has a `user_roles` row and no
+   * profile — so keying off it would silently omit the head teacher from
+   * the school's list of its own staff.
+   *
+   * ── Roles are aggregated, not joined ──────────────────────────────────
+   * A teacher who is also a department head has two `user_roles` rows. A
+   * plain join emits them twice; `string_agg` puts both in one cell, which
+   * is what a school means by "their role".
+   *
+   * ── What is deliberately absent ───────────────────────────────────────
+   * `bank_account_ciphertext` is on `staff_profiles` and is never selected.
+   * Nor is anything from `users` that is encrypted or hashed. §8 asks for
+   * "contact where permitted", and the three roles allowed to run this
+   * export are exactly the three `MAY_SEE_CONTACT` already admits, so the
+   * phone is theirs to see.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT sp.employee_code,
+              u.full_name_bn, u.full_name_en,
+              u.phone_e164 AS phone, u.email,
+              sp.designation_bn,
+              (SELECT string_agg(DISTINCT ur2.role_code, ' / ' ORDER BY ur2.role_code)
+                 FROM user_roles ur2
+                WHERE ur2.user_id = u.id) AS roles,
+              sp.joining_date::text AS joining_date,
+              sp.employment_type, sp.highest_degree,
+              u.status::text AS status,
+              (SELECT string_agg(c.name_bn || ' ' || s.name, ', ' ORDER BY c.name_bn, s.name)
+                 FROM sections s JOIN classes c ON c.id = s.class_id
+                WHERE s.class_teacher_id = u.id) AS sections_led,
+              (SELECT string_agg(DISTINCT sub.name_bn, ', ' ORDER BY sub.name_bn)
+                 FROM section_subject_teachers sst
+                 JOIN subjects sub ON sub.id = sst.subject_id
+                WHERE sst.teacher_id = u.id) AS subjects_taught
+         FROM users u
+         LEFT JOIN staff_profiles sp ON sp.user_id = u.id
+        WHERE u.deleted_at IS NULL
+          AND EXISTS (SELECT 1 FROM user_roles ur
+                       WHERE ur.user_id = u.id
+                         AND ur.role_code NOT IN ('student', 'guardian'))
+        ORDER BY u.full_name_bn`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.employee_code),
+    cell(r.full_name_bn),
+    cell(r.full_name_en),
+    cell(r.phone),
+    cell(r.email),
+    cell(r.designation_bn),
+    // Each code translated on its own, so a two-role person reads as two
+    // Bangla words rather than one untranslated string.
+    (r.roles ?? "").split(" / ").filter(Boolean).map((c) => bnOf(ROLE_BN, c)).join(" / "),
+    cell(r.joining_date),
+    cell(r.employment_type),
+    cell(r.highest_degree),
+    bnOf(USER_STATUS_BN, r.status),
+    cell(r.sections_led),
+    cell(r.subjects_taught)
+  ]
+};
+var guardians = {
+  headers: [
+    "\u0985\u09AD\u09BF\u09AD\u09BE\u09AC\u0995\u09C7\u09B0 \u09A8\u09BE\u09AE",
+    "\u09A8\u09BE\u09AE (\u0987\u0982\u09B0\u09C7\u099C\u09BF)",
+    "\u09AE\u09CB\u09AC\u09BE\u0987\u09B2",
+    "\u0987\u09AE\u09C7\u0987\u09B2",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0 \u0986\u0987\u09A1\u09BF",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0\u09B0 \u09A8\u09BE\u09AE",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF",
+    "\u09B6\u09BE\u0996\u09BE",
+    "\u09B8\u09AE\u09CD\u09AA\u09B0\u09CD\u0995",
+    "\u09AA\u09CD\u09B0\u09A7\u09BE\u09A8 \u0985\u09AD\u09BF\u09AD\u09BE\u09AC\u0995",
+    "\u098F\u09B8\u098F\u09AE\u098F\u09B8 \u09AA\u09BE\u09A8",
+    "\u09AB\u09BF \u09A6\u09BF\u09A4\u09C7 \u09AA\u09BE\u09B0\u09C7\u09A8",
+    "\u0985\u09AC\u09B8\u09CD\u09A5\u09BE"
+  ],
+  /**
+   * One row per LINK, not per guardian.
+   *
+   * A guardian with three children is three rows, and that is the shape the
+   * data actually has — `guardianships` is the relationship table, and
+   * collapsing it to one row per adult would lose which permissions apply to
+   * which child. `receives_sms` and `can_pay_fees` are per link.
+   *
+   * ── Revoked links are INCLUDED, and say so ────────────────────────────
+   * B-7 made a guardianship endable rather than deletable, precisely because
+   * the record of who could act for a child during a period must survive.
+   * An export that silently dropped revoked rows would hand the school a
+   * history with the endings removed. The status column carries the answer.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT g.full_name_bn, g.full_name_en,
+              g.phone_e164 AS phone, g.email,
+              sp.student_code,
+              st.full_name_bn AS student_name,
+              c.name_bn       AS class_name,
+              s.name          AS section_name,
+              gs.relation, gs.is_primary, gs.receives_sms, gs.can_pay_fees,
+              CASE WHEN gs.revoked_at IS NULL THEN 'active' ELSE 'revoked' END AS status
+         FROM guardianships gs
+         JOIN users g  ON g.id  = gs.guardian_id AND g.deleted_at IS NULL
+         JOIN users st ON st.id = gs.student_id  AND st.deleted_at IS NULL
+         LEFT JOIN student_profiles sp ON sp.user_id = gs.student_id
+         LEFT JOIN LATERAL (
+           SELECT en.section_id FROM enrolments en
+             JOIN academic_years y ON y.id = en.academic_year_id
+            WHERE en.student_id = gs.student_id
+            ORDER BY y.is_current DESC, y.starts_on DESC
+            LIMIT 1
+         ) e ON TRUE
+         LEFT JOIN sections s ON s.id = e.section_id
+         LEFT JOIN classes  c ON c.id = s.class_id
+        ORDER BY g.full_name_bn, st.full_name_bn`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.full_name_bn),
+    cell(r.full_name_en),
+    cell(r.phone),
+    cell(r.email),
+    cell(r.student_code),
+    cell(r.student_name),
+    cell(r.class_name),
+    cell(r.section_name),
+    bnOf(RELATION_BN, r.relation),
+    yesNo(r.is_primary),
+    yesNo(r.receives_sms),
+    yesNo(r.can_pay_fees),
+    r.status === "revoked" ? "\u09AA\u09CD\u09B0\u09A4\u09CD\u09AF\u09BE\u09B9\u09C3\u09A4" : "\u09B8\u0995\u09CD\u09B0\u09BF\u09AF\u09BC"
+  ]
+};
+var structure = {
+  headers: [
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09AC\u09B0\u09CD\u09B7",
+    "\u09AC\u09B0\u09CD\u09B7 \u09B6\u09C1\u09B0\u09C1",
+    "\u09AC\u09B0\u09CD\u09B7 \u09B6\u09C7\u09B7",
+    "\u099A\u09B2\u09A4\u09BF \u09AC\u09B0\u09CD\u09B7",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF \u09A8\u09AE\u09CD\u09AC\u09B0",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF (\u0987\u0982\u09B0\u09C7\u099C\u09BF)",
+    "\u09B6\u09BE\u0996\u09BE/\u09B8\u09CD\u099F\u09CD\u09B0\u09BF\u09AE",
+    "\u0997\u09CD\u09B0\u09C1\u09AA",
+    "\u09B8\u09C7\u0995\u09B6\u09A8",
+    "\u09B6\u09BF\u09AB\u099F",
+    "\u09A7\u09BE\u09B0\u09A3\u0995\u09CD\u09B7\u09AE\u09A4\u09BE",
+    "\u09AC\u09B0\u09CD\u09A4\u09AE\u09BE\u09A8 \u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF \u09B6\u09BF\u0995\u09CD\u09B7\u0995",
+    "\u0995\u0995\u09CD\u09B7"
+  ],
+  /**
+   * The school's shape, one row per SECTION.
+   *
+   * §10 asks for years, classes, sections, groups and streams and for the
+   * relationships to survive. A section is the leaf of that hierarchy, so a
+   * section-centric sheet carries every level above it on the same line —
+   * which is what makes it reconstructible in a spreadsheet, where a reader
+   * cannot follow a foreign key.
+   *
+   * Denormalised on purpose. Five separate CSVs would be normalised, exactly
+   * reconstructible, and useless to the head teacher who opens one to see
+   * what their school looks like.
+   *
+   * A year with no classes yet still appears: this is the file a school
+   * checks its own setup against, and an empty year is a fact about the
+   * setup rather than a row to hide.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT y.label            AS year_label,
+              y.starts_on::text  AS year_start,
+              y.ends_on::text    AS year_end,
+              y.is_current,
+              c.level_no,
+              c.name_bn          AS class_bn,
+              c.name_en          AS class_en,
+              c.stream::text     AS stream,
+              c."group"          AS group_name,
+              s.name             AS section_name,
+              s.shift::text      AS shift,
+              s.capacity, s.student_count,
+              t.full_name_bn     AS class_teacher,
+              r.name_bn          AS room_name
+         FROM academic_years y
+         LEFT JOIN sections s ON s.academic_year_id = y.id
+         LEFT JOIN classes  c ON c.id = s.class_id
+         LEFT JOIN users    t ON t.id = s.class_teacher_id AND t.deleted_at IS NULL
+         LEFT JOIN rooms    r ON r.id = s.home_room_id
+        ORDER BY y.starts_on DESC, c.level_no NULLS LAST, s.name NULLS LAST`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.year_label),
+    cell(r.year_start),
+    cell(r.year_end),
+    yesNo(r.is_current),
+    cell(r.level_no),
+    cell(r.class_bn),
+    cell(r.class_en),
+    bnOf(STREAM_BN2, r.stream),
+    cell(r.group_name),
+    cell(r.section_name),
+    bnOf(SHIFT_BN2, r.shift),
+    cell(r.capacity),
+    cell(r.student_count),
+    cell(r.class_teacher),
+    cell(r.room_name)
+  ]
+};
+var notices = {
+  headers: [
+    "\u09B6\u09BF\u09B0\u09CB\u09A8\u09BE\u09AE",
+    "\u09AC\u09BF\u09AC\u09B0\u09A3",
+    "\u09A7\u09B0\u09A8",
+    "\u0995\u09BE\u09B0\u09BE \u09AA\u09BE\u09AC\u09C7",
+    "\u0985\u09AC\u09B8\u09CD\u09A5\u09BE",
+    "\u098F\u09B8\u098F\u09AE\u098F\u09B8",
+    "\u0985\u09CD\u09AF\u09BE\u09AA\u09C7",
+    "\u09AA\u09CD\u09B0\u09BE\u09AA\u0995\u09C7\u09B0 \u09B8\u0982\u0996\u09CD\u09AF\u09BE",
+    "\u09AA\u09CD\u09B0\u0995\u09BE\u09B6\u09C7\u09B0 \u09B8\u09AE\u09AF\u09BC",
+    "\u09AA\u09CD\u09B0\u0995\u09BE\u09B6\u09BF\u09A4 \u09B9\u09AF\u09BC\u09C7\u099B\u09C7",
+    "\u09A4\u09C8\u09B0\u09BF",
+    "\u09A4\u09C8\u09B0\u09BF \u0995\u09B0\u09C7\u099B\u09C7\u09A8"
+  ],
+  /**
+   * Every notice the school has written, including the drafts.
+   *
+   * A draft is the school's own text and belongs to them; an export that
+   * kept only what was published would silently drop work in progress.
+   *
+   * The BODY is included in full. It is the notice — a "notices export"
+   * carrying titles only would be an index, not the content, and the point
+   * of portability is that the school keeps what they wrote. `csvCell`
+   * handles the line breaks a notice body is full of.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT n.title, n.body, n.category::text AS category,
+              n.audience->>'type'   AS audience_type,
+              CASE WHEN jsonb_typeof(n.audience->'ids') = 'array'
+                   THEN jsonb_array_length(n.audience->'ids') END AS audience_count,
+              n.status::text        AS status,
+              n.send_sms, n.send_inapp, n.recipient_count,
+              n.publish_at::text    AS publish_at,
+              n.published_at::text  AS published_at,
+              n.created_at::text    AS created_at,
+              u.full_name_bn        AS created_by_name
+         FROM notices n
+         LEFT JOIN users u ON u.id = n.created_by AND u.deleted_at IS NULL
+        ORDER BY n.created_at DESC`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.title),
+    cell(r.body),
+    cell(r.category),
+    // NOT the raw `audience` jsonb. It is `{"ids": [...], "type": "section"}`
+    // — the ids are uuids, and §6 keeps uuids out of a file that gets mailed
+    // between offices. The school is told WHAT kind of audience and HOW MANY,
+    // which is the part they can act on.
+    audienceCell(r.audience_type, r.audience_count),
+    bnOf(NOTICE_STATUS_BN, r.status),
+    yesNo(r.send_sms),
+    yesNo(r.send_inapp),
+    cell(r.recipient_count),
+    cell(r.publish_at),
+    cell(r.published_at),
+    cell(r.created_at),
+    cell(r.created_by_name)
+  ]
+};
+var audit = {
+  headers: [
+    "\u09B8\u09AE\u09AF\u09BC",
+    "\u0995\u09C7",
+    "\u09AD\u09C2\u09AE\u09BF\u0995\u09BE",
+    "\u0995\u09BE\u099C",
+    "\u0995\u09C0\u09B8\u09C7\u09B0 \u0989\u09AA\u09B0",
+    "\u0986\u0997\u09C7",
+    "\u09AA\u09B0\u09C7"
+  ],
+  /**
+   * The school's own activity history.  B-11, export half.
+   *
+   * B-11 paired "audit export" with "actor-name resolution" and the second
+   * half was already false when the row was written — `audit.ts` has
+   * resolved names since 2026-08-29. Only the export was ever missing, and
+   * this is it.
+   *
+   * ── The redaction is the viewer's, not a copy of it ───────────────────
+   * `before_state` and `after_state` are arbitrary JSON, and some of it is
+   * a phone number or a date of birth. The audit VIEWER masks those by key
+   * name; this export imports that same function rather than restating the
+   * rule, because the file is the copy that leaves the building and a
+   * second redactor is how the two drift apart.
+   *
+   * The entity ID is deliberately not a column: it is a uuid, it means
+   * nothing to a school, and §6 keeps uuids out of exports.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT a.created_at::text AS created_at,
+              u.full_name_bn     AS actor_name,
+              a.actor_role, a.action, a.entity_type,
+              a.before_state, a.after_state
+         FROM audit.activity_log a
+         LEFT JOIN users u ON u.id = a.actor_id
+        ORDER BY a.created_at DESC`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.created_at),
+    // "নাম নেই" rather than blank: an empty cell reads as "nobody did this".
+    r.actor_name ? r.actor_name : "\u09A8\u09BE\u09AE \u09A8\u09C7\u0987",
+    bnOf(ROLE_BN, r.actor_role),
+    cell(r.action),
+    cell(r.entity_type),
+    jsonCell(r.before_state),
+    jsonCell(r.after_state)
+  ]
+};
+var AUDIENCE_BN = {
+  all: "\u09B8\u09AC\u09BE\u0987",
+  section: "\u09A8\u09BF\u09B0\u09CD\u09A6\u09BF\u09B7\u09CD\u099F \u09B8\u09C7\u0995\u09B6\u09A8",
+  class: "\u09A8\u09BF\u09B0\u09CD\u09A6\u09BF\u09B7\u09CD\u099F \u09B6\u09CD\u09B0\u09C7\u09A3\u09BF",
+  role: "\u09A8\u09BF\u09B0\u09CD\u09A6\u09BF\u09B7\u09CD\u099F \u09AD\u09C2\u09AE\u09BF\u0995\u09BE",
+  user: "\u09A8\u09BF\u09B0\u09CD\u09A6\u09BF\u09B7\u09CD\u099F \u09AC\u09CD\u09AF\u0995\u09CD\u09A4\u09BF",
+  exam: "\u09AA\u09B0\u09C0\u0995\u09CD\u09B7\u09BE-\u09B8\u0982\u0995\u09CD\u09B0\u09BE\u09A8\u09CD\u09A4"
+};
+function audienceCell(type, count) {
+  if (!type) return "";
+  const label = AUDIENCE_BN[type] ?? type;
+  return count === null || count === void 0 ? label : `${label} (${count})`;
+}
+var UUID_VALUE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function jsonCell(v) {
+  if (v === null || v === void 0) return "";
+  const safe = redact(v);
+  if (typeof safe !== "object") return String(safe);
+  return Object.entries(safe).map(([k, val]) => {
+    const text2 = typeof val === "object" && val !== null ? JSON.stringify(val) : String(val);
+    return `${k}: ${text2.replace(new RegExp(UUID_VALUE.source, "gi"), "\u2022\u2022\u2022")}`;
+  }).join("; ");
+}
+var offboarding = {
+  headers: ["\u09A1\u09C7\u099F\u09BE\u09B8\u09C7\u099F", "\u0995\u09C0 \u0986\u099B\u09C7", "\u09AC\u09B0\u09CD\u09A4\u09AE\u09BE\u09A8 \u09B8\u09BE\u09B0\u09BF", "\u0995\u09CB\u09A5\u09BE \u09A5\u09C7\u0995\u09C7 \u09A8\u09BE\u09AE\u09BE\u09AC\u09C7\u09A8"],
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT * FROM (VALUES
+         ('students',   '\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0\u09B0 \u09A4\u09BE\u09B2\u09BF\u0995\u09BE \u0993 \u09AD\u09B0\u09CD\u09A4\u09BF\u09B0 \u09A4\u09A5\u09CD\u09AF',
+          (SELECT count(*) FROM student_profiles)::text,
+          '/api/v1/academics/export?dataset=students'),
+         ('teachers',   '\u09B6\u09BF\u0995\u09CD\u09B7\u0995 \u0993 \u0995\u09B0\u09CD\u09AE\u09C0\u09B0 \u09A4\u09BE\u09B2\u09BF\u0995\u09BE',
+          (SELECT count(*) FROM users u WHERE u.deleted_at IS NULL
+             AND EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id = u.id
+                          AND ur.role_code NOT IN ('student','guardian')))::text,
+          '/api/v1/ops/export?dataset=teachers'),
+         ('guardians',  '\u0985\u09AD\u09BF\u09AD\u09BE\u09AC\u0995 \u0993 \u09B8\u09AE\u09CD\u09AA\u09B0\u09CD\u0995',
+          (SELECT count(*) FROM guardianships)::text,
+          '/api/v1/ops/export?dataset=guardians'),
+         ('structure',  '\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09AC\u09B0\u09CD\u09B7, \u09B6\u09CD\u09B0\u09C7\u09A3\u09BF \u0993 \u09B8\u09C7\u0995\u09B6\u09A8',
+          (SELECT count(*) FROM sections)::text,
+          '/api/v1/ops/export?dataset=structure'),
+         ('attendance', '\u09B9\u09BE\u099C\u09BF\u09B0\u09BE\u09B0 \u09B8\u09AC \u09B0\u09C7\u0995\u09B0\u09CD\u09A1',
+          (SELECT count(*) FROM attendance_records)::text,
+          '/api/v1/academics/export?dataset=attendance'),
+         ('results',    '\u09AA\u09B0\u09C0\u0995\u09CD\u09B7\u09BE\u09B0 \u09A8\u09AE\u09CD\u09AC\u09B0 \u0993 \u09AB\u09B2\u09BE\u09AB\u09B2',
+          (SELECT count(*) FROM exam_marks)::text,
+          '/api/v1/academics/export?dataset=results'),
+         ('fees',       '\u0987\u09A8\u09AD\u09AF\u09BC\u09C7\u09B8, \u09AA\u09B0\u09BF\u09B6\u09CB\u09A7 \u0993 \u09AC\u0995\u09C7\u09AF\u09BC\u09BE',
+          (SELECT count(*) FROM invoices)::text,
+          '/api/v1/finance/export?dataset=fees'),
+         ('notices',    '\u09AA\u09CD\u09B0\u09A4\u09BF\u09B7\u09CD\u09A0\u09BE\u09A8\u09C7\u09B0 \u09B8\u09AC \u09A8\u09CB\u099F\u09BF\u09B6',
+          (SELECT count(*) FROM notices)::text,
+          '/api/v1/ops/export?dataset=notices'),
+         ('audit',      '\u0995\u09C7 \u0995\u0996\u09A8 \u0995\u09C0 \u09AA\u09B0\u09BF\u09AC\u09B0\u09CD\u09A4\u09A8 \u0995\u09B0\u09C7\u099B\u09C7\u09A8',
+          (SELECT count(*) FROM audit.activity_log)::text,
+          '/api/v1/ops/export?dataset=audit')
+       ) AS t(dataset, title, rows, where_url)
+       ORDER BY 1`
+    );
+    return rows.map((r) => ({
+      dataset: r.dataset,
+      title: r.title,
+      rows: r.rows,
+      where: r.where_url
+    }));
+  },
+  row: (r) => [cell(r.dataset), cell(r.title), cell(r.rows), cell(r.where)]
+};
+async function handler21(req, res) {
+  return handleCsvExport(req, res, {
+    roles: EXPORT_ROLES,
+    datasets: {
+      teachers,
+      guardians,
+      structure,
+      notices,
+      audit,
+      offboarding
+    }
+  });
+}
+
 // services/ops-svc/api/index.ts
 var ROUTES = {
+  export: handler21,
   maintenance: handler,
   events: handler2,
   branding: handler3,
@@ -7218,7 +7812,7 @@ var ROUTES = {
   monitor: route,
   "staff-attendance": handler20
 };
-async function handler21(req, res) {
+async function handler22(req, res) {
   const path = new URL(req.url ?? "/", "http://internal").pathname;
   const sub = path.split("/").filter(Boolean).pop() ?? "";
   const route2 = ROUTES[sub];
@@ -7250,5 +7844,5 @@ async function handler21(req, res) {
   return route2(req, res);
 }
 export {
-  handler21 as default
+  handler22 as default
 };

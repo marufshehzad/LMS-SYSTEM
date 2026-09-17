@@ -14,7 +14,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createDb, TenantBlocked, type Db } from '../src/db.ts';
-import { lockFixtures, unlockFixtures } from './harness.ts';
+import { lockFixtures, unlockFixtures, asBootstrap } from './harness.ts';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 /** Seeding a school is a PLATFORM act — see the module header. */
@@ -554,7 +554,27 @@ describe('P7 — the console may reach past the gate, and only the console', { s
  */
 after(async () => {
   if (!plat) return;
-  await plat.pool.query(`DELETE FROM tenants WHERE id IN ($1, $2)`, [T, T_B]);
+  // B-119. Each tenant is dropped IN ITS OWN CONTEXT, on the runtime
+  // connection.
+  //
+  // This used to be one `plat.pool.query('DELETE FROM tenants WHERE id IN
+  // (…)')`. It deleted nothing, raised nothing, and had done so since P7:
+  // `tenant_self` is `USING (id = app.current_tenant())`, and a bare query
+  // on the platform pool sets no current tenant, so the statement matched
+  // no rows. The teardown ran, reported success and left both schools
+  // behind — 271 of the 292 tenants in the development database were this
+  // suite's fixtures, two per run, growing without bound.
+  //
+  // The same policy is what makes the fix work: under tenant A's context
+  // `app.current_tenant()` IS A, so the row is visible and deletable. It is
+  // the shape every other suite in the repo already uses (`asBootstrap`),
+  // and the reason this one did not is that it holds a platform connection
+  // and reached for it.
+  for (const id of [T, T_B]) {
+    if (!id) continue;
+    await asBootstrap(db, { tenantId: id, userId: USER, role: 'principal' },
+      async (c) => { await c.query(`DELETE FROM tenants WHERE id = $1`, [id]); });
+  }
   await db.end();
   await plat.end();
   await unlockFixtures();

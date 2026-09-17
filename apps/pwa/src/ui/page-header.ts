@@ -25,8 +25,61 @@
  * case the shell cannot serve: a screen reached *inside* another screen — a
  * section under a class, a student under a section — where the trail is data,
  * not navigation, and only the view knows it.
+ *
+ * ── Numbers (Ata Ekta §2, R6) ──────────────────────────────────────────────
+ * Every element this module fills with CALLER text — title, subtitle, crumb,
+ * back label, section title — sets its numbers in the `.n` face, on the
+ * smallest element that holds them:
+ *
+ *   no digit            the same DOM as before — one element, one text node.
+ *   only a number       `n` on the element itself ("২০২৬", "১০:৪৫").
+ *   number inside words the element keeps its own class, and each number run
+ *                       is a `<span class="n">` ("শিক্ষাবর্ষ <span.n>২০২৬</span>"),
+ *                       so the words stay in the text face and a page title
+ *                       does not change typeface from one screen to the next.
+ *
+ * textContent is identical in all three cases. Slots that take a node (badge,
+ * primary, actions, section action) are the caller's markup and carry their
+ * own `n`. The same rule, and the same number pattern, as ui/card.ts and
+ * ui/badge.ts.
  */
-import { el, icon, append, type Child } from './dom.ts';
+import { el, icon, append, type Child, type ElProps } from './dom.ts';
+
+/** A digit, Latin or Bangla. */
+const DIGIT = /[0-9০-৯]/;
+/**
+ * One number as a reader sees it: digits, with the separators that sit
+ * between digits ("১২,৫০০.৭৫", "১০:৪৫", "৭/৫২", "২০২৫–২৬"), and a trailing
+ * % or + ("৯৪%").
+ */
+const NUMBER = '[0-9০-৯]+(?:[.,:/\\u2013-][0-9০-৯]+)*[%+]?';
+const NUMBER_RUN = new RegExp(NUMBER, 'g');
+const ONLY_NUMBER = new RegExp(`^\\s*${NUMBER}\\s*$`);
+
+/**
+ * An element holding caller `text`, with its numbers in the `.n` face (R6).
+ * `props` is everything but the text (className, attrs, on). Built from text
+ * nodes only — the text is school data, never markup.
+ */
+function numEl<K extends keyof HTMLElementTagNameMap>(
+  doc: Document, tag: K, props: Omit<ElProps, 'text'>, text: string,
+): HTMLElementTagNameMap[K] {
+  if (!DIGIT.test(text)) return el(doc, tag, { ...props, text });
+  if (ONLY_NUMBER.test(text)) {
+    const className = props.className ? `${props.className} n` : 'n';
+    return el(doc, tag, { ...props, className, text });
+  }
+  const node = el(doc, tag, props);
+  let at = 0;
+  for (const m of text.matchAll(NUMBER_RUN)) {
+    const i = m.index ?? 0;
+    if (i > at) append(node, text.slice(at, i));
+    append(node, el(doc, 'span', { className: 'n', text: m[0] }));
+    at = i + m[0].length;
+  }
+  if (at < text.length) append(node, text.slice(at));
+  return node;
+}
 
 export interface Crumb {
   label: string;
@@ -74,21 +127,23 @@ export function pageHeader(doc: Document, o: PageHeaderOptions): HTMLElement {
   const row = el(doc, 'div', { className: 'page-header-main' });
   const titles = el(doc, 'div', { className: 'page-header-text' });
 
-  const h1 = el(doc, 'h1', { text: o.title });
+  const h1 = numEl(doc, 'h1', {}, o.title);
   if (o.badge) {
     append(titles, el(doc, 'div', { className: 'page-title-row' }, h1, o.badge));
   } else {
     append(titles, h1);
   }
   if (o.subtitle) {
-    append(titles, el(doc, 'p', { className: 'page-sub', text: o.subtitle }));
+    append(titles, numEl(doc, 'p', { className: 'page-sub' }, o.subtitle));
   }
   row.append(titles);
 
   if (o.actions?.length || o.primary) {
-    // Secondary first, primary last — priority order. On desktop the row is
-    // right-aligned and the eye finishes on the primary; on a phone the same
-    // order stacks with the primary bottom-most, under the thumb.
+    // Secondary first, primary last — priority order, so the eye finishes on
+    // the primary. The actions sit beside the title while they fit next to
+    // the title block's minimum width; when they do not, the row wraps and
+    // they drop under the title, still flush left (14 Components §01). There
+    // is no separate phone layout — one DOM, flex-wrap decides.
     const acts = el(doc, 'div', { className: 'page-header-actions' });
     append(acts, ...(o.actions ?? []), o.primary);
     row.append(acts);
@@ -116,20 +171,20 @@ export function breadcrumb(doc: Document, crumbs: Crumb[]): HTMLElement {
     const li = el(doc, 'li', { className: 'ui-crumb-item' });
     if (i > 0) {
       append(li, el(doc, 'span', {
-        className: 'ui-crumb-sep', text: '›', attrs: { 'aria-hidden': 'true' },
+        className: 'ui-crumb-sep', text: '/', attrs: { 'aria-hidden': 'true' },
       }));
     }
     if (c.onClick && !last) {
       // A button, not an anchor: it goes nowhere a URL names, and an `<a>`
       // with no href is invisible to the keyboard.
-      append(li, el(doc, 'button', { className: 'ui-crumb-link', text: c.label,
-        attrs: { type: 'button' }, on: { click: c.onClick } }));
+      append(li, numEl(doc, 'button', { className: 'ui-crumb-link',
+        attrs: { type: 'button' }, on: { click: c.onClick } }, c.label));
     } else if (c.path && !last) {
-      append(li, el(doc, 'a', { className: 'ui-crumb-link', text: c.label,
-        attrs: { href: `#/${c.path}` } }));
+      append(li, numEl(doc, 'a', { className: 'ui-crumb-link',
+        attrs: { href: `#/${c.path}` } }, c.label));
     } else {
-      append(li, el(doc, 'span', { className: 'ui-crumb-current', text: c.label,
-        attrs: last ? { 'aria-current': 'page' } : {} }));
+      append(li, numEl(doc, 'span', { className: 'ui-crumb-current',
+        attrs: last ? { 'aria-current': 'page' } : {} }, c.label));
     }
     list.append(li);
   });
@@ -147,7 +202,7 @@ export function breadcrumb(doc: Document, crumbs: Crumb[]): HTMLElement {
 export function backLink(doc: Document, label: string, onBack: () => void): HTMLElement {
   const btn = el(doc, 'button', {
     className: 'ui-back', attrs: { type: 'button' },
-  }, icon(doc, 'arrow-left'), el(doc, 'span', { text: label }));
+  }, icon(doc, 'arrow-left'), numEl(doc, 'span', {}, label));
   btn.addEventListener('click', onBack);
   return btn;
 }
@@ -169,9 +224,7 @@ export function sectionHeading(doc: Document, o: {
   const wrap = el(doc, 'div', {
     className: ['ui-section-head', o.className ?? ''].filter(Boolean).join(' '),
   });
-  append(wrap, el(doc, o.level === 3 ? 'h3' : 'h2', {
-    className: 'ui-section-title', text: o.title,
-  }));
+  append(wrap, numEl(doc, o.level === 3 ? 'h3' : 'h2', { className: 'ui-section-title' }, o.title));
   if (o.action) append(wrap, el(doc, 'div', { className: 'ui-section-action' }, o.action));
   return wrap;
 }

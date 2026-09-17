@@ -121,7 +121,19 @@ export type AuditAction =
   | 'finance.payment.record'
   | 'finance.fee_structure.create'
   | 'finance.fee_structure.update'
-  | 'finance.fee_structure.delete';
+  | 'finance.fee_structure.delete'
+  // P11. A dataset left the building.
+  //
+  // Its own action rather than a read, because it is not one: every other
+  // entry here records a change to the school's data, and this records a
+  // COPY of it going somewhere the product can no longer see. If a roster
+  // turns up where it should not, this row is the only thing that can say
+  // who took it and when. `after` carries the dataset name and the row
+  // count — never the rows.
+  | 'ops.data.export'
+  // B-120. A person ended a session — their own, on a device they named.
+  // The device and the count, never a token or a hash.
+  | 'identity.session.revoke';
 
 export interface AuditEntry {
   action: AuditAction;

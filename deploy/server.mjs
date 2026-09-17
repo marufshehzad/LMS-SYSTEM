@@ -101,7 +101,44 @@ function cacheFor(ext, path) {
   return 'no-cache';
 }
 
+/**
+ * Security headers for everything this server returns.  (P13)
+ *
+ * `netlify.toml` has set these for `/*` since P-ops, but production is not
+ * Netlify — it is Caddy in front of this file, and this file set only
+ * `X-Content-Type-Options`. The P13 audit read the live headers back off
+ * `https://sikhon.systems` and found exactly that one, so the other three were
+ * being set on a host the product is not served from.
+ *
+ * ── Why HSTS without `includeSubDomains`, for now ───────────────────────
+ * The subdomain model needs `*.sikhon.systems` to be HTTPS, so
+ * `includeSubDomains` is where this ends up. It is not set YET because the
+ * wildcard certificate does not exist yet: a browser that has seen the
+ * directive refuses a subdomain served without TLS, and it remembers for a
+ * year. Add it in the same change that turns `WILDCARD_DNS_READY` on, once a
+ * subdomain has actually been served over HTTPS — not before.
+ *
+ * ── Why no Content-Security-Policy here ─────────────────────────────────
+ * A CSP is the one header on this list that can break a working application,
+ * and it cannot be written responsibly from the outside: it has to be derived
+ * from what the app actually loads and then verified in a browser. Adding a
+ * guessed policy to a live deployment would be the opposite of what this
+ * phase is for. Tracked as P13-11 rather than shipped blind.
+ */
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'X-Frame-Options': 'DENY',
+  'Strict-Transport-Security': 'max-age=31536000',
+};
+
 const server = createServer(async (req, res) => {
+  // Applied to every response including the API's, so a handler cannot forget
+  // them. `setHeader` before `writeHead` merges rather than replaces, so an
+  // endpoint that deliberately sets its own (document.ts uses SAMEORIGIN so a
+  // school can preview a printable in a frame) still wins.
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
+
   let path;
   try {
     path = decodeURIComponent(new URL(req.url ?? '/', 'http://internal').pathname);

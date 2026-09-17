@@ -518,6 +518,7 @@ Chosen to minimise regression:
 | **P7** | **Platform Operations Center** (`/platform`), platform-branded | **COMPLETE 2026-09-02.** Not a restyle — see the note below the rollback line |
 | **P8** | Cleanup: retire dead CSS, re-measure budget | **COMPLETE 2026-09-02.** 491 lines of dead CSS removed (3,926 → 3,850 lines; 53.0 → 51.2 KB gzipped). `--c-*` is **retained**: it is an alias layer over `--color-*`, not a second system — 721 live usages, zero of them at zero usage. See PHASE_LOG P8 |
 | **P10** | **Platform console at fleet scale**: responsive treatment, sorting, pagination, the operator directory | **COMPLETE 2026-09-08.** Row 22's `both` finally true. Also the console's FIRST view tests — 20 of them, mutation-checked, because every previous claim about these screens rested on a browser session. `aria-sort` was 0: the server had supported seven sort keys since P10-1 and nothing on screen could reach one. Sorting is a labelled select rather than clickable headers — below 1024px this table has no headers to click, and twelve sortable headers are twelve tab stops that never say they sort. See PHASE_LOG P10 |
+| **P11** | **Data portability** — the তথ্য রপ্তানি screen | **COMPLETE 2026-09-08.** One screen, ten datasets, one button each. No preview table on purpose: a preview of 2,000 students is a second implementation of the roster screen, slower than the download, and it invites the reading that the file is what is on screen. The download is `authedFetch` → Blob → object URL, because a plain `<a href>` arrives unauthenticated — the access token lives in memory, not a cookie. Verified by clicking it in a real session and reading the delivered BYTES, not the status code. See PHASE_LOG P11 |
 
 **Rollback:** every phase is its own commit range behind a tag; `git revert` of
 a phase restores the previous UI without touching data, API or schema —
@@ -1761,3 +1762,33 @@ off the grid. The screen keeps its own responsive scale; the same data, two
 presentations. The document's Bangla face is now Hind Siliguri, matching
 `--font-bn` on screen, where the document stack had been Noto Sans Bengali
 with Hind Siliguri absent entirely.
+
+
+---
+
+## P12 audit — UI/UX findings (2026-09-10)
+
+All 24 principal routes were rendered against real data and scanned; mobile was
+checked at 375px; the light theme was measured.
+
+**Held up:** `lang="bn"`, a skip link, `main`/`nav`/`header` landmarks, zero
+unlabelled inputs, zero images without `alt`, no touch target under 32px, light
+theme body contrast **8.06:1** (AA needs 4.5), Hind Siliguri in the stack behind
+a numeral-specific face, and Bangla-first throughout — no English leaked into a
+principal's screens. Twenty-three of 24 routes carry exactly one `h1`.
+
+**Three defects, all MINOR:**
+
+1. **The academic year is in Latin digits** inside Bangla sentences —
+   "শিক্ষাবর্ষ 2026" — on home, academic structure, import and exams. The date
+   beside it is correctly Bangla, so the mismatch sits in one line. It is a
+   database value interpolated raw; `bnNum()` exists and is used a few
+   characters away on the same line in `import-view.ts`.
+2. **`#/students` has no `h1`** — the outline starts at `h2`. It is the only
+   route of the 24 that does this.
+3. **16px horizontal overflow on `#/academic` at 375px** — the bottom tab bar
+   measures 391px against a 375px viewport, reproducibly, while measuring
+   exactly 375px on home.
+
+**Not assessed:** printed A4 output on physical paper, and font readability in
+print. That needs a printer, and remains genuinely untested.

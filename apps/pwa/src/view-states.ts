@@ -9,11 +9,92 @@ import { iconSvg, hasIcon } from './icon.ts';
  * skipped would be the empty state, which is what a school sees on its FIRST
  * DAY, when every table is empty and nothing has gone wrong.
  *
- * These are thin builders over the classes already in app.css (`.skel`,
- * `.empty-state`, `.login-error`, `.status-chip`). No new visual language, no
- * new tokens — the point is consistency with what R-1 and R-2 already look
- * like, not a component library.
+ * These are thin builders over the Ata Ekta classes in app.css (00 Foundations
+ * §04, 14 Components §05–§06): `.is-skeleton.ui-skeleton` > `.skel`; the state
+ * card `.ui-state` (+ `-empty` / `-error`, with `-glyph` / `-title` /
+ * `-detail` / `-action`, and `-text` as the error's alert region);
+ * `.ui-success-note` (+ `-glyph` / `-text`); and the inline confirm
+ * `.notice-confirm.ui-confirm` built from `.ui-dialog-head` / `-body` /
+ * `-foot`. No new visual language, no new tokens — the point is that every
+ * screen shows these moments the same way, not a component library.
  */
+
+/** A digit, Latin or Bangla. */
+const DIGIT = /[0-9০-৯]/;
+/**
+ * One number as a reader sees it: digits, with the separators that sit
+ * between digits ("১২,৫০০.৭৫", "১০:৪৫", "২০২৫–২৬"), and a trailing % or +.
+ * The same shape ui/badge.ts marks, so a number looks alike in both.
+ */
+const NUMBER_RUN = /[0-9০-৯]+(?:[.,:/–-][0-9০-৯]+)*[%+]?/g;
+
+/**
+ * Put caller text into `node`, with every number in the `.n` face (R6).
+ *
+ * The class goes on the smallest element that holds the number — a
+ * `<span class="n">` around the digits — not on the sentence: `.n` switches to
+ * the numeral face, and a whole Bangla sentence set in it changes the words'
+ * typeface too. Text nodes only, so `textContent` is exactly what the caller
+ * passed and nothing in it is ever parsed as markup.
+ */
+function setText(doc: Document, node: HTMLElement, text: string): HTMLElement {
+  if (!DIGIT.test(text)) { node.textContent = text; return node; }
+  let at = 0;
+  for (const m of text.matchAll(NUMBER_RUN)) {
+    const i = m.index ?? 0;
+    if (i > at) node.append(doc.createTextNode(text.slice(at, i)));
+    const n = doc.createElement('span');
+    n.className = 'n';
+    n.textContent = m[0];
+    node.append(n);
+    at = i + m[0].length;
+  }
+  if (at < text.length) node.append(doc.createTextNode(text.slice(at)));
+  return node;
+}
+
+function textEl(doc: Document, tag: 'p' | 'span', className: string, text: string): HTMLElement {
+  const node = doc.createElement(tag);
+  node.className = className;
+  return setText(doc, node, text);
+}
+
+/**
+ * A one-message API drawn as the design's two-line card (Foundations §04,
+ * 14 Components §06): the first sentence is the title, the rest the muted
+ * detail. Messages in this app are written "<what happened>। <what to do>।",
+ * so the split follows a sentence the caller already wrote; a one-sentence
+ * message is a title alone. `gap` is the whitespace the split took out, put
+ * back between the two paragraphs — it renders as nothing there, and keeps the
+ * card's text identical to the message (ui/feedback.ts permissionState splits
+ * the same way).
+ */
+function splitMessage(message: string): { title: string; gap: string; detail: string } {
+  const i = message.indexOf('।');
+  if (i >= 0 && message.slice(i + 1).trim()) {
+    const rest = message.slice(i + 1);
+    const detail = rest.trimStart();
+    return { title: message.slice(0, i + 1), gap: rest.slice(0, rest.length - detail.length), detail };
+  }
+  return { title: message, gap: '', detail: '' };
+}
+
+/**
+ * The drawn glyph when the set carries it, else the one this component drew
+ * before — so a missing name degrades to the old look, never to the
+ * unknown-icon dot.
+ */
+function glyphName(drawn: string, fallback: string): string {
+  return hasIcon(drawn) ? drawn : fallback;
+}
+
+function glyphSpan(doc: Document, className: string, name: string): HTMLElement {
+  const g = doc.createElement('span');
+  g.className = className;
+  g.setAttribute('aria-hidden', 'true');
+  g.innerHTML = iconSvg(name);
+  return g;
+}
 
 /**
  * A skeleton, not a spinner.
@@ -25,8 +106,10 @@ import { iconSvg, hasIcon } from './icon.ts';
  */
 export function skeleton(doc: Document, rows = 3): HTMLElement {
   const wrap = doc.createElement('div');
-  wrap.className = 'is-skeleton';
-  wrap.style.padding = 'var(--s-4)';
+  // `.ui-skeleton` carries the padding and the gap between the grey rows
+  // (Foundations §04 "তিনটি ধূসর সারি" — they used to touch). It replaced an
+  // inline padding; `.is-skeleton` stays as the hook other code looks for.
+  wrap.className = 'is-skeleton ui-skeleton';
   wrap.setAttribute('aria-busy', 'true');
   // Screen readers get a word; sighted users get the shape. Announcing every
   // grey bar would be noise.
@@ -43,12 +126,27 @@ export function skeleton(doc: Document, rows = 3): HTMLElement {
 }
 
 export interface EmptyOptions {
-  /** An icon name from ./icon.ts — never an emoji. */
+  /**
+   * An icon name from ./icon.ts — never an emoji. When omitted, the design's
+   * generic empty glyph (`inbox`) is drawn if the set carries it.
+   */
   glyph?: string;
+  /**
+   * What is missing. The first sentence is the card's title; any sentence
+   * after it is shown as the muted detail line.
+   */
   message: string;
+  /**
+   * Second line under the message: what would fill this. Rendered as
+   * `.ui-state-detail` (after any detail sentence already in `message`).
+   */
+  detail?: string;
   /** Optional way out. An empty state that only says "nothing here" wastes the moment. */
   action?: { label: string; onClick: () => void };
 }
+
+/** 14 Components §06 draws every empty card with this glyph. */
+const EMPTY_GLYPH = 'inbox';
 
 /**
  * Empty is a state, not an absence.
@@ -60,28 +158,38 @@ export interface EmptyOptions {
  */
 export function emptyState(doc: Document, o: EmptyOptions): HTMLElement {
   const wrap = doc.createElement('div');
-  wrap.className = 'empty-state';
-  if (o.glyph) {
+  wrap.className = 'ui-state ui-state-empty';
+  // The default is drawn only when the set really carries it: an empty state
+  // nobody asked a glyph for must never grow the fallback dot.
+  const glyph = o.glyph ?? (hasIcon(EMPTY_GLYPH) ? EMPTY_GLYPH : undefined);
+  if (glyph) {
     const g = doc.createElement('span');
-    g.className = 'empty-glyph';
+    g.className = 'ui-state-glyph';
     g.setAttribute('aria-hidden', 'true');
     // P6: actually draw it. This rendered a literal `·` and said the reason
     // was an import cycle with `icon.ts` — which imports nothing, from a
     // module that imports nothing. `hasIcon` keeps the dot as the fallback
     // for a name the set does not carry, so a typo degrades rather than
     // renders an empty box.
-    if (hasIcon(o.glyph)) g.innerHTML = iconSvg(o.glyph);
+    if (hasIcon(glyph)) g.innerHTML = iconSvg(glyph);
     else g.textContent = '·';
     wrap.append(g);
   }
-  const p = doc.createElement('p');
-  p.textContent = o.message;
-  wrap.append(p);
+  // The title stays the first <p> in the card.
+  const { title, gap, detail } = splitMessage(o.message);
+  wrap.append(textEl(doc, 'p', 'ui-state-title', title));
+  const detailText = [detail, o.detail ?? ''].filter(Boolean).join(' ');
+  if (detailText) {
+    wrap.append(doc.createTextNode(gap || ' '));
+    wrap.append(textEl(doc, 'p', 'ui-state-detail', detailText));
+  }
   if (o.action) {
+    // Foundations §04 draws the way out as accent-ink text flush under the
+    // words — the ghost button, still a real 44px button.
     const btn = doc.createElement('button');
     btn.type = 'button';
-    btn.className = 'btn-secondary';
-    btn.textContent = o.action.label;
+    btn.className = 'btn-ghost ui-state-action';
+    setText(doc, btn, o.action.label);
     btn.addEventListener('click', o.action.onClick);
     wrap.append(btn);
   }
@@ -102,16 +210,24 @@ export function errorState(
   onRetry?: () => void,
 ): HTMLElement {
   const wrap = doc.createElement('div');
-  wrap.style.padding = 'var(--s-4)';
-  const p = doc.createElement('p');
-  p.className = 'login-error';
-  p.setAttribute('role', 'alert');
-  p.textContent = message;
-  wrap.append(p);
+  wrap.className = 'ui-state ui-state-error';
+  wrap.append(glyphSpan(doc, 'ui-state-glyph', glyphName('alert-circle', 'alert-triangle')));
+  // The alert region holds the words and only the words: its text is the
+  // message exactly, and the retry label is not announced as part of it.
+  const text = doc.createElement('div');
+  text.className = 'ui-state-text';
+  text.setAttribute('role', 'alert');
+  const { title, gap, detail } = splitMessage(message);
+  text.append(textEl(doc, 'p', 'ui-state-title', title));
+  if (detail) {
+    if (gap) text.append(doc.createTextNode(gap));
+    text.append(textEl(doc, 'p', 'ui-state-detail', detail));
+  }
+  wrap.append(text);
   if (onRetry) {
     const btn = doc.createElement('button');
     btn.type = 'button';
-    btn.className = 'btn-secondary';
+    btn.className = 'btn-ghost ui-state-action';
     btn.textContent = 'আবার চেষ্টা করুন';
     btn.addEventListener('click', onRetry);
     wrap.append(btn);
@@ -128,11 +244,15 @@ export function errorState(
  */
 export function successNote(doc: Document, message: string): HTMLElement {
   const p = doc.createElement('p');
-  p.className = 'status-chip';
-  p.setAttribute('data-state', 'success');
+  // 14 Components §06: an --ok-tint strip with an --ok bar and check glyph.
+  // No side margin — a full-width note with 16px either side pushed a 375px
+  // screen sideways (P12-3).
+  p.className = 'ui-success-note';
   p.setAttribute('aria-live', 'polite');
-  p.style.margin = 'var(--s-3) var(--s-4)';
-  p.textContent = message;
+  p.append(
+    glyphSpan(doc, 'ui-success-note-glyph', glyphName('check-circle', 'check-square')),
+    textEl(doc, 'span', 'ui-success-note-text', message),
+  );
   return p;
 }
 
@@ -159,45 +279,68 @@ export interface ConfirmOptions {
   /** Marks the confirm button as destructive rather than routine. */
   danger?: boolean;
   onConfirm: () => void;
+  /**
+   * Checked BEFORE the dialog closes. Return false to keep it open — for a
+   * field inside the confirm (platform-ops' required reason) whose error
+   * must be shown in the dialog, not on a node that was already removed.
+   */
+  validate?: () => boolean;
   onCancel?: () => void;
 }
 
 export function confirmDialog(o: ConfirmOptions): HTMLElement {
   const d = o.doc;
   const wrap = d.createElement('div');
-  wrap.className = 'card notice-confirm';
+  // The 14 Components §05 confirm anatomy, kept inline in the page flow:
+  // head (glyph + title over a 2px rule), body, foot. Not `.card`, whose hover
+  // shadow is for things that float; no inline margin (P12-3).
+  wrap.className = 'notice-confirm ui-confirm';
   wrap.setAttribute('role', 'alertdialog');
   wrap.setAttribute('aria-modal', 'false');
-  wrap.style.margin = 'var(--s-3) var(--s-4)';
 
-  const h = d.createElement('p');
-  h.className = 'notice-confirm-label';
-  h.textContent = o.title;
+  const head = d.createElement('div');
+  head.className = 'ui-dialog-head';
+  // The same warning glyph confirmOverlay draws. Only on a destructive
+  // confirm: §05 draws only that variant, and a triangle on a routine yes/no
+  // would be an alarm with nothing behind it.
+  if (o.danger) head.append(glyphSpan(d, 'ui-dialog-glyph', 'alert-triangle'));
+  const h = textEl(d, 'p', 'notice-confirm-label ui-dialog-title', o.title);
+  head.append(h);
 
-  const body = d.createElement('p');
-  body.className = 'notice-confirm-line';
-  body.textContent = o.body;
+  const bodyWrap = d.createElement('div');
+  bodyWrap.className = 'ui-dialog-body';
+  // `.notice-confirm-line` is an anchor, not only a look: platform-ops.ts
+  // inserts the reason field right after it.
+  const body = textEl(d, 'p', 'notice-confirm-line ui-dialog-text', o.body);
+  bodyWrap.append(body);
 
   const row = d.createElement('div');
-  row.className = 'action-row';
+  row.className = 'action-row ui-dialog-foot';
 
   // Cancel first in the DOM, so the first thing focus and a screen reader
   // reach on an irreversible dialogue is the way out.
   const cancel = d.createElement('button');
   cancel.type = 'button';
-  cancel.className = 'btn-secondary';
-  cancel.textContent = o.cancelLabel ?? 'বাতিল';
+  cancel.className = 'btn-secondary ui-btn';
+  setText(d, cancel, o.cancelLabel ?? 'বাতিল');
   cancel.addEventListener('click', () => { wrap.remove(); o.onCancel?.(); });
 
   const ok = d.createElement('button');
   ok.type = 'button';
-  ok.className = o.danger ? 'btn-primary' : 'btn-primary';
+  // `ui-btn` resets the full width `.btn-primary` carries. A destructive
+  // confirm is the danger variant, as confirmOverlay's is — until now both
+  // branches of this ternary said btn-primary.
+  ok.className = o.danger ? 'btn-danger ui-btn' : 'btn-primary ui-btn';
   if (o.danger) ok.setAttribute('data-danger', 'true');
-  ok.textContent = o.confirmLabel;
-  ok.addEventListener('click', () => { wrap.remove(); o.onConfirm(); });
+  setText(d, ok, o.confirmLabel);
+  ok.addEventListener('click', () => {
+    if (o.validate && !o.validate()) return;
+    wrap.remove();
+    o.onConfirm();
+  });
 
   row.append(cancel, ok);
-  wrap.append(h, body, row);
+  wrap.append(head, bodyWrap, row);
 
   wrap.addEventListener('keydown', (e) => {
     if ((e as KeyboardEvent).key === 'Escape') { wrap.remove(); o.onCancel?.(); }

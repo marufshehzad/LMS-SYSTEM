@@ -84,7 +84,9 @@ describe('B-34 — the user list is a table on a desktop', () => {
 
   test('the columns are the ones an office needs, in order', () => {
     const heads = [...root().querySelectorAll('thead th')].map((h) => h.textContent);
-    assert.deepEqual(heads, ['নাম', 'ভূমিকা', 'আইডি', 'অবস্থা', 'ব্যবস্থা']);
+    // 05 Principal §03 draws মোবাইল after ভূমিকা. It is a manager's column
+    // (this fixture is canManage) — see the reader test below.
+    assert.deepEqual(heads, ['নাম', 'ভূমিকা', 'মোবাইল', 'আইডি', 'অবস্থা', 'ব্যবস্থা']);
   });
 
   test('the id column is the SCHOOL’s code, never the uuid', () => {
@@ -136,6 +138,7 @@ describe('B-34 — the user list is a table on a desktop', () => {
     await settle();
     const heads = [...root().querySelectorAll('thead th')].map((h) => h.textContent);
     assert.ok(!heads.includes('ব্যবস্থা'));
+    assert.ok(!heads.includes('মোবাইল'), 'a reader who may not manage sees no phone column');
     assert.equal(root().querySelectorAll('button[data-action="issue-code"]').length, 0);
   });
 });
@@ -158,7 +161,8 @@ describe('B-34 — the audit viewer', () => {
     new AuditView({ root: root(), doc: dom.window.document, auth: auth(ENTRIES) } as never);
     await settle();
     // Open the entry, because the uuid used to live inside the expanded diff.
-    const head = root().querySelector('.notice-head') as HTMLElement | null;
+    const head = root().querySelector('.audit-head') as HTMLElement | null;
+    assert.ok(head, 'the entry must actually open, or this checks a closed row');
     head?.click();
     await settle();
     assert.doesNotMatch(text(), /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-/,
@@ -173,7 +177,7 @@ describe('B-34 — the audit viewer', () => {
     root().textContent = '';
     new AuditView({ root: root(), doc: dom.window.document, auth: auth(ENTRIES) } as never);
     await settle();
-    (root().querySelector('.notice-head') as HTMLElement | null)?.click();
+    (root().querySelector('.audit-head') as HTMLElement | null)?.click();
     await settle();
     assert.match(text(), /ফি পরিশোধের অনুমতি/, 'the field that changed, named in Bangla');
     assert.doesNotMatch(text(), /এসএমএস\s*:/,
@@ -186,7 +190,7 @@ describe('B-34 — the audit viewer', () => {
     await settle();
     assert.match(text(), new RegExp(permissionMessage('কার্যবিবরণী')));
     assert.match(text(), /প্রধান শিক্ষক, প্রতিষ্ঠান মালিক ও আইটি অ্যাডমিন/);
-    assert.equal(root().querySelectorAll('.notice-card').length, 0,
+    assert.equal(root().querySelectorAll('.audit-row').length, 0,
       'an empty list under a refusal claims "there is nothing here", which is untrue');
     assert.doesNotMatch(text(), /আবার চেষ্টা/, 'no retry can help');
   });

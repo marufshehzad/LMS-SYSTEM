@@ -1,9 +1,10 @@
 /**
  * Phone → OTP → verify login screen.
  *
- * Framework-free, same conventions as attendance-view.ts: manual DOM,
+ * Framework-free, built from the ui/ components (field, button, el):
  * Bangla-first copy, buttons sized to --tap-min, no client-side routing
  * concerns here — the shell decides what to show after onLoggedIn fires.
+ * Drawn as 01 Shell & Auth ক প্রবেশ (Ata Ekta): one card, both widths.
  *
  * tenantId is normally already known (baked into the install link the
  * school hands out, see app.ts's ?tid= / localStorage resolution) and
@@ -18,8 +19,37 @@ import {
   cachedOtpLogin,
 } from './branding.ts';
 import { type Branding, brandName } from '../../../packages/ui-core/src/branding.ts';
+import { el, icon, append, uid, numText, numClass } from './ui/dom.ts';
+import { button } from './ui/button.ts';
+import { field } from './ui/field.ts';
+import { bnNum } from './view-states.ts';
 
 const PHONE_RE = /^\+8801[3-9][0-9]{8}$/;
+
+/**
+ * Fill one of the card's two message panels (01 Shell & Auth ক, the "ভুল পিন
+ * · অপেক্ষা" card): a bold title line, then a quieter detail line. The first
+ * Bangla sentence is the title and the rest, when there is a rest, is the
+ * detail — "সংযোগে সমস্যা হয়েছে।" over "আবার চেষ্টা করুন।". A one-sentence
+ * message is title only.
+ *
+ * Text nodes only (the message can carry a server-side word, never markup),
+ * numbers in the `.n` face (R6), and the panel's textContent stays exactly the
+ * message: the single space between the sentences is kept as a text node.
+ */
+function fillPanel(doc: Document, panel: HTMLElement, message: string): void {
+  panel.textContent = '';
+  const i = message.indexOf('।');
+  const rest = i >= 0 ? message.slice(i + 1) : '';
+  const detail = rest.trimStart();
+  const title = detail ? message.slice(0, i + 1) : message;
+  append(panel, el(doc, 'p', { className: 'login-panel-title' }, ...numText(doc, title)));
+  if (detail) {
+    append(panel,
+      rest.slice(0, rest.length - detail.length),
+      el(doc, 'p', { className: 'login-panel-detail' }, ...numText(doc, detail)));
+  }
+}
 
 /**
  * Wireframe §5.1: a rate-limit rejection renders as a countdown, not an
@@ -137,25 +167,34 @@ export class LoginView {
     }
   }
 
+  /**
+   * 01 Shell & Auth ক "স্বাভাবিক": one bordered card on the grey ground —
+   * mark, the school's name, the step's instruction, the fields, the one
+   * full-width primary with its arrow on the right, and a single quiet footer
+   * line under it. The same card at both widths (13 Responsive: fluid, no
+   * breakpoint of its own).
+   */
   private render(): void {
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';
     root.setAttribute('lang', 'bn');
 
-    const wrap = d.createElement('div');
-    wrap.className = 'login-wrap';
+    const wrap = el(d, 'div', { className: 'login-wrap' });
+    const card = el(d, 'div', { className: 'card login-card' });
 
     // R-1: the institution's mark, not the platform's. A school that has
     // uploaded a logo gets the logo; one that has not gets the first
-    // letter of its own name in the Ata Ekta 56px rounded brand square,
+    // letter of its own name in the Ata Ekta 52px accent brand square,
     // which is still ITS identity rather than "শি" for ShikhonBD.
     const institution = brandName(this.branding);
-    const brand = d.createElement('div');
-    brand.className = 'login-brand';
 
-    const mark = d.createElement('div');
-    mark.className = 'login-brandmark';
+    // aria-hidden: the letter is a picture of the name, and the <h1> right
+    // under it already says the name — a reader would otherwise hear "ন" and
+    // then "নর্থ সিটি…".
+    const mark = el(d, 'div', {
+      className: 'login-brandmark', attrs: { 'aria-hidden': 'true' },
+    });
     if (this.branding.logoUrl) {
       const img = d.createElement('img');
       img.className = 'login-brandlogo';
@@ -166,124 +205,128 @@ export class LoginView {
     } else {
       // [...institution] rather than charAt(0): Bangla is multi-byte, and
       // charAt would slice a grapheme in half and render a broken glyph.
-      mark.textContent = [...institution][0] ?? '';
+      const letter = [...institution][0] ?? '';
+      mark.className = numClass('login-brandmark', letter);
+      mark.textContent = letter;
     }
 
-    const brandNameEl = d.createElement('div');
-    brandNameEl.className = 'login-brandname';
-    brandNameEl.textContent = institution;
-    const tagline = d.createElement('div');
-    tagline.className = 'login-tagline';
-    // Deliberately generic: this is the school's screen, and naming the
-    // platform on it is the exact thing R-1 removes.
-    tagline.textContent = 'শিক্ষা ব্যবস্থাপনা ব্যবস্থা';
-    brand.append(mark, brandNameEl, tagline);
-
-    // Kept for a11y and page title, but hidden — the brand element above
-    // carries the visible headline now.
-    const h1 = d.createElement('h1');
-    h1.textContent = institution;
-    h1.className = 'visually-hidden';
+    // The school's name IS the screen's one heading, and now it is visible:
+    // it used to be a visually-hidden <h1> duplicating a styled <div>. The
+    // design draws the name as the card's heading, so the two became one.
+    const h1 = el(d, 'h1', { className: 'login-brandname' }, ...numText(d, institution));
 
     if (isLoginDisabled() && this.step !== 'activate') {
       // F-202. The OTP kill switch used to be a dead end; now it is a
       // detour. The aggregator negotiation blocks SMS, not the school —
       // and the school can hand out activation codes on paper.
-      const notice = d.createElement('p');
-      notice.className = 'att-sub';
-      notice.textContent = 'মোবাইল কোডে লগইন সাময়িকভাবে বন্ধ আছে।';
-      const enter = d.createElement('button');
-      enter.type = 'button';
-      enter.className = 'btn-primary login-activate-entry';
-      enter.textContent = 'সক্রিয়ন কোড দিয়ে প্রবেশ করুন';
-      enter.addEventListener('click', () => { this.step = 'activate'; this.render(); });
-      const hint = d.createElement('p');
-      hint.className = 'att-sub login-activate-hint';
-      hint.textContent = 'কোড পাবেন আপনার শ্রেণিশিক্ষক বা অফিস থেকে।';
-      wrap.append(h1, brand, notice, enter, hint);
+      const notice = el(d, 'p', {
+        className: 'login-sub', text: 'মোবাইল কোডে লগইন সাময়িকভাবে বন্ধ আছে।',
+      });
+      const enter = button(d, {
+        label: 'সক্রিয়ন কোড দিয়ে প্রবেশ করুন',
+        variant: 'primary',
+        block: true,
+        onClick: () => { this.step = 'activate'; this.render(); },
+      });
+      // After the label, so it sits on the right of the full-width bar.
+      enter.append(icon(d, 'arrow-right', 'btn-glyph'));
+      const hint = el(d, 'p', {
+        className: 'login-foot login-foot-note',
+        text: 'কোড পাবেন আপনার শ্রেণিশিক্ষক বা অফিস থেকে।',
+      });
+      card.append(mark, h1, notice, enter, hint);
+      wrap.append(card);
       root.append(wrap);
       return;
     }
 
-    const sub = d.createElement('p');
-    sub.className = 'att-sub';
-    sub.textContent = this.step === 'activate'
-      ? 'শিক্ষকের দেওয়া ৮ অক্ষরের কোডটি দিন'
-      : this.step === 'phone'
-        ? 'আপনার মোবাইল নম্বর দিন'
-        : `${this.phone} নম্বরে পাঠানো কোডটি দিন`;
+    const sub = el(d, 'p', { className: 'login-sub' });
+    if (this.step === 'activate') {
+      append(sub, ...numText(d, 'শিক্ষকের দেওয়া ৮ অক্ষরের কোডটি দিন'));
+    } else if (this.step === 'phone') {
+      sub.textContent = 'আপনার মোবাইল নম্বর দিন';
+    } else {
+      // The number is an identifier and stays exactly as typed (Latin), in
+      // the numeral face; the words around it stay in the text face.
+      append(sub,
+        el(d, 'span', { className: 'n', text: this.phone }),
+        ' নম্বরে পাঠানো কোডটি দিন');
+    }
 
-    this.errorEl = d.createElement('p');
-    this.errorEl.className = 'login-error';
-    this.errorEl.setAttribute('role', 'alert');
-    this.errorEl.hidden = true;
+    // The design's alert panel: tinted ground, 4px bar, a bold title over a
+    // quieter detail line. A <div>, because it holds those two paragraphs.
+    this.errorEl = el(d, 'div', {
+      className: 'login-panel login-error',
+      attrs: { id: uid('login-error'), role: 'alert', hidden: true },
+    });
 
     // Deliberately role="status", not "alert": a countdown is a wait, not a
     // failure, and it updates every second — an alert would re-announce on
-    // every tick.
-    this.cooldownEl = d.createElement('p');
-    this.cooldownEl.className = 'login-cooldown';
-    this.cooldownEl.setAttribute('role', 'status');
-    this.cooldownEl.hidden = true;
+    // every tick. Same panel anatomy, warn tone (§3: অপেক্ষমাণ is --warn).
+    this.cooldownEl = el(d, 'div', {
+      className: 'login-panel login-cooldown',
+      attrs: { role: 'status', hidden: true },
+    });
 
-    const form = d.createElement('form');
-    form.className = 'login-form';
+    // No class: the fields' own 16px rhythm is the design's spacing, and the
+    // old `.login-form` flex gap would add to it.
+    const form = el(d, 'form');
     form.addEventListener('submit', (e) => { e.preventDefault(); void this.onSubmit(); });
 
+    /**
+     * The step's one other way forward. It lives in the footer line under the
+     * primary (the design's "পিন ভুলে গেছেন? প্রধান শিক্ষককে বলুন" slot), as a
+     * ghost button, so the primary directly follows the fields.
+     */
+    let alt: HTMLButtonElement | null = null;
+
     if (!this.tenantId) {
-      const tLabel = d.createElement('label');
-      tLabel.className = 'login-label';
-      tLabel.textContent = 'স্কুল আইডি';
-      const tInput = d.createElement('input');
-      tInput.type = 'text';
-      tInput.name = 'tenantId';
-      tInput.className = 'login-input';
-      tInput.autocomplete = 'off';
-      tInput.addEventListener('input', () => { this.tenantId = tInput.value.trim(); });
-      tLabel.append(tInput);
-      form.append(tLabel);
+      const t = field(d, {
+        label: 'স্কুল আইডি',
+        name: 'tenantId',
+        onInput: (v) => { this.tenantId = v.trim(); },
+      });
+      // Set after creation: field() owns `autocomplete` and would drop it.
+      t.input.setAttribute('autocomplete', 'off');
+      form.append(t.root);
     }
 
     if (this.step === 'activate') {
-      const label = d.createElement('label');
-      label.className = 'login-label';
-      label.textContent = 'সক্রিয়ন কোড';
-      const input = d.createElement('input');
-      input.type = 'text';
-      input.name = 'activationCode';
-      input.className = 'login-input login-code-input';
+      const f = field(d, {
+        label: 'সক্রিয়ন কোড',
+        name: 'activationCode',
+        attrs: { maxlength: 12, autocapitalize: 'characters' },
+      });
       // Uppercase letters and digits; autocapitalize helps the ten-year-old
       // typing it. NOT one-time-code — that hint summons the SMS reader,
-      // and this code never arrives by SMS.
-      input.autocomplete = 'off';
-      input.setAttribute('autocapitalize', 'characters');
-      input.maxLength = 12;
-      label.append(input);
-      form.append(label);
+      // and this code never arrives by SMS. The code carries digits, so it
+      // is set in the numeral face like every other figure (R6).
+      f.input.classList.add('n', 'is-num', 'login-code-input');
+      f.input.setAttribute('autocomplete', 'off');
+      form.append(f.root);
 
       if (!isLoginDisabled()) {
         // Only offer the way back when there IS a way back.
-        const back = d.createElement('button');
-        back.type = 'button';
-        back.className = 'btn-secondary';
-        back.textContent = 'মোবাইল নম্বরে ফিরে যান';
-        back.addEventListener('click', () => { this.step = 'phone'; this.render(); });
-        form.append(back);
+        alt = button(d, {
+          label: 'মোবাইল নম্বরে ফিরে যান',
+          variant: 'ghost',
+          size: 'sm',
+          onClick: () => { this.step = 'phone'; this.render(); },
+        });
       }
     } else if (this.step === 'phone') {
-      const label = d.createElement('label');
-      label.className = 'login-label';
-      label.textContent = 'মোবাইল নম্বর';
-      const input = d.createElement('input');
-      input.type = 'tel';
-      input.name = 'phone';
-      input.className = 'login-input';
-      input.placeholder = '+8801XXXXXXXXX';
-      input.autocomplete = 'tel';
-      input.value = this.phone;
-      input.addEventListener('input', () => { this.phone = input.value.trim(); });
-      label.append(input);
-      form.append(label);
+      // kind 'tel' gives type="tel", inputmode="tel", dir="ltr" and the
+      // numeral face — the same control as before, with its label wired.
+      const f = field(d, {
+        label: 'মোবাইল নম্বর',
+        name: 'phone',
+        kind: 'tel',
+        placeholder: '+8801XXXXXXXXX',
+        value: this.phone,
+        onInput: (v) => { this.phone = v.trim(); },
+      });
+      f.input.setAttribute('autocomplete', 'tel');
+      form.append(f.root);
 
       // R-7. The activation-code door, offered even when OTP works.
       //
@@ -296,65 +339,90 @@ export class LoginView {
       // console had just given them had no way to use it — which is R-7's
       // own exit criterion, failing on a deployment where OTP works.
       //
-      // Secondary here, because a person who has a phone should use it; the
-      // code path is for the first login and for anyone without SMS.
-      const useCode = d.createElement('button');
-      useCode.type = 'button';
-      useCode.className = 'btn-secondary login-activate-entry';
-      useCode.textContent = 'সক্রিয়ন কোড দিয়ে প্রবেশ করুন';
-      useCode.addEventListener('click', () => {
-        // `this.error = ''` was here, and there is no such field — the view
-        // clears its message by hiding `errorEl`. So a person who mistyped
-        // their phone number, gave up and switched to the activation code
-        // carried the phone-number error onto the code screen, where it was
-        // both wrong and alarming. `tsc` had been reporting this since R-7's
-        // completion pass; the suite never could, because node --test strips
-        // types instead of checking them.
-        this.step = 'activate';
-        this.errorEl.hidden = true;
-        this.render();
+      // Quieter than the primary, because a person who has a phone should use
+      // it; the code path is for the first login and for anyone without SMS.
+      alt = button(d, {
+        label: 'সক্রিয়ন কোড দিয়ে প্রবেশ করুন',
+        variant: 'ghost',
+        size: 'sm',
+        onClick: () => {
+          // `this.error = ''` was here, and there is no such field — the view
+          // clears its message by hiding `errorEl`. So a person who mistyped
+          // their phone number, gave up and switched to the activation code
+          // carried the phone-number error onto the code screen, where it was
+          // both wrong and alarming. `tsc` had been reporting this since R-7's
+          // completion pass; the suite never could, because node --test strips
+          // types instead of checking them.
+          this.step = 'activate';
+          this.errorEl.hidden = true;
+          this.render();
+        },
       });
-      form.append(useCode);
     } else {
-      const label = d.createElement('label');
-      label.className = 'login-label';
-      label.textContent = 'যাচাইকরণ কোড';
-      const input = d.createElement('input');
-      input.type = 'text';
-      input.name = 'code';
-      input.className = 'login-input';
-      input.inputMode = 'numeric';
-      input.autocomplete = 'one-time-code';
-      label.append(input);
-      form.append(label);
+      // kind 'number' is type="text" + inputmode="numeric", as before.
+      const f = field(d, { label: 'যাচাইকরণ কোড', name: 'code', kind: 'number' });
+      f.input.setAttribute('autocomplete', 'one-time-code');
+      form.append(f.root);
 
-      const back = d.createElement('button');
-      back.type = 'button';
-      back.className = 'btn-secondary';
-      back.textContent = 'নম্বর পরিবর্তন করুন';
-      back.addEventListener('click', () => { this.step = 'phone'; this.render(); });
-      form.append(back);
+      alt = button(d, {
+        label: 'নম্বর পরিবর্তন করুন',
+        variant: 'ghost',
+        size: 'sm',
+        onClick: () => { this.step = 'phone'; this.render(); },
+      });
     }
 
-    const submit = d.createElement('button');
-    submit.type = 'submit';
-    submit.className = 'btn-primary';
-    submit.textContent = this.busy
-      ? 'অপেক্ষা করুন…'
-      : this.step === 'activate' ? 'প্রবেশ করুন'
-        : this.step === 'phone' ? 'কোড পাঠান' : 'যাচাই করুন';
-    submit.disabled = this.busy;
+    const submit = button(d, {
+      label: this.busy
+        ? 'অপেক্ষা করুন…'
+        : this.step === 'activate' ? 'প্রবেশ করুন'
+          : this.step === 'phone' ? 'কোড পাঠান' : 'যাচাই করুন',
+      variant: 'primary',
+      type: 'submit',
+      block: true,
+      // Disabled, spinner beside the label, aria-busy — §01's busy button.
+      busy: this.busy,
+      className: 'login-submit',
+    });
+    // The arrow sits on the right of the bar; a busy bar shows the spinner
+    // instead, never both.
+    if (!this.busy) submit.append(icon(d, 'arrow-right', 'btn-glyph'));
     this.submitEl = submit;
     form.append(submit);
 
-    wrap.append(h1, brand, sub, this.errorEl, this.cooldownEl, form);
+    card.append(mark, h1, sub, this.errorEl, this.cooldownEl, form);
+    if (alt) card.append(el(d, 'p', { className: 'login-foot' }, alt));
+    wrap.append(card);
     root.append(wrap);
     this.paintCooldown();
   }
 
-  private showError(message: string): void {
-    this.errorEl.textContent = message;
+  /**
+   * Show a message in the error panel. `fieldName` is given only for the
+   * client-side checks, where one field is at fault: that field takes the
+   * sheet's error look (2px --danger, --danger-tint) and says so to a reader
+   * (`aria-invalid`, described by the panel). Nothing is re-created, so what
+   * the person typed stays in the field.
+   */
+  private showError(message: string, fieldName?: string): void {
+    fillPanel(this.o.doc, this.errorEl, message);
     this.errorEl.hidden = false;
+    if (!fieldName) return;
+    const input = this.o.root.querySelector<HTMLElement>(`.ui-input[name="${fieldName}"]`);
+    if (!input) return;
+    input.closest('.ui-field')?.classList.add('is-error');
+    input.setAttribute('aria-invalid', 'true');
+    input.setAttribute('aria-describedby', this.errorEl.id);
+  }
+
+  /** Undo showError's field highlight, so the panel and the field always agree. */
+  private clearFieldHighlight(): void {
+    this.o.root.querySelectorAll<HTMLElement>('.ui-field.is-error').forEach((f) => {
+      f.classList.remove('is-error');
+      const input = f.querySelector('.ui-input');
+      input?.removeAttribute('aria-invalid');
+      input?.removeAttribute('aria-describedby');
+    });
   }
 
   /**
@@ -381,7 +449,9 @@ export class LoginView {
       if (this.submitEl && !this.busy) this.submitEl.disabled = false;
       return;
     }
-    this.cooldownEl.textContent = cooldownMessage(left);
+    // cooldownMessage() stays Latin (login-cooldown.test.ts pins it); the
+    // screen counts in Bangla, each figure in the numeral face (R6).
+    fillPanel(this.o.doc, this.cooldownEl, bnNum(cooldownMessage(left)));
     this.cooldownEl.hidden = false;
     if (this.submitEl) this.submitEl.disabled = true;
   }
@@ -390,9 +460,10 @@ export class LoginView {
     if (this.busy) return;
     if (this.cooldownUntil > Date.now()) return;
     this.errorEl.hidden = true;
+    this.clearFieldHighlight();
 
     if (!this.tenantId) {
-      this.showError('স্কুল আইডি প্রয়োজন।');
+      this.showError('স্কুল আইডি প্রয়োজন।', 'tenantId');
       return;
     }
 
@@ -400,7 +471,7 @@ export class LoginView {
       const input = this.o.root.querySelector<HTMLInputElement>('input[name="activationCode"]');
       const code = input?.value.trim() ?? '';
       if (code.replace(/[^A-Za-z0-9]/g, '').length < 8) {
-        this.showError('৮ অক্ষরের কোডটি সম্পূর্ণ দিন।');
+        this.showError('৮ অক্ষরের কোডটি সম্পূর্ণ দিন।', 'activationCode');
         return;
       }
       this.busy = true;
@@ -418,7 +489,7 @@ export class LoginView {
 
     if (this.step === 'phone') {
       if (!PHONE_RE.test(this.phone)) {
-        this.showError('সঠিক মোবাইল নম্বর দিন (উদাহরণ: +8801712345678)।');
+        this.showError('সঠিক মোবাইল নম্বর দিন (উদাহরণ: +8801712345678)।', 'phone');
         return;
       }
       this.busy = true;
@@ -438,7 +509,7 @@ export class LoginView {
     const codeInput = this.o.root.querySelector<HTMLInputElement>('input[name="code"]');
     const code = codeInput?.value.trim() ?? '';
     if (!/^[0-9]{4,8}$/.test(code)) {
-      this.showError('সঠিক কোড দিন।');
+      this.showError('সঠিক কোড দিন।', 'code');
       return;
     }
     this.busy = true;

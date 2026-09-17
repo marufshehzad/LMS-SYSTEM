@@ -31,6 +31,8 @@ import studenthistory from './studenthistory.ts';
 // B-15 — the student's own day. A sibling of /rms/routine, not a widening
 // of it: different reader, different question, different function.
 import myroutine from './myroutine.ts';
+// P11. Data portability. One route, one dataset per request.
+import exportData from './export.ts';
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 
@@ -38,6 +40,7 @@ const ROUTES: Record<string, Handler> = {
   sections, roster, exams, marks, publish, scripts, chapters, topics, results,
   assignments, practice, next, subjects, attendance,
   import: importStudents,
+  export: exportData,
   ward, subjectchoice, classperf, hierarchy, myroutine,
   // R-6. The master plan writes these as /academics/students/search and
   // /academics/students/history — two segments, where both hosts route a

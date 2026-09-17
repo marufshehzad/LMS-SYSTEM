@@ -17,6 +17,51 @@ New to the repository? Read [00-START-HERE.md](00-START-HERE.md) first.
 
 ---
 
+
+
+## P13 production readiness (2026-09-10)
+
+**NO-GO for production; every repository-side requirement met.** See
+`docs/P13-PRODUCTION-READINESS-REPORT.md`.
+
+| capability | code | delivery |
+|---|---|---|
+| Subdomain routing | **PASS** — 16 hostname shapes, full lifecycle, forged Host ignored | gated off until DNS + TLS |
+| Backup / restore | **PASS** — drill run: 27 tables, 16 tenants, RTO 5.9s | backup *schedule* external |
+| Env / secrets | **PASS** — 5 undocumented runtime vars closed + guard test | production values external |
+| Push | **PASS** — 48 tests, whole lifecycle | **BLOCKED** — no VAPID keys, never delivered |
+| SMS | **PASS** — 79 tests, allowlist, throws if named-but-unconfigured | **BLOCKED** — no aggregator |
+| Cron / workers | **PASS** — three systemd timers | needs `systemctl enable` |
+| Monitoring | **PASS** — readiness endpoint, 11 checks | **BLOCKED** — no `ALERT_WEBHOOK_URL` |
+
+The pilot journey was **not run**: no real pilot institution exists (B-5) and
+the infrastructure it would run on does not exist yet. It was not simulated.
+
+## P12 audit status (2026-09-10)
+
+Audited against the running system - see `docs/P12-FINAL-AUDIT-REPORT.md`.
+**~93% complete for pilot; production deployability blocked on infrastructure,
+not on code.** Thirteen of sixteen areas implemented and verified; three carry
+work external to this repository.
+
+| Area | Verified live | Rests on the suite | Outstanding |
+|---|---|---|---|
+| Platform console, guardian/student access, tenant isolation, commercial lifecycle, UI/UX across 24 routes | yes | - | - |
+| Exams, fees, routine generation, import/export, sync idempotency | - | 2,270 tests, 13/13 workspaces | - |
+| A4 print on paper, real SMS delivery | - | - | needs a printer and a contract |
+
+**All five P12 minor defects were fixed on 2026-09-10.** P12-1 became one shared
+`formatAcademicYear()` applied at 15 render sites across 11 files (the audit had
+found 4); P12-2 routed `#/students` through the shared `pageHeader()`; P12-3 was
+traced past the tab-bar symptom to `.btn-secondary` carrying a layout margin and
+fixed at the cause, verified at 320/375/390/430px; P12-4 turned out to be a wrong
+finding hiding a worse one — the rollback runbook globbed `*.down.sql` and would
+have skipped 27 of 75 files; P12-5 removed five stale tenants, 21 → 16.
+
+Two new guards ship with them: `academic-year-numerals.test.ts` and
+`heading-hierarchy.test.ts`, both with negative controls. Suite is now **2,279
+tests**, 13/13 workspaces, 28 SQL suites. See BACKLOG and PHASE_LOG.
+
 ## 1. Current state at a glance
 
 | | |
@@ -120,8 +165,9 @@ implemented as specified.
 | Piece | File | Notes |
 |---|---|---|
 | Entry + boot | `src/app.ts` | Resolves tenant from `?tid=`/localStorage; Auth-gates the shell; `?demo=1` bypass (§6) |
-| Auth/session | `src/auth.ts` | Tokens in localStorage; silent refresh 60 s ahead of expiry; `authedFetch()` used by every view |
+| Auth/session | `src/auth.ts` | Tokens in localStorage; silent refresh 60 s ahead of expiry; `authedFetch()` used by every view. **A refused refresh is distinguished from a failed one (B-121):** only 401/403 clear the session and fire `onSessionEnded`; a 5xx or a thrown `fetch` keeps the session and returns the stale token, so a bad minute on the server — or being offline — never signs a school out |
 | Login | `src/login-view.ts` | Phone → OTP → verify; **currently short-circuits to a disabled notice** (§5) |
+| Session ended | `src/app.ts` — `showSessionEnded()` | The screen a dead credential gets instead of a retry that cannot succeed (B-121). `role="alert"`, one focused action, and a different sentence per ending. **Two, not three:** 401 covers expired, rotated **and revoked** — `refresh.ts` matches on `revoked_at IS NULL`, so a device revoked via B-120 is indistinguishable from an expired one and “sign in again” is right for all three; 403 (`account_not_active` or `no_active_role`) gets its own heading and “লগইন স্ক্রিনে ফিরে যান”, because only the office can fix it. Runs the same `purgeLocalData('logout')` a real logout runs; the IndexedDB **outbox and the device id are deliberately untouched** |
 | Shell | `src/shell.ts` | Hash router + bottom tab bar (হাজিরা / রুটিন / শিক্ষার্থী), logout in the top bar |
 | Attendance | `src/attendance-view.ts` | The 30-second grid of 04 §4.1; writes go to the outbox, never await the network |
 | Roster | `src/roster-view.ts` | Section picker + list; localStorage cache with offline banner; feeds the attendance grid its real roster |
@@ -1683,6 +1729,57 @@ and bulk cross-institution operations stay deferred (**B-40**) — P10 is the
 phase that makes them tempting, and the natural first bulk action is
 suspension.
 
+### P11 — data portability (2026-09-08)
+
+The gap the FINAL-OWNER audit called "the clearest customer-trust gap": there
+was no export anywhere, and `toCsv()` had exactly one caller — the error list
+for a FAILED import.
+
+**What a school can now take.** Ten `GET …/export?dataset=…` endpoints across
+academics, ops and finance: students, teachers, guardians, structure,
+attendance, results, fees, notices, audit, and an offboarding manifest that
+lists every dataset with its live row count and the address to fetch it from.
+
+**Streamed CSV per dataset, no archive and no object storage.** B-17 stays
+stubbed and untouched; nothing was added to make export look complete.
+Streaming is genuine on Vercel and buffered on Netlify, whose adapter joins
+written chunks at `end()` — stated in `csv-response.ts` rather than implied.
+
+**Authorization narrowed rather than widened.** Principal, school owner and IT
+admin; the accountant for fees alone. A class teacher reads their own roster on
+a screen and cannot export the school.
+
+**The tenant is `claims.tid` and nothing else.** The queries carry no tenant
+predicate at all — `withTenant` sets `app.current_tenant()` and RLS decides —
+so a handler that forgot a `WHERE` clause would still return only the caller's
+school. A forged tenant in query, body-shaped params or headers returns the
+byte-identical file, and the security probe asserts that by comparing bytes.
+
+**Spreadsheet safety.** A leading `=`, `+`, `-`, `@`, tab or CR is neutralised
+unless the value is purely numeric — which keeps `-500` addable and keeps an
+E.164 phone dialable through a round-trip.
+
+**Known limits:** no stored artifact (by design), streaming real on Vercel
+only, and the platform-operator fleet export is not built — the school-side
+offboarding path is what shipped.
+
+### Pre-pilot hardening (2026-09-08)
+
+Four columns, because they do not agree:
+
+| item | CODE | TEST | PRODUCTION |
+|---|---|---|---|
+| Scheduled jobs (B-50) | six systemd units + runbook in `deploy/` | monitor exercised; reports all three jobs "never run" | **NOT INSTALLED** — needs host access |
+| Contact privacy (B-56) | one `maySeeContact()` gate | 7 tests, six roles, asserting the BODY | n/a |
+| Guardian revocation (B-56) | PATCH refuses `link_revoked` | 7 tests, mutation-checked | n/a |
+| Fixture leak (B-119) | teardown drops in tenant context | full suite: 21 → 21, zero residue | n/a |
+| Suite invariant (B-66) | runner prints `13/13`, names silent workspaces | negative-tested | n/a |
+| Lock timeout (B-36) | `SET lock_timeout = 90s` + watchdog | — | n/a |
+| Session/device list (B-120) | `GET /auth/sessions`, `…/revoke`, `…/revoke-others` + নিরাপত্তা screen | 13 API + 2 SW tests; probe 44/44 | browser: revoked refresh 200 → 401 |
+
+The one that blocks a pilot is the first row's PRODUCTION column, and it is
+four commands in `deploy/shikhon-cron.md` rather than any code.
+
 ## 9k. R-8 — go-live unlocks (code closed; contracts open)
 
 R-8 is the phase that turns things on. The surprise was how much of what it was
@@ -2422,6 +2519,8 @@ detail in [PHASE_LOG.md](PHASE_LOG.md).
 | Migration 064 | `app.set_guardian_permissions` has raised an error on **every call since migration 050** — a partial unique index and a bare `ON CONFLICT` column list. The whole guardian-link path. Production is on 048 and unaffected; the catch-up would have carried it there |
 | `rms-svc/api/substitute.ts` | The candidate query passed `slotId` as `$1` and never referenced it, so PostgreSQL refused the statement. **The substitute finder has never returned a candidate.** It had no test at all |
 | `scripts/test-all.mjs` | Now runs `db/tests/*.sql`. Twenty-six suites that `npm test` had never run — which is how the two above survived four phases and a full audit |
+| `scripts/test-all.mjs` — B-66 guard | Refuses to start on a Node 24 build below **24.21.0**, where a TCP socket inside a `node --test` child intermittently aborts that child (Windows `0xC0000409`) and the suite reports a whole file at line 1:1 with `'test failed'`, no assertion and empty stderr. Measured: v24.15.0 → 11 crashes/500 runs, v24.21.0 → 0/500. `engines` stays `>=22` on purpose — CI runs Node 22 and is clean at 0/500, so a global bump would invalidate green CI for a Windows-only defect it does not have. Off Windows it warns rather than refuses, because it was never measured there |
+| `scripts/test-all.mjs` — crashed-child detector | A child that dies before running anything used to be reported in the same words as a failed assertion, which is how B-58/B-66 stayed undiagnosed for three phases. The runner now names the workspace and the file and says the CHILD PROCESS CRASHED — and the diagnosis is conditional on the runtime, so on a patched Node it states plainly that B-66 is **not** the explanation rather than sending the next person after an excluded cause |
 | `.github/workflows/database.yml` | The SQL suites and the rollback chain are directory loops now. 13 of 26 suites had never run in CI, and every rollback file from 049 onward had never been executed at all |
 | B-43 | Five suites released a fixture lock they never took. Fenced, with a source-level guard |
 

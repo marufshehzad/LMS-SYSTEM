@@ -51,27 +51,15 @@ const root = () => doc().getElementById('root')!;
 const text = () => root().textContent ?? '';
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
-/** Click the nth row currently on screen. */
 /**
- * Open the i-th row of the screen's list.
- *
- * P5 moved the academic drill-down onto `dataTable`, which renders the table
- * AND the mobile list from one definition and lets CSS decide which is seen.
- * `.ui-row-open` is the table's own activation control, so this drives the
- * desktop shape — the shape a school office is actually on.
- */
-const clickRow = (i = 0) =>
-  ([...root().querySelectorAll('table.ui-table tbody .ui-row-open, .system-row')][i] as HTMLElement)
-    .dispatchEvent(new dom.window.Event('click'));
-
-/**
- * Drill tree → level → section. Two clicks, because the hierarchy really is
- * two levels deep before a section: শ্রেণি ৯, then বিজ্ঞান's sections.
+ * Open section F from its tree row. One press: 05 Principal §02 draws the
+ * hierarchy as a tree whose first শ্রেণি and বিভাগ are open on arrival, and a
+ * section row opens the section itself — the class page that used to sit
+ * between them no longer exists.
  */
 async function openSectionF(): Promise<void> {
-  clickRow(0);            // Class 9
-  await settle();
-  clickRow(0);            // Section F
+  (root().querySelector('.ac-node[data-node="S:secF"] .ac-node-hit') as HTMLElement)
+    .dispatchEvent(new dom.window.Event('click'));
   await settle();
 }
 
@@ -211,22 +199,25 @@ describe('academic hierarchy', () => {
     await settle();
     assert.match(text(), /নবম শ্রেণি/);
     assert.match(text(), /বিজ্ঞান/);
-    // P5: the counts are columns. "৭৮ জন" became a "শিক্ষার্থী" header over a
-    // "৭৮" cell — repeating the unit in every cell of a column that already
-    // names it is noise, and a column is what lets six classes be compared in
-    // one pass.
-    const heads = [...root().querySelectorAll('thead th')].map((h) => h.textContent);
-    assert.ok(heads.includes('শিক্ষার্থী'), 'the count has its own column');
-    assert.ok(heads.includes('সেকশন'));
+    // Ata Ekta (05 Principal §02): the counts are each tree row's meta line,
+    // at all three levels — the শ্রেণি, its বিভাগ, and every section.
+    const metas = [...root().querySelectorAll('.ac-node-meta')].map((m) => m.textContent);
+    assert.ok(metas.includes('১ বিভাগ · ২ সেকশন · ৭৮ জন'), 'the শ্রেণি row counts its sections and students');
+    assert.ok(metas.includes('২ সেকশন · ৭৮ জন'), 'and so does its বিভাগ');
+    assert.ok(metas.includes('৪০ জন · রহিম স্যার'), 'and so does each section');
     assert.match(text(), new RegExp(bnNum(78)));
   });
 
   test('a section with no class teacher is marked, not left to be read', async () => {
     new AcademicView({ root: root(), doc: doc(), auth: fakeAuth(routes) as never, canManage: true, canManageGuardians: true });
     await settle();
-    clickRow(0);   // into Class 9, where section E has no class teacher
-    await settle();
-    assert.match(text(), /শিক্ষক নেই/);
+    // The first শ্রেণি and বিভাগ open on arrival, so section E is on screen
+    // with no click. The mark is a status on section E itself, in an OPEN
+    // branch — not text somewhere on the page, nor folded out of sight.
+    const e = root().querySelector('.ac-node[data-node="S:secE"]');
+    assert.equal(e?.querySelector('.ui-status')?.textContent, 'শিক্ষক নেই');
+    assert.equal(e?.closest('ul.ac-tree-group')?.hasAttribute('hidden'), false,
+      'inside an OPEN branch, not folded away');
   });
 
   test('an empty class says so instead of rendering nothing', async () => {
@@ -239,9 +230,10 @@ describe('academic hierarchy', () => {
       auth: fakeAuth({ '/api/v1/academics/hierarchy': emptyTree }) as never, canManage: true,
     });
     await settle();
-    clickRow(0);
-    await settle();
-    assert.match(text(), /কোনো সেকশন তৈরি হয়নি/);
+    const empty = root().querySelector('.ac-node.is-empty');
+    assert.match(empty?.textContent ?? '', /কোনো সেকশন তৈরি হয়নি/);
+    assert.equal(empty?.closest('ul.ac-tree-group')?.hasAttribute('hidden'), false,
+      'inside an OPEN branch, not folded away');
   });
 
   test('a subject nobody teaches is shown as empty, not omitted', async () => {
@@ -351,18 +343,41 @@ describe('result publishing', () => {
   test('the confirmation names what is missing, with numbers', async () => {
     new PublishView({ root: root(), doc: doc(), auth: fakeAuth({ '/api/v1/academics/publish': exams }) as never });
     await settle();
-    clickLabel('ফলাফল প্রকাশ করুন');
-    assert.match(text(), /অপরিবর্তনীয়|সম্পাদনা করা যাবে না/);
+    // 05 §05 / §7 R11: the consequence is on screen before any press — the
+    // irreversible panel replaced the dialog that opened after one.
+    assert.match(text(), /অপরিবর্তনীয়|সম্পাদনা করা যাবে না|বদলানো যাবে না/);
     assert.match(text(), new RegExp(`${bnNum(1)} টি বিষয়ে`));
   });
 
-  test('the confirmation defaults focus to cancel', async () => {
-    new PublishView({ root: root(), doc: doc(), auth: fakeAuth({ '/api/v1/academics/publish': exams }) as never });
+  test('the irreversible action is behind an acknowledgement that comes first', async () => {
+    // §7 / R11: no dialog and no "বাতিল" any more — the tick IS the
+    // confirmation. What the old focus-to-cancel test protected still holds:
+    // publishing needs a deliberate second act, the thing reached first is
+    // not the action, and nothing is sent without it.
+    const auth = fakeAuth({ '/api/v1/academics/publish': exams });
+    new PublishView({ root: root(), doc: doc(), auth: auth as never });
     await settle();
-    clickLabel('ফলাফল প্রকাশ করুন');
+    const btn = [...root().querySelectorAll('button')]
+      .find((b) => b.textContent === 'প্রকাশ করুন') as HTMLButtonElement;
+    assert.ok(btn, 'the publish action exists');
+    assert.equal(btn.disabled, true, 'nothing irreversible is one click away');
+    btn.dispatchEvent(new dom.window.Event('click'));
     await settle();
-    assert.equal(doc().activeElement?.textContent, 'বাতিল',
-      'the first thing reached on an irreversible dialogue is the way out');
+    assert.equal(auth.calls.filter((c) => c.init?.method === 'POST').length, 0,
+      'a press before the tick publishes nothing');
+    const box = root().querySelector('input[type="checkbox"]') as HTMLInputElement;
+    assert.match(box.labels![0].textContent ?? '', /ফেরানো যাবে না/);
+    assert.ok(box.compareDocumentPosition(btn) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+      'the way to stop is reached before the action');
+    box.checked = true;
+    box.dispatchEvent(new dom.window.Event('change'));
+    assert.equal(btn.disabled, false, 'the tick unlocks it');
+    btn.dispatchEvent(new dom.window.Event('click'));
+    await settle();
+    const posts = auth.calls.filter((c) => c.init?.method === 'POST');
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].path, '/api/v1/academics/publish');
+    assert.deepEqual(JSON.parse(String(posts[0].init!.body)), { examId: 'e1' });
   });
 
   test('no exams is guidance, not a blank screen', async () => {
@@ -382,23 +397,113 @@ describe('invoice generation', () => {
       'without this sentence the second press is the scariest thing in the product');
   });
 
+  // §7 / R11: the run sits behind "আমি বুঝেছি এটি ফেরানো যাবে না". The tick
+  // IS the confirmation — the dialog that asked after the press is gone.
+  const runForm = () => root().querySelector('form.inv-run') as HTMLFormElement;
+  const runButton = () => [...runForm().querySelectorAll('button[type="submit"]')]
+    .find((b) => b.textContent === 'ইনভয়েস তৈরি করুন') as HTMLButtonElement;
+  const ackBox = () => runForm().querySelector('input[type="checkbox"]') as HTMLInputElement;
+  const posts = (auth: ReturnType<typeof fakeAuth>) =>
+    auth.calls.filter((c) => c.init?.method === 'POST');
+  /** Tick the acknowledgement and press the run, the way a person does. */
+  async function acknowledgeAndRun(): Promise<void> {
+    ackBox().checked = true;
+    ackBox().dispatchEvent(new dom.window.Event('change'));
+    // A real press: jsdom runs the submit button's activation behaviour for
+    // `click()`, so this goes through the form's submit handler.
+    runButton().click();
+    // generate() awaits the POST and then a reload; both need to land.
+    await settle(); await settle(); await settle();
+  }
+
   test('zero new invoices is explained, not reported as a failure', async () => {
     const auth = fakeAuth({
       '/api/v1/finance/invoices': { invoices: [] },
-      '/api/v1/finance/generate': { invoiceCount: 0 },
+      '/api/v1/finance/generate': { invoicesCreated: 0 },
     });
     new InvoiceView({ root: root(), doc: doc(), auth: auth as never, canGenerate: true });
     await settle();
-    // P5 made this a real `<form>`, so the act is a submit. jsdom does not
-    // run default behaviour for a manually dispatched click, which is why
-    // pressing the button is expressed as the submit it causes.
-    (root().querySelector('form.ui-card-form') as HTMLFormElement)
-      .dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
-    await settle();
-    clickLabel('তৈরি করুন');
-    // generate() awaits the POST and then a reload; both need to land.
-    await settle(); await settle(); await settle();
+    await acknowledgeAndRun();
+    assert.equal(posts(auth).length, 1, 'the run was actually sent');
     assert.match(text(), /সবার ইনভয়েস আগেই তৈরি হয়েছে/);
+  });
+
+  test('a run that creates invoices says how many, and who was told', async () => {
+    // finance-svc answers `invoicesCreated`. The screen read `invoiceCount`,
+    // which the server never sends, so every successful run — the month's
+    // first included — was reported as "nothing new".
+    const auth = fakeAuth({
+      '/api/v1/finance/invoices': { invoices: [] },
+      '/api/v1/finance/generate': { ok: true, invoicesCreated: 3, notified: 2 },
+    });
+    new InvoiceView({ root: root(), doc: doc(), auth: auth as never, canGenerate: true });
+    await settle();
+    await acknowledgeAndRun();
+    assert.equal(posts(auth).length, 1, 'the run was actually sent');
+    assert.match(text(), /৩ টি ইনভয়েস তৈরি হয়েছে/);
+    assert.match(text(), /২ জন অভিভাবককে জানানো হয়েছে/, 'the guardians told are named');
+    assert.doesNotMatch(text(), /নতুন কোনো ইনভয়েস তৈরি হয়নি/,
+      'three new bills must not be reported as none');
+  });
+
+  test('the run is behind an acknowledgement that comes first, and nothing is sent without it', async () => {
+    // Takes over the guarantee the removed confirm dialog gave, in the same
+    // form as the result-publishing test above.
+    const auth = fakeAuth({
+      '/api/v1/finance/invoices': { invoices: [] },
+      '/api/v1/finance/generate': { invoicesCreated: 0 },
+    });
+    new InvoiceView({ root: root(), doc: doc(), auth: auth as never, canGenerate: true });
+    await settle();
+    const form = runForm();
+    const btn = runButton();
+    const box = ackBox();
+    assert.ok(btn, 'the run action exists');
+
+    // What cannot be undone names the panel, and is said before the button.
+    const group = form.querySelector('[role="group"][aria-labelledby]') as HTMLElement;
+    const statement = doc().getElementById(group.getAttribute('aria-labelledby')!)!;
+    assert.match(statement.textContent ?? '', /ফেরানো যাবে না/);
+    assert.ok(statement.compareDocumentPosition(btn) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+      'the consequence is read before the action');
+    assert.match(box.labels![0].textContent ?? '', /ফেরানো যাবে না/);
+    assert.ok(box.compareDocumentPosition(btn) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+      'the way to stop is reached before the action');
+
+    // The month the run is for, fixed so the payload can be checked exactly.
+    const month = form.querySelector('input[type="month"]') as HTMLInputElement;
+    month.value = '2026-03';
+    month.dispatchEvent(new dom.window.Event('change'));
+
+    assert.equal(btn.disabled, true, 'nothing irreversible is one click away');
+    btn.click();
+    // Enter in the month field submits even while the button is disabled.
+    form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    await settle();
+    assert.equal(posts(auth).length, 0, 'a press or a submit before the tick generates nothing');
+    assert.equal(doc().activeElement, box, 'the way forward is the box, not the run');
+
+    box.checked = true;
+    box.dispatchEvent(new dom.window.Event('change'));
+    assert.equal(btn.disabled, false, 'the tick unlocks it');
+
+    // The tick belongs to the month it was given for.
+    month.value = '2026-04';
+    month.dispatchEvent(new dom.window.Event('change'));
+    assert.equal(box.checked, false, 'a new month clears the tick');
+    assert.equal(btn.disabled, true, 'and locks the run again');
+    form.dispatchEvent(new dom.window.Event('submit', { bubbles: true, cancelable: true }));
+    await settle();
+    assert.equal(posts(auth).length, 0, 'a tick given for another month sends nothing');
+
+    box.checked = true;
+    box.dispatchEvent(new dom.window.Event('change'));
+    btn.click();
+    await settle(); await settle(); await settle();
+    const sent = posts(auth);
+    assert.equal(sent.length, 1, 'one tick, one press, one run');
+    assert.equal(sent[0].path, '/api/v1/finance/generate');
+    assert.deepEqual(JSON.parse(String(sent[0].init!.body)), { billingPeriod: '2026-04' });
   });
 });
 
@@ -437,7 +542,8 @@ describe('SMS notice settings', () => {
     const input = root().querySelector('[name="noticeMaxChars"]') as HTMLInputElement;
     assert.equal(input.getAttribute('min'), '70');
     assert.equal(input.getAttribute('max'), '480');
-    assert.equal(input.value, '180');
+    // A count of letters, not an identifier: shown in Bangla digits beside "প্রস্তাবিত (১৮০)" (R6, UX sweep 43). Still the server's number.
+    assert.equal(input.value, bnNum(180));
     assert.equal(input.getAttribute('inputmode'), 'numeric');
   });
 
@@ -459,13 +565,19 @@ describe('SMS notice settings', () => {
   });
 
   test('an out-of-range value cannot be saved', async () => {
-    new AdminSettingsView({ root: root(), doc: doc(), auth: fakeAuth({ '/api/v1/ops/settings': settings }) as never, canManage: true, canManageGuardians: true });
+    const auth = fakeAuth({ '/api/v1/ops/settings': settings });
+    new AdminSettingsView({ root: root(), doc: doc(), auth: auth as never, canManage: true, canManageGuardians: true });
     await settle();
     const input = root().querySelector('[name="noticeMaxChars"]') as HTMLInputElement;
     input.value = '9000';
     input.dispatchEvent(new dom.window.Event('input'));
-    const save = [...root().querySelectorAll('button')].find((b) => b.textContent?.includes('সংরক্ষণ'))!;
-    assert.equal((save as HTMLButtonElement).disabled, true);
+    const save = [...root().querySelectorAll('button')].find((b) => b.textContent?.includes('সংরক্ষণ'))! as HTMLButtonElement;
+    /* UX sweep 43: save is not greyed out for a refused value — a disabled submit said nothing about why and swallowed Enter. Pressing it is refused by the submit handler instead, at the field, and nothing is sent. */
+    save.click();
+    await settle();
+    assert.equal(auth.calls.filter((c) => c.init?.method === 'PUT').length, 0, 'an out-of-range value is never sent');
+    assert.equal(input.getAttribute('aria-invalid'), 'true', 'and the field says why');
+    assert.match(text(), new RegExp(`${bnNum(70)} থেকে ${bnNum(480)} এর মধ্যে`));
   });
 
   test('the policy is stated: SMS is an alert, the app holds the notice', async () => {
@@ -529,8 +641,11 @@ describe('yearly rollover', () => {
     new RolloverView({ root: root(), doc: doc(), auth: fakeAuth({ '/api/v1/ops/rollover': preview }) as never, canCommit: false });
     await settle();
     assert.match(text(), /অনুমতি কেবল/);
+    // 08 §03 relabelled the commit "উন্নয়ন শুরু করুন"; both words are refused.
     assert.equal([...root().querySelectorAll('button')]
-      .filter((b) => b.textContent?.includes('সম্পন্ন করুন')).length, 0);
+      .filter((b) => /সম্পন্ন করুন|শুরু করুন/.test(b.textContent ?? '')).length, 0);
+    assert.equal(root().querySelector('input[type=checkbox]'), null,
+      'and no acknowledgement to tick either');
   });
 
   test('the commit button appears only after a plan is saved, and stays blocked', async () => {
@@ -539,21 +654,39 @@ describe('yearly rollover', () => {
       planned: { considered: 180, promote: 168, repeat: 5, graduate: 4, blocked: 3 },
       actual: null,
     } };
-    new RolloverView({ root: root(), doc: doc(), auth: fakeAuth({ '/api/v1/ops/rollover': planned }) as never, canCommit: true });
+    const auth = fakeAuth({ '/api/v1/ops/rollover': planned });
+    new RolloverView({ root: root(), doc: doc(), auth: auth as never, canCommit: true });
     await settle();
+    // 08 §03 labels the commit "উন্নয়ন শুরু করুন".
     const commit = [...root().querySelectorAll('button')]
-      .find((b) => b.textContent?.includes('উন্নয়ন সম্পন্ন করুন')) as HTMLButtonElement;
+      .find((b) => b.textContent?.includes('উন্নয়ন শুরু করুন')) as HTMLButtonElement;
     assert.ok(commit, 'the plan step gates the commit button');
     assert.equal(commit.disabled, true, '3 blocked students must stop it');
+    // The irreversible panel's tick also disables it, so an unticked box alone
+    // would satisfy the line above. Tick it anyway: the blocked students must
+    // still stop the commit.
+    const box = root().querySelector('input[type=checkbox]') as HTMLInputElement;
+    assert.equal(box.disabled, true, 'the tick is unavailable while students are blocked');
+    box.disabled = false;
+    box.checked = true;
+    box.dispatchEvent(new dom.window.Event('change'));
+    assert.equal(commit.disabled, true, '3 blocked students must stop it even when ticked');
+    commit.dispatchEvent(new dom.window.Event('click'));
+    await settle();
+    assert.equal(doc().querySelector('[role="alertdialog"]'), null, 'no confirmation is opened');
+    assert.equal(auth.calls.filter((c) => c.init?.method === 'POST').length, 0, 'and nothing is committed');
   });
 
   test('the named list is available, because a count is not something to trust', async () => {
     new RolloverView({ root: root(), doc: doc(), auth: fakeAuth({ '/api/v1/ops/rollover': preview }) as never, canCommit: true });
     await settle();
+    // Scoped to the list block: the blocked students above it are a
+    // `table.ui-table` too, so an unscoped query would pass without the toggle.
+    assert.equal(root().querySelector('.roll-list table.ui-table'), null, 'closed until asked for');
     [...root().querySelectorAll('button')]
       .find((b) => b.textContent?.includes('তালিকা দেখুন'))!
       .dispatchEvent(new dom.window.Event('click'));
-    assert.ok(root().querySelector('.data-table'));
+    assert.ok(root().querySelector('.roll-list table.ui-table'));
     assert.match(text(), /উন্নীত/);
   });
 });
@@ -576,7 +709,9 @@ describe('user management', () => {
     [...root().querySelectorAll('button')]
       .find((b) => b.textContent === 'নিষ্ক্রিয় করুন')!
       .dispatchEvent(new dom.window.Event('click'));
-    assert.match(text(), /রেকর্ড মুছে যাবে না/);
+    // §7: the confirmation is `confirmOverlay`, a scrim on document.body —
+    // not inside the view root.
+    assert.match(doc().querySelector('[role="alertdialog"]')?.textContent ?? '', /রেকর্ড মুছে যাবে না/);
   });
 
   test('a capped list never reads as a complete one', async () => {
@@ -589,7 +724,7 @@ describe('user management', () => {
     new UsersView({ root: root(), doc: doc(), auth: fakeAuth({ '/api/v1/ops/users': users }) as never, canManage: true, canManageGuardians: true });
     await settle();
     [...root().querySelectorAll('button')]
-      .find((b) => b.textContent?.includes('নতুন শিক্ষক'))!
+      .find((b) => b.textContent?.includes('নতুন অ্যাকাউন্ট'))!
       .dispatchEvent(new dom.window.Event('click'));
     assert.equal(root().querySelectorAll('input[type=password]').length, 0);
     assert.match(text(), /অ্যাক্টিভেশন কোড/);
@@ -600,6 +735,10 @@ describe('user management', () => {
     await settle();
     assert.equal([...root().querySelectorAll('button')]
       .filter((b) => b.textContent === 'নিষ্ক্রিয় করুন').length, 0);
+    // The মোবাইল column is for a caller who may manage accounts. In EITHER
+    // shape (table and phone list), no number reaches a read-only reader.
+    assert.ok(![...root().querySelectorAll('thead th')].some((h) => h.textContent === 'মোবাইল'));
+    assert.doesNotMatch(text(), /01700000001/, 'a read-only caller is shown no phone number');
   });
 
   test('an empty search explains the exact-phone rule rather than looking broken', async () => {

@@ -10,11 +10,59 @@
  * must be visible, and clearable in one tap.** A person who filtered a roster
  * to one section last week and comes back to an empty-looking screen does not
  * think "I have a filter on"; they think the students are gone.
+ *
+ * ── Ata Ekta (14 Components §03, 13 Responsive ০৬/০৭) ──────────────────────
+ * app.css decides the look; the markup here only carries the vocabulary. The
+ * strip is the accent-underline tab row of §03; a view that draws its strip
+ * differently (segmented day tabs, the console's count chips) passes its own
+ * `className` and styles it in its own block, keeping this ARIA and keyboard
+ * behaviour. filterBar's inline selects show from 1024px, its button below;
+ * the button opens a bottom sheet, because it only exists on a phone.
+ *
+ * Numbers (R6): counts are wholly numeric and carry `n` themselves. Labels are
+ * caller text that can hold a figure inside words ("বার্ষিক ২০২৬", "৯ম শ্রেণি"),
+ * so the figure gets the smallest element that holds it — a `<span class="n">`
+ * — and the words stay in the text face. textContent is unchanged either way.
  */
 import { el, icon, append, uid, type Child } from './dom.ts';
-import { openDrawer } from './overlay.ts';
+import { openOverlay } from './overlay.ts';
 import { announce } from './feedback.ts';
 import { toBanglaDigits } from '../../../../packages/ui-core/src/format.ts';
+
+/** A digit, Latin or Bangla. */
+const DIGIT = /[0-9০-৯]/;
+/**
+ * One number as a reader sees it: digits, with the separators that sit between
+ * digits ("১২,৫০০.৭৫", "১০:৪৫", "৭/৫২", "২০২৫–২৬"), and a trailing % or +.
+ * The same shape card.ts, badge.ts and overlay.ts use.
+ */
+const NUMBER = '[0-9০-৯]+(?:[.,:/\\u2013-][0-9০-৯]+)*[%+]?';
+const NUMBER_RUN = new RegExp(NUMBER, 'g');
+const ONLY_NUMBER = new RegExp(`^\\s*${NUMBER}\\s*$`);
+
+/**
+ * An element holding caller text, with its numbers in the `.n` face.
+ * Built from text nodes only — the text is school data, never markup.
+ */
+function textEl<K extends keyof HTMLElementTagNameMap>(
+  doc: Document, tag: K, className: string, text: string,
+  attrs?: Record<string, string>,
+): HTMLElementTagNameMap[K] {
+  if (!DIGIT.test(text)) return el(doc, tag, { className, text, attrs });
+  if (ONLY_NUMBER.test(text)) {
+    return el(doc, tag, { className: [className, 'n'].filter(Boolean).join(' '), text, attrs });
+  }
+  const node = el(doc, tag, { className, attrs });
+  let at = 0;
+  for (const m of text.matchAll(NUMBER_RUN)) {
+    const i = m.index ?? 0;
+    if (i > at) append(node, text.slice(at, i));
+    append(node, el(doc, 'span', { className: 'n', text: m[0] }));
+    at = i + m[0].length;
+  }
+  if (at < text.length) append(node, text.slice(at));
+  return node;
+}
 
 export interface TabItem {
   id: string;
@@ -36,6 +84,11 @@ export function tabs(doc: Document, o: {
   active: string;
   onSelect: (id: string) => void;
   label: string;
+  /**
+   * Extra classes on the strip, for a view whose design draws the strip in
+   * its own shape (segmented day tabs, count chips). The ARIA tab pattern and
+   * the keyboard behaviour stay exactly the same whatever it looks like.
+   */
   className?: string;
 }): HTMLElement {
   const strip = el(doc, 'div', {
@@ -56,11 +109,11 @@ export function tabs(doc: Document, o: {
         id: `tab-${item.id}`,
       },
       data: { id: item.id },
-    }, el(doc, 'span', { text: item.label }));
+    }, textEl(doc, 'span', '', item.label));
     if (item.count !== undefined) {
-      append(b, el(doc, 'span', { className: 'ui-tab-count', text: toBanglaDigits(item.count) }));
+      append(b, el(doc, 'span', { className: 'ui-tab-count n', text: toBanglaDigits(item.count) }));
     }
-    b.addEventListener('click', () => o.onSelect(item.id));
+    b.addEventListener('click', () => { o.onSelect(item.id); refocus(b, item.id); });
     buttons.push(b);
     append(strip, b);
   });
@@ -76,9 +129,26 @@ export function tabs(doc: Document, o: {
     else if (key === 'End') next = buttons.length - 1;
     if (next < 0) return;
     e.preventDefault();
-    buttons[next].focus();
-    o.onSelect(buttons[next].dataset.id!);
+    const target = buttons[next];
+    target.focus();
+    o.onSelect(target.dataset.id!);
+    refocus(target, target.dataset.id!);
   });
+
+  /**
+   * Most callers answer `onSelect` by rebuilding their view, strip included,
+   * which removes the tab that was just pressed and drops focus to <body> —
+   * the arrow keys then work exactly once. When that happened, focus goes to
+   * the rebuilt strip's tab with the same id (its roving tabindex is already
+   * 0, because it is now the selected one). Nothing moves when the strip
+   * survived, or when focus is already somewhere the person put it.
+   */
+  function refocus(pressed: HTMLElement, id: string): void {
+    if (pressed.isConnected) return;
+    const a = doc.activeElement;
+    if (a && a !== doc.body && a !== doc.documentElement) return;
+    doc.getElementById(`tab-${id}`)?.focus({ preventScroll: true });
+  }
 
   return strip;
 }
@@ -128,14 +198,16 @@ export function filterBar(doc: Document, o: {
     },
   }, icon(doc, 'layers'), el(doc, 'span', { text: 'ছাঁকনি' }),
      active.length
-       ? el(doc, 'span', { className: 'ui-count', text: toBanglaDigits(active.length) })
+       ? el(doc, 'span', { className: 'ui-count n', text: toBanglaDigits(active.length) })
        : null);
   openBtn.addEventListener('click', () => {
     const body = el(doc, 'div', { className: 'ui-filter-sheet' });
     for (const f of o.filters) {
       append(body, selectControl(doc, f, (id, v) => { o.onChange(id, v); }, true));
     }
-    openDrawer(doc, { title: 'ছাঁকনি', body });
+    // This button only shows below 1024px, so the panel is the phone's answer
+    // (13 Responsive ০৭): a full-width bottom sheet, not a side drawer.
+    openOverlay(doc, { kind: 'sheet', title: 'ছাঁকনি', body });
   });
 
   append(wrap, inline, openBtn);
@@ -150,7 +222,7 @@ export function filterBar(doc: Document, o: {
       const chip = el(doc, 'button', {
         className: 'ui-filter-chip',
         attrs: { type: 'button', 'aria-label': `${f.label}: ${shown} — সরান` },
-      }, el(doc, 'span', { text: `${f.label}: ${shown}` }), icon(doc, 'x'));
+      }, textEl(doc, 'span', '', `${f.label}: ${shown}`), icon(doc, 'x'));
       chip.addEventListener('click', () => {
         o.onChange(f.id, f.anyValue ?? '');
         announce(doc, `${f.label} ছাঁকনি সরানো হয়েছে`);
@@ -181,10 +253,8 @@ function selectControl(
   const wrap = el(doc, 'div', {
     className: stacked ? 'ui-filter-field is-stacked' : 'ui-filter-field',
   });
-  append(wrap, el(doc, 'label', {
-    className: stacked ? 'ui-field-label' : 'ui-sr-only',
-    text: f.label, attrs: { for: id },
-  }));
+  append(wrap, textEl(doc, 'label',
+    stacked ? 'ui-field-label' : 'ui-sr-only', f.label, { for: id }));
   const sel = el(doc, 'select', {
     className: 'ui-input ui-select', attrs: { id, name: f.id },
   });

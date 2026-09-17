@@ -67,6 +67,22 @@ beforeEach(() => { localStorage.clear(); });
 
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0)); };
 
+async function mountStatus(status: number, body: unknown) {
+  const root = dom.window.document.getElementById('root') as HTMLElement;
+  root.textContent = '';
+  localStorage.setItem('shikhon_last_perf_exam', 'es-1');
+  new ClassPerfView({
+    root, doc: dom.window.document,
+    auth: {
+      authedFetch: async () => ({
+        ok: status >= 200 && status < 300, status, json: async () => body,
+      } as unknown as Response),
+    } as never,
+  });
+  await settle();
+  return root;
+}
+
 async function mount(over?: Partial<ReturnType<typeof analysis>>) {
   const calls: string[] = [];
   const root = dom.window.document.getElementById('root') as HTMLElement;
@@ -100,9 +116,11 @@ describe('class performance §7.5', () => {
     // Roll 21 last with one signal is the assertion that matters: a
     // severity sort would have moved it above roll 9 or left it tied, and
     // any sort at all would be visible here.
-    assert.ok(names[0]?.startsWith('৪ ·'), names[0]);
-    assert.ok(names[1]?.startsWith('৯ ·'), names[1]);
-    assert.ok(names[2]?.startsWith('২১ ·'), names[2]);
+    // A roll is an identifier, so it is written in Latin digits
+    // (formatIdentifier, Ata Ekta lead decision 3); the order is the guarantee.
+    assert.ok(names[0]?.startsWith('4 ·'), names[0]);
+    assert.ok(names[1]?.startsWith('9 ·'), names[1]);
+    assert.ok(names[2]?.startsWith('21 ·'), names[2]);
   });
 
   test('F-1502: every signal is shown, and no row carries a score or badge', async () => {
@@ -156,6 +174,28 @@ describe('class performance §7.5', () => {
     assert.ok(text.includes('অধ্যায় ৯'), 're-teach hint names the chapter');
   });
 
+  test('on a phone the whole question stem is in the list, on a row that can wrap', async () => {
+    const stem = 'নিচের কোনটি তরঙ্গের বৈশিষ্ট্য নয় এবং কেন তা ব্যাখ্যা করো?';
+    const base = analysis();
+    const { root } = await mount({
+      practice: { ...base.practice, questions: [{ ...base.practice.questions[0]!, stemBn: stem }] },
+    });
+    const practice = [...root.querySelectorAll('section.perf-card')]
+      .find((s) => (s.textContent ?? '').includes('অনুশীলনে যে প্রশ্নগুলো')) as HTMLElement;
+    const data = practice.querySelector('.ui-data[data-shape="table-list"]') as HTMLElement;
+    // The phone shape: the question is the title, and the row opens nothing,
+    // so the title is the only place the stem can be read.
+    const title = data.querySelector('.ui-list .ui-list-title');
+    assert.equal(title?.textContent, `প্রশ্ন ৭ — ${stem}`);
+    assert.ok(data.querySelector('.ui-list-hit.is-static'), 'no detail view to fall back on');
+    // The sheet clamps a list title to one line with "…". Both of this
+    // screen's tables carry the hook the wrap rule is scoped to, so nothing
+    // is cut off on a phone (13 Responsive, R9).
+    const tables = [...root.querySelectorAll('.ui-data[data-shape="table-list"]')];
+    assert.equal(tables.length, 2);
+    for (const t of tables) assert.ok(t.classList.contains('perf-table'), t.className);
+  });
+
   test('only a component below half its own maximum carries the low tone', async () => {
     const { root } = await mount();
     const fills = [...root.querySelectorAll('.perf-bar-fill')] as HTMLElement[];
@@ -175,5 +215,74 @@ describe('class performance §7.5', () => {
     assert.ok(text.includes('২ জন'), 'absentees excluded from the averages');
     assert.ok(text.includes('অনুপস্থিত'));
     assert.ok(text.includes('হিসাবের বাইরে'), 'and said to be excluded, not just counted');
+  });
+
+  test('F-1502: the class-level count keeps the conditional label and carries no colour', async () => {
+    const { root } = await mount();
+    const stats = [...root.querySelectorAll('.ui-stat')] as HTMLElement[];
+    const count = stats.find((s) => (s.textContent ?? '').includes('সহায়তা প্রয়োজন হতে পারে'));
+    assert.ok(count, 'the count is labelled "may need", never "needs"');
+    assert.ok((count?.textContent ?? '').includes('৩ জন'));
+    assert.equal(count?.dataset.tone, undefined, 'a count of children is never toned');
+    assert.equal((root.textContent ?? '').includes('সহায়তা লাগবে'), false);
+  });
+
+  test('the below-half threshold is said in words, not only in red', async () => {
+    const { root } = await mount();
+    const callout = root.querySelector('.perf-callout');
+    assert.ok(callout, 'a component under half gets the conclusion sentence');
+    assert.ok((callout?.textContent ?? '').includes('বহুনির্বাচনি'));
+    assert.ok((callout?.textContent ?? '').includes('অর্ধেকের কম'));
+
+    const none = await mount({
+      components: [{ key: 'cq', labelBn: 'সৃজনশীল', max: 50, average: 33.5, percent: 67 }],
+    });
+    assert.equal(none.root.querySelector('.perf-callout'), null, 'nothing below half, nothing to conclude');
+  });
+
+  test('every figure is in the numeral face (Ata Ekta R6)', async () => {
+    const { root } = await mount();
+    for (const sel of ['.perf-bar-pct', '.perf-bar-avg', '.ui-stat-value']) {
+      const nodes = [...root.querySelectorAll(sel)];
+      assert.ok(nodes.length > 0, sel);
+      for (const n of nodes) assert.ok(n.classList.contains('n'), `${sel}: ${n.textContent}`);
+    }
+    // A figure inside a sentence is wrapped where it stands, and the sentence
+    // reads exactly as before.
+    const reteach = root.querySelector('.perf-reteach');
+    assert.ok(reteach?.querySelector('.n'), 'the re-teach count');
+    assert.equal(reteach?.textContent,
+      'অধ্যায় ৯ — এই অধ্যায়ের ২টি প্রশ্নে বেশি ভুল হয়েছে। পুনরায় আলোচনা করা যেতে পারে।');
+  });
+
+  test('the analysed exam is named in the header, and there is still exactly one h1', async () => {
+    const { root } = await mount();
+    assert.equal(root.querySelectorAll('h1').length, 1);
+    const chip = root.querySelector('.page-header .ui-badge');
+    assert.equal(chip?.textContent, 'নবম-ক · পদার্থবিজ্ঞান · ১ম সাময়িক');
+    // Each panel is a named section under the page title.
+    const panels = [...root.querySelectorAll('section.perf-card')];
+    assert.equal(panels.length, 3);
+    for (const p of panels) {
+      const id = p.getAttribute('aria-labelledby');
+      assert.ok(id && root.querySelector(`h2#${id}`), 'panel names itself with its h2');
+    }
+  });
+
+  test('a refusal is a denied state, not a retryable error', async () => {
+    const root = await mountStatus(403, { error: 'forbidden', message: 'this endpoint requires one of: principal' });
+    const denied = root.querySelector('.ui-state-denied');
+    assert.ok(denied, 'a 403 renders the denied state');
+    assert.ok((denied?.textContent ?? '').includes('শ্রেণির বিশ্লেষণ দেখার অনুমতি আপনার নেই।'));
+    assert.ok((denied?.textContent ?? '').includes('প্রধান শিক্ষক'));
+    assert.equal((root.textContent ?? '').includes('principal'), false, 'no server English on screen');
+    assert.equal(root.querySelector('.ui-state-action'), null, 'no retry on a refusal');
+    assert.equal(root.querySelector('select'), null, 'no picker under a refusal');
+  });
+
+  test('a failed fetch still offers the retry', async () => {
+    const root = await mountStatus(500, {});
+    assert.ok(root.querySelector('.ui-state-error [role="alert"]'));
+    assert.equal(root.querySelector('.ui-state-action')?.textContent, 'আবার চেষ্টা করুন');
   });
 });

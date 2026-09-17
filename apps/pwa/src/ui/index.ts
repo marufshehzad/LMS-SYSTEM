@@ -30,7 +30,10 @@
  * app is framework-free by decision (D1/D3) and its views own their rendering.
  */
 
-export { el, append, icon, lang, clear, uid, resetUid } from './dom.ts';
+export {
+  el, append, icon, lang, clear, uid, resetUid, numText, numClass, hasDigit,
+  keepFocusWithin, focusIsLost,
+} from './dom.ts';
 export type { Child, ElProps } from './dom.ts';
 
 export { button, iconButton, buttonRow, setBusy, onClickBusy } from './button.ts';
@@ -59,9 +62,16 @@ export {
 export type { Column, TableOptions, MobileRole } from './table.ts';
 
 export {
-  openOverlay, openDrawer, confirmOverlay, setOverlayBody,
+  openOverlay, openDrawer, confirmOverlay, setOverlayBody, closeAllOverlays,
 } from './overlay.ts';
 export type { OverlayOptions, OverlayHandle, OverlayKind } from './overlay.ts';
+
+// §7 / R11 — the one barrier in front of ফলাফল প্রকাশ, বার্ষিক উন্নয়ন,
+// ইনভয়েস তৈরি and নোটিশ পাঠান (২০০+).
+export { irreversiblePanel } from './irreversible.ts';
+export type {
+  IrreversibleOptions, IrreversibleItem, IrreversiblePanel, IrreversibleTone,
+} from './irreversible.ts';
 
 export { tabs, filterBar } from './filter.ts';
 export type { TabItem, FilterDef } from './filter.ts';
@@ -84,5 +94,4 @@ export { navFor, navPaths, crumbFor, navLabel, NAV_ROLES } from './nav.ts';
 export type { NavItem, NavGroup, RoleNav } from './nav.ts';
 
 export { ROLE_BN, roleLabel } from './roles.ts';
-export { readTheme, setTheme, applyTheme, THEME_OPTIONS } from './theme.ts';
-export type { ThemePref } from './theme.ts';
+export { applyTheme } from './theme.ts';

@@ -39,14 +39,12 @@
  * feature is broken.
  */
 import {
-  el, pageHeader, card, button, buttonRow, statusBadge, sectionHeading,
+  el, numText, pageHeader, card, button, buttonRow, statusBadge,
   statRow, statCard, permissionState, deniedMessage, deniedContact,
-  announce, listSkeleton, confirmOverlay, emptyState, errorState,
+  announce, listSkeleton, confirmOverlay, emptyState, errorState, successNote,
 } from './ui/index.ts';
 import { refuseUnlessOk, isDenied } from './http-status.ts';
-import {
-  formatCount, formatDayMonth, formatTime,
-} from '../../../packages/ui-core/src/format.ts';
+import { formatCount, formatDayMonth, formatTime, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 import type { Auth } from './auth.ts';
 
 /** One thing wrong, in the server's words. */
@@ -91,7 +89,7 @@ export interface RoutinePublishViewOptions {
   doc: Document;
   auth: Auth;
   yearId?: string;
-  /** Where "রুটিন সম্পাদনা করুন" and "রুটিন তৈরি করুন" send people. */
+  /** Where "খসড়া দেখুন" and "রুটিন তৈরি করুন" send people. */
   onNavigate?: (path: string) => void;
   /** Injectable so the offline branch is testable. */
   online?: () => boolean;
@@ -313,7 +311,7 @@ export class RoutinePublishView {
     root.append(pageHeader(d, {
       title: 'রুটিন প্রকাশ',
       subtitle: this.tenantNameBn
-        ? `${this.tenantNameBn} · ${this.yearLabel} শিক্ষাবর্ষ`
+        ? `${this.tenantNameBn} · ${formatAcademicYear(this.yearLabel)} শিক্ষাবর্ষ`
         : 'তৈরি হওয়া রুটিন দেখে নিন, তারপর প্রকাশ করুন',
     }));
 
@@ -330,11 +328,18 @@ export class RoutinePublishView {
       return;
     }
     if (this.notice) {
-      root.append(el(d, 'p', {
-        className: this.notice.tone === 'ok' ? 'ui-note-ok' : 'ui-note-warn',
-        text: this.notice.text,
-        attrs: { role: 'status' },
-      }));
+      if (this.notice.tone === 'ok') {
+        // 14 Components §06's success strip. `role="status"` stays: this line
+        // has always been a status region, and a reader that ignores
+        // aria-live still hears it.
+        const ok = successNote(d, this.notice.text);
+        ok.setAttribute('role', 'status');
+        root.append(ok);
+      } else {
+        root.append(el(d, 'p', {
+          className: 'rpub-note', attrs: { role: 'status' },
+        }, ...numText(d, this.notice.text)));
+      }
     }
     if (this.entries.length === 0) {
       // §15. Never a blank screen — and the empty state carries the next
@@ -351,15 +356,28 @@ export class RoutinePublishView {
     }
     if (!this.online()) {
       root.append(el(d, 'p', {
-        className: 'ui-note-warn',
+        className: 'rpub-note',
         text: 'সংযোগ নেই — রুটিন দেখা যাচ্ছে, কিন্তু প্রকাশ করতে ইন্টারনেট লাগবে।',
         attrs: { role: 'status' },
       }));
     }
-    for (const e of this.entries) root.append(this.entryCard(e));
+    // Ata Ekta §3: one primary button on the page. A school with two shifts
+    // gets two review panels, and each keeps its own "প্রকাশ করুন" — §11, a
+    // morning conflict is not an evening problem — but only one is painted
+    // primary: the first that can actually go live, else the first that is
+    // still being worked on. The rest are the same control, drawn secondary.
+    const workable = (e: ReviewEntry) => e.status === 'draft' || e.status === 'review';
+    const lead = this.entries.find((e) => workable(e) && e.canPublish)
+      ?? this.entries.find(workable);
+    for (const e of this.entries) root.append(this.entryCard(e, e === lead));
   }
 
-  private entryCard(e: ReviewEntry): HTMLElement {
+  /**
+   * One routine, as 06 Routine §06 draws the publish screen: a title bar with
+   * the status chip, the stats band, what publishing does, and the footer
+   * with the way back to the draft on the left and "প্রকাশ করুন" on the right.
+   */
+  private entryCard(e: ReviewEntry, lead: boolean): HTMLElement {
     const d = this.o.doc;
     const published = e.status === 'active';
     // B-108 introduced a fourth state on this screen. A routine that is still
@@ -367,89 +385,118 @@ export class RoutinePublishView {
     // either the school's timetable or its history.
     const editable = e.status === 'draft' || e.status === 'review';
     const retired = !published && !editable;
-    const body = el(d, 'div', { className: 'ui-stack' });
+
+    const panel = card(d, {
+      title: `${e.shiftBn} শিফট — ${e.nameBn}`,
+      className: 'rpub-panel',
+      action: statusBadge(d, {
+        label: e.statusBn,
+        // The WORD beside the chip is what a reader goes by. A draft that
+        // cannot go live is `blocked` (danger + glyph); a superseded version
+        // is history, not trouble, so it takes no STATUS key and reads
+        // neutral — it used to fall through to `overdue`, a red triangle on
+        // a routine nobody needs to do anything about.
+        state: published ? 'active'
+          : retired ? 'retired'
+          : e.canPublish ? 'draft' : 'blocked',
+      }),
+    });
+
+    /* ── the stats band ─────────────────────────────────────────────── */
 
     // §2. The verdict first — a head reads one line and knows where they are.
-    body.append(el(d, 'p', {
-      className: 'ui-card-lead',
-      // The dari closes a sentence; a clause continuing it must not follow
-      // one, or the line reads "এই রুটিন চালু আছে। — ৭ সেপ্টেম্বর".
-      text: published
-        ? (e.verdictBn ?? '').replace(/।$/, '') + ` — ${dateBn(e.publishedAt)}`
-          + (e.publishedByBn ? `, প্রকাশ করেছেন ${e.publishedByBn}` : '')
-        : e.verdictBn ?? '',
-    }));
+    // The dari closes a sentence; a clause continuing it must not follow
+    // one, or the line reads "এই রুটিন চালু আছে। — ৭ সেপ্টেম্বর".
+    const verdict = published
+      ? (e.verdictBn ?? '').replace(/।$/, '') + ` — ${dateBn(e.publishedAt)}`
+        + (e.publishedByBn ? `, প্রকাশ করেছেন ${e.publishedByBn}` : '')
+      : e.verdictBn ?? '';
+    // The facts the drawn strip has no cell for — who teaches and what is
+    // pinned — stay on screen here rather than being dropped.
+    const meta = `সর্বশেষ পরিবর্তন: ${dateBn(e.lastModified)} · খসড়া নম্বর `
+      + `${formatCount(e.version, 'bn')} · ${formatCount(e.teachers, 'bn')} জন শিক্ষক · `
+      + `${formatCount(e.pinned, 'bn')}টি পিন করা`
+      + (e.supersedes && !published
+        ? ` · প্রকাশ করলে এখনকার চালু রুটিনটি (নম্বর `
+          + `${formatCount(e.supersedes.version, 'bn')}) বাতিল হবে`
+        : '');
 
-    // §2's list, as labelled numbers. Each word says what it counts, because
-    // "৫৬০ / ২০ / ২৩" makes a reader guess.
-    body.append(statRow(d,
-      statCard(d, { label: 'মোট ক্লাস', value: `${formatCount(e.slots, 'bn')}টি` }),
-      statCard(d, { label: 'শাখা', value: `${formatCount(e.sections, 'bn')}টি` }),
-      statCard(d, { label: 'শিক্ষক', value: `${formatCount(e.teachers, 'bn')} জন` }),
-      statCard(d, {
-        // The one number that can stop a publication, and it is never hidden
-        // when it is zero — a head who sees "০টি" has been told, whereas an
-        // absent row leaves them to assume.
-        label: 'সময়ের সংঘর্ষ',
-        value: `${formatCount(e.hardConflicts, 'bn')}টি`,
-        ...(e.hardConflicts > 0 ? { tone: 'warn' as const, glyph: 'alert-triangle' } : {}),
-      }),
-      statCard(d, {
-        label: 'বসানো যায়নি',
-        value: `${formatCount(e.unplacedDemands, 'bn')}টি বিষয়`,
-        ...(e.unplacedDemands > 0 ? { tone: 'warn' as const } : {}),
-      }),
-      statCard(d, { label: 'পিন করা', value: `${formatCount(e.pinned, 'bn')}টি` }),
-    ));
+    panel.append(el(d, 'div', { className: 'rpub-facts' },
+      verdict ? el(d, 'p', { className: 'rpub-verdict' }, ...numText(d, verdict)) : null,
+      el(d, 'p', { className: 'rpub-meta' }, ...numText(d, meta)),
+      // §2's list, as labelled numbers. The label says what each counts,
+      // because "৫৬০ / ২০ / ০" alone makes a reader guess.
+      statRow(d,
+        statCard(d, { label: 'সেকশন', value: formatCount(e.sections, 'bn') }),
+        statCard(d, { label: 'সাপ্তাহিক ক্লাস', value: formatCount(e.slots, 'bn') }),
+        statCard(d, {
+          // The one number that can stop a publication, and it is never
+          // hidden when it is zero — a head who sees "০" beside "সংঘর্ষ" has
+          // been told, whereas an absent cell leaves them to assume.
+          label: 'সংঘর্ষ',
+          value: formatCount(e.hardConflicts, 'bn'),
+          tone: e.hardConflicts > 0 ? 'danger' : 'success',
+        }),
+        statCard(d, {
+          label: 'বিষয় বসানো যায়নি',
+          value: formatCount(e.unplacedDemands, 'bn'),
+          ...(e.unplacedDemands > 0 ? { tone: 'warn' as const } : {}),
+        }),
+      )));
 
-    body.append(el(d, 'p', {
-      className: 'ui-card-note',
-      text: `সর্বশেষ পরিবর্তন: ${dateBn(e.lastModified)} · খসড়া নম্বর `
-          + `${formatCount(e.version, 'bn')}`
-          + (e.supersedes && !published
-            ? ` · প্রকাশ করলে এখনকার চালু রুটিনটি (নম্বর `
-              + `${formatCount(e.supersedes.version, 'bn')}) বাতিল হবে`
-            : ''),
-    }));
+    /* ── what to fix, what to know, what publishing does ────────────── */
 
-    // A PUBLISHED routine's only blocker is "already published", which is
-    // the reason it cannot be published a second time — not a defect in it.
-    // Rendering that under "যা ঠিক করতে হবে" told a head their live
-    // timetable was broken. The warnings stay: what the routine actually
-    // carries is still worth reading after it goes live.
-    for (const [heading, items, cls] of [
+    const groups: Array<{ heading: string; items: Finding[]; tone?: 'danger' | 'warn' }> = [
       // Only a routine somebody can still work on has anything "to fix". A
       // published one's single blocker is "already published", and a
       // SUPERSEDED one's is the same — neither is a defect, and P9-7 fixed
       // only the first of the two because the second did not exist yet.
-      ['যা ঠিক করতে হবে', editable ? e.blockers : [], 'ui-note-danger'],
+      { heading: 'যা ঠিক করতে হবে', items: editable ? e.blockers : [], tone: 'danger' },
       // A retired version's warnings are history, not work. The live one's
       // still say what the school is teaching around.
-      ['যা জেনে রাখা দরকার', retired ? [] : e.warnings, 'ui-note-warn'],
-    ] as const) {
-      if (items.length === 0) continue;
-      body.append(sectionHeading(d, { title: heading, level: 3 }));
-      const list = el(d, 'ul', { className: 'gen-trades' });
-      for (const f of items) {
-        const li = el(d, 'li', { className: cls });
-        li.append(el(d, 'span', { className: 'gen-trade-what', text: f.messageBn }));
-        if (f.actionBn) {
-          li.append(el(d, 'span', { className: 'gen-trade-why', text: f.actionBn }));
+      { heading: 'যা জেনে রাখা দরকার', items: retired ? [] : e.warnings, tone: 'warn' },
+      // §6. The server's sentences, the same ones the confirmation reads out —
+      // shown before the button as 06 §06 draws them, not composed here.
+      // `?? []`: see confirmPublish — a cached payload can lack them.
+      {
+        heading: 'প্রকাশ হলে যা ঘটবে',
+        items: editable
+          ? (e.consequenceBn ?? []).map((t) => ({ code: '', messageBn: t }))
+          : [],
+      },
+    ];
+    const shown = groups.filter((g) => g.items.length > 0);
+    if (shown.length > 0) {
+      const body = el(d, 'div', { className: 'rpub-body' });
+      for (const g of shown) {
+        const list = el(d, 'ul', { className: 'rpub-list', data: { tone: g.tone } });
+        for (const f of g.items) {
+          list.append(el(d, 'li', { className: 'rpub-item' },
+            el(d, 'span', { className: 'rpub-dot', attrs: { 'aria-hidden': 'true' } }),
+            el(d, 'span', { className: 'rpub-item-text' },
+              el(d, 'span', { className: 'rpub-what' }, ...numText(d, f.messageBn)),
+              f.actionBn
+                ? el(d, 'span', { className: 'rpub-why' }, ...numText(d, f.actionBn))
+                : null)));
         }
-        list.append(li);
+        body.append(el(d, 'div', { className: 'rpub-group' },
+          el(d, 'h3', { className: 'label rpub-list-head', text: g.heading }),
+          list));
       }
-      body.append(list);
+      panel.append(body);
     }
 
-    const actions: HTMLElement[] = [];
+    /* ── the footer ─────────────────────────────────────────────────── */
+
     // B-108. `!published` was right while the only two states were draft and
     // active. A SUPERSEDED routine is neither, and it was being offered
     // "প্রকাশ করুন" and "সম্পাদনা করুন" — one would 409 and the other opens an
     // editor that refuses every write. Offering a control that cannot work is
     // the defect this whole phase keeps finding from the other side.
     if (editable) {
+      const actions: HTMLElement[] = [];
       actions.push(button(d, {
-        label: 'রুটিন দেখুন ও সম্পাদনা করুন', variant: 'secondary',
+        label: 'খসড়া দেখুন', variant: 'secondary',
         onClick: () => this.o.onNavigate?.('routineeditor'),
       }));
       if (e.status === 'draft') {
@@ -468,21 +515,13 @@ export class RoutinePublishView {
       // §16. One primary action, and it is the one the screen exists for.
       // Disabled is a courtesy; `publish-gate.ts` is what actually refuses.
       actions.push(button(d, {
-        label: 'প্রকাশ করুন', variant: 'primary',
+        label: 'প্রকাশ করুন', variant: lead ? 'primary' : 'secondary',
+        className: 'rpub-publish',
         disabled: !e.canPublish || this.busy !== '' || !this.online(),
         onClick: () => this.confirmPublish(e),
       }));
+      panel.append(el(d, 'div', { className: 'rpub-foot' }, buttonRow(d, ...actions)));
     }
-
-    if (actions.length > 0) body.append(buttonRow(d, ...actions));
-    return card(this.o.doc, {
-      title: `${e.shiftBn} শিফট — ${e.nameBn}`,
-      action: statusBadge(d, {
-        label: e.statusBn,
-        // `blocked` is not a STATUS key; the tone carries it, and the WORD
-        // beside it is what a reader actually goes by.
-        state: published ? 'active' : e.canPublish ? 'draft' : 'overdue',
-      }),
-    }, body);
+    return panel;
   }
 }

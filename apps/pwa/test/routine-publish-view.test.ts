@@ -57,6 +57,12 @@ const dialog = () =>
 const dialogButton = (label: string) =>
   [...(dialog()?.querySelectorAll('button') ?? [])]
     .find((b) => (b.textContent ?? '').includes(label));
+/** The figure a stat cell shows beside its label — the label is what it counts. */
+const statValue = (label: string, scope: ParentNode = root()) => {
+  const cell = [...scope.querySelectorAll('.ui-stat')]
+    .find((c) => c.querySelector('.ui-stat-label')?.textContent === label);
+  return cell?.querySelector('.ui-stat-value')?.textContent ?? null;
+};
 
 const YEAR = 'aaaaaaaa-0000-4000-8000-00000000000a';
 const RID = 'bbbbbbbb-0000-4000-8000-00000000000b';
@@ -256,9 +262,9 @@ describe('P9-7 — the routine review screen', () => {
 
   test('a hard-conflict count of zero is still shown', async () => {
     await mount();
-    assert.match(text(), /সময়ের সংঘর্ষ/);
-    assert.match(text(), /০টি/,
-      'a head who reads "০টি" has been told; an absent row leaves them to assume');
+    assert.match(text(), /সংঘর্ষ/);
+    assert.equal(statValue('সংঘর্ষ'), '০',
+      'a head who reads "০" beside "সংঘর্ষ" has been told; an absent cell leaves them to assume');
   });
 
   test('the server refusing an unconfirmed publish reopens the confirmation with its warnings', async () => {
@@ -299,7 +305,7 @@ describe('P9-7 — the routine review screen', () => {
     await settle();
 
     assert.match(text(), /এটি প্রদর্শনী সংস্করণ/, 'the server says why');
-    assert.match(text(), /মোট ক্লাস/, 'and the review is still there');
+    assert.match(text(), /সাপ্তাহিক ক্লাস/, 'and the review is still there');
     assert.doesNotMatch(text(), /অনুমতি আপনার নেই/,
       'a refused action is not a refused screen');
   });
@@ -321,13 +327,17 @@ describe('P9-7 — the routine review screen', () => {
 
   test('§2 — every number carries the word that says what it counts', async () => {
     await mount();
-    for (const label of ['মোট ক্লাস', 'শাখা', 'শিক্ষক', 'সময়ের সংঘর্ষ',
+    for (const label of ['সাপ্তাহিক ক্লাস', 'সেকশন', 'শিক্ষক', 'সংঘর্ষ',
                          'বসানো যায়নি', 'পিন করা']) {
       assert.match(text(), new RegExp(label), `missing: ${label}`);
     }
-    assert.match(text(), /৫৬০টি/);
-    assert.match(text(), /২০টি/);
-    assert.match(text(), /২৩ জন/);
+    // 06 Routine §06 draws the stat figures bare; the word travels in the
+    // cell's label, so the pairing is what is checked.
+    assert.equal(statValue('সাপ্তাহিক ক্লাস'), '৫৬০');
+    assert.equal(statValue('সেকশন'), '২০');
+    assert.equal(statValue('বিষয় বসানো যায়নি'), '০');
+    assert.match(text(), /২৩ জন শিক্ষক/);
+    assert.match(text(), /২টি পিন করা/);
     assert.match(text(), /খসড়া নম্বর ২/, 'the version being reviewed');
     assert.match(text(), /সর্বশেষ পরিবর্তন/);
     assert.match(text(), /পি৯৭ বিদ্যালয়/, 'the institution');
@@ -415,7 +425,7 @@ describe('P9-7 — the routine review screen', () => {
     assert.equal(buttonNamed('প্রকাশ করুন')?.disabled, true);
     assert.equal(buttonNamed('পর্যালোচনার জন্য পাঠান')?.disabled, true);
     assert.match(text(), /সংযোগ নেই — রুটিন দেখা যাচ্ছে, কিন্তু প্রকাশ করতে ইন্টারনেট লাগবে।/);
-    assert.match(text(), /৫৬০টি/, 'and the review is still readable');
+    assert.equal(statValue('সাপ্তাহিক ক্লাস'), '৫৬০', 'and the review is still readable');
   });
 
   test('§15 — the empty state names the next step', async () => {
@@ -459,5 +469,56 @@ describe('P9-7 — the routine review screen', () => {
     assert.equal(publishButtons.length, 2);
     assert.equal(publishButtons[0].disabled, false);
     assert.equal(publishButtons[1].disabled, true);
+  });
+
+  /* ───────────────────────── Ata Ekta — 06 Routine §06 ───────────────── */
+
+  test('Ata Ekta — a draft says what publishing does before the button, in the server’s words', async () => {
+    await mount();
+    assert.match(text(), /প্রকাশ হলে যা ঘটবে/);
+    const rows = [...root().querySelectorAll('.rpub-what')].map((n) => n.textContent);
+    assert.ok(rows.includes(CLEAN.consequenceBn[0]), 'the server sentence, verbatim');
+    assert.ok(rows.includes(CLEAN.consequenceBn[1]));
+  });
+
+  test('Ata Ekta — a published or superseded routine has no "what publishing does"', async () => {
+    entries = [structuredClone(PUBLISHED)];
+    await mount();
+    assert.doesNotMatch(text(), /প্রকাশ হলে যা ঘটবে/);
+    entries = [{ ...structuredClone(PUBLISHED), status: 'superseded', statusBn: 'বাতিল' }];
+    await mount();
+    assert.doesNotMatch(text(), /প্রকাশ হলে যা ঘটবে/);
+  });
+
+  test('Ata Ekta — one primary button on the page, even with two shifts', async () => {
+    entries = [
+      { ...structuredClone(BLOCKED), shift: 'morning', shiftBn: 'সকাল' },
+      { ...structuredClone(CLEAN), routineId: 'cccccccc-0000-4000-8000-00000000000c',
+        shift: 'day', shiftBn: 'দিবা' },
+    ];
+    await mount();
+    const primaries = root().querySelectorAll('.btn-primary');
+    assert.equal(primaries.length, 1, '§3 — one accent button per page');
+    assert.match(primaries[0].textContent ?? '', /প্রকাশ করুন/);
+    assert.equal((primaries[0] as HTMLButtonElement).disabled, false,
+      'the primary goes to the shift that can actually go live');
+  });
+
+  test('Ata Ekta — exactly one h1, and every number is in the numeral face', async () => {
+    entries = [structuredClone(REPLACING)];
+    await mount();
+    assert.equal(root().querySelectorAll('h1').length, 1);
+    // R6: every element holding a digit carries `.n` on itself or on the
+    // span that wraps the digits.
+    const bare: string[] = [];
+    let seen = 0;
+    const walker = doc().createTreeWalker(root(), dom.window.NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (!/[0-9০-৯]/.test(n.textContent ?? '')) continue;
+      seen += 1;
+      if (!(n.parentElement?.closest('.n'))) bare.push(n.textContent ?? '');
+    }
+    assert.ok(seen >= 10, 'the check actually saw the figures, dates and versions');
+    assert.deepEqual(bare, [], 'a digit outside the numeral face');
   });
 });

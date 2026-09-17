@@ -9,9 +9,12 @@
  * ── The screen tells the truth about what gets billed ───────────────────
  * The invoice run joins `fh.frequency = 'monthly' AND fh.is_active`. A price
  * set against an annual, exam or one-time head is stored and never invoiced by
- * it. Rather than hide that, every row carries a badge saying whether the
- * monthly run will pick it up — a fee somebody configured and never saw on an
- * invoice is the kind of silence this product has been bitten by before.
+ * it. Rather than hide that, every row states both halves of that join — its
+ * ধরন ("প্রতি মাসে" is the monthly run's) and its অবস্থা (চালু / বন্ধ, the
+ * head's own switch) — and the note under the list says in words that a fee
+ * which is not monthly is not added, whenever such a row is on screen. A fee
+ * somebody configured and never saw on an invoice is the kind of silence this
+ * product has been bitten by before.
  *
  * ── No quota field ──────────────────────────────────────────────────────
  * The engine joins `fs.quota_category IS NULL`, so a quota-scoped price is
@@ -22,15 +25,29 @@
  * A price with no class is the school-wide default; a class price overrides it
  * (`ORDER BY … class_id NULLS LAST` in the run). Both are shown, grouped by
  * head, so the override is visible rather than inferred.
+ *
+ * ── Ata Ekta (07 Finance §01, feeStructures) ────────────────────────────
+ * The drawn bar is the page header: the title, the শিক্ষাবর্ষ and ONE small
+ * primary, "নতুন ফি". Under it, one frame: the five drawn columns —
+ * ফির নাম · ধরন · শ্রেণি · পরিমাণ · অবস্থা — and the drawn note joined under
+ * them. Three things the drawing does not show stay, because taking them away
+ * would take away something the office can do today: the name search (compact,
+ * in the header's cluster), the year switch (the drawn chip's place, but the
+ * sheet's select — a control, not a label), and each row's সম্পাদনা / সরান (a
+ * sixth column at the right edge). The drawing's late fee ("১০ তারিখের পরে")
+ * is a head of its own there; here the due day and the late fee belong to the
+ * price, so they are a muted line under that row's ধরন. On a phone the price
+ * is its own bold line under শ্রেণি, never beside the late fee's figures.
  */
 import type { Auth } from './auth.ts';
-import { formatBdt } from '../../../packages/ui-core/src/format.ts';
+import { formatBdt, formatAcademicYear, parseUserNumber } from '../../../packages/ui-core/src/format.ts';
 import { skeleton, errorState, emptyState, successNote, bnNum } from './view-states.ts';
 import { pageHeader } from './ui/page-header.ts';
 import {
-  el, append, button, buttonRow, field, dataTable, statusBadge,
+  el, append, button, buttonRow, field, dataTable, statusBadge, numText,
   permissionState, permissionMessage, openDrawer, confirmOverlay,
-  statCard, statRow, setBusy, announce, type OverlayHandle,
+  setBusy, announce, setFieldError, clearFieldError, focusIsLost,
+  type OverlayHandle, type Column, type Child, type Field,
 } from './ui/index.ts';
 
 interface Structure {
@@ -64,14 +81,18 @@ export interface FeeStructuresViewOptions {
   auth: Auth;
 }
 
-/** The six frequencies `fee_heads_frequency_check` allows. */
+/**
+ * The six frequencies `fee_heads_frequency_check` allows, in the words the
+ * ধরন column is drawn with ("প্রতি মাসে", "প্রতি পরীক্ষায়", "একবার"). The
+ * other three are not drawn and follow the same "প্রতি …" pattern.
+ */
 const FREQUENCY_BN: Record<string, string> = {
-  one_time: 'এককালীন',
-  monthly: 'মাসিক',
-  quarterly: 'ত্রৈমাসিক',
-  half_yearly: 'ষাণ্মাসিক',
-  annual: 'বার্ষিক',
-  exam: 'পরীক্ষাভিত্তিক',
+  one_time: 'একবার',
+  monthly: 'প্রতি মাসে',
+  quarterly: 'প্রতি তিন মাসে',
+  half_yearly: 'প্রতি ছয় মাসে',
+  annual: 'প্রতি বছরে',
+  exam: 'প্রতি পরীক্ষায়',
 };
 const freqLabel = (f: string) => FREQUENCY_BN[f] ?? f;
 
@@ -86,6 +107,13 @@ export class FeeStructuresView {
   private busy = false;
   private yearId = '';
   private search = '';
+  /**
+   * The list's frame, rebuilt on its own while someone types in the search.
+   * Null whenever the last render drew no list.
+   */
+  private frame: HTMLElement | null = null;
+  /** The header's "নতুন ফি", where focus goes when its place is gone. */
+  private newButton: HTMLButtonElement | null = null;
 
   // Declared and assigned rather than a `private readonly o` parameter
   // property: Node's type-stripping test runner rejects those outright, so a
@@ -184,16 +212,32 @@ export class FeeStructuresView {
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';
+    this.frame = null;
 
+    // The drawn bar: the title, and — exactly when the old in-page controls
+    // appeared (loaded, allowed, a year to work in) — the search, the
+    // শিক্ষাবর্ষ chip and the page's ONE small primary. While loading, refused
+    // or yearless, the title stands alone.
+    const ready = !this.loading && !this.planBlocked && !this.denied
+      && this.data?.academicYearId ? this.data : null;
+    this.newButton = ready?.canManage
+      ? button(d, {
+        label: 'নতুন ফি', variant: 'primary', size: 'sm', disabled: this.busy,
+        onClick: () => this.openForm(null),
+      })
+      : null;
     root.append(pageHeader(d, {
       title: 'ফি নির্ধারণ',
-      subtitle: 'কোন ফি কত — মাসিক বিল এই তালিকা থেকেই তৈরি হয়',
+      actions: ready ? this.controls(ready) : undefined,
+      primary: this.newButton ?? undefined,
     }));
 
     if (this.planBlocked) {
       // Not a permission problem, and saying "ask your principal" would send
-      // the office somewhere that cannot help.
-      root.append(emptyState(d, { message: this.planBlocked }));
+      // the office somewhere that cannot help — so the refusal names nobody
+      // (the same reading as `deniedContact` for `tenant_blocked`). The
+      // server's own Bangla reason is the whole message.
+      root.append(permissionState(d, { message: this.planBlocked }));
       return;
     }
     if (this.denied) {
@@ -205,7 +249,11 @@ export class FeeStructuresView {
     }
 
     if (this.notice) root.append(successNote(d, this.notice));
-    if (this.error) root.append(errorState(d, this.error, () => void this.load()));
+    if (this.error) {
+      const err = errorState(d, this.error, () => void this.load());
+      err.classList.add('fs-error');
+      root.append(err);
+    }
 
     if (this.loading) { root.append(skeleton(d, 5)); return; }
     const data = this.data;
@@ -218,12 +266,30 @@ export class FeeStructuresView {
       return;
     }
 
-    root.append(this.controls(data));
-    root.append(this.summary(data));
+    // One frame, as drawn: the list (or what stands in for it), and the note
+    // joined under it over a 2px rule.
+    this.frame = el(d, 'div', { className: 'card fs-frame' });
+    root.append(this.frame);
+    this.renderList(data);
+  }
+
+  /**
+   * The frame's contents — the only part of the screen the search changes.
+   *
+   * Typing rebuilds this and nothing else. It used to rebuild the whole
+   * screen, header included, so the search box was replaced under the first
+   * letter: focus fell to <body>, a phone closed its keyboard, and a Bangla
+   * keyboard's composition was cut off — "নবম" came out as "ন".
+   */
+  private renderList(data: Body): void {
+    const d = this.o.doc;
+    const frame = this.frame;
+    if (!frame) return;
+    frame.textContent = '';
 
     const rows = this.visible();
     if (rows.length === 0) {
-      root.append(emptyState(d, {
+      frame.append(emptyState(d, {
         message: this.search
           ? 'এই নামে কোনো ফি পাওয়া যায়নি।'
           : 'এই শিক্ষাবর্ষে এখনো কোনো ফি নির্ধারণ করা হয়নি। ফি না থাকলে মাসিক বিল তৈরি হবে না।',
@@ -231,124 +297,197 @@ export class FeeStructuresView {
           ? { label: 'প্রথম ফি নির্ধারণ করুন', onClick: () => this.openForm(null) }
           : undefined,
       }));
-      return;
+    } else {
+      frame.append(this.table(data, rows));
     }
-
-    root.append(dataTable(d, {
-      caption: 'নির্ধারিত ফি-এর তালিকা',
-      rows,
-      rowKey: (r) => r.id,
-      columns: [
-        {
-          key: 'head', header: 'ফি', mobile: 'title',
-          cell: (r) => r.headBn,
-          width: 'minmax(0, 2fr)',
-        },
-        {
-          key: 'scope', header: 'কার জন্য', mobile: 'subtitle',
-          // A NULL class is the school-wide default. Saying "whole school"
-          // beats an empty cell the office has to interpret.
-          cell: (r) => r.classBn ?? 'পুরো প্রতিষ্ঠান',
-        },
-        {
-          key: 'amount', header: 'টাকা', mobile: 'meta', numeric: true,
-          cell: (r) => formatBdt(r.amount),
-        },
-        {
-          key: 'due', header: 'শেষ তারিখ', mobile: 'meta',
-          cell: (r) => (r.dueDayOfMonth === null
-            ? 'নির্ধারিত নয়'
-            : `প্রতি মাসের ${bnNum(r.dueDayOfMonth)} তারিখ`),
-        },
-        {
-          key: 'billed', header: 'মাসিক বিলে', mobile: 'status',
-          cell: (r) => statusBadge(d, {
-            state: r.billedByMonthlyRun ? 'published' : 'pending',
-            label: r.billedByMonthlyRun ? 'বিলে আসবে' : freqLabel(r.frequency),
-          }),
-        },
-        ...(data.canManage ? [{
-          key: 'actions', header: 'ব্যবস্থা',
-          cell: (r: Structure) => this.rowActions(r),
-        }] : []),
-      ],
-    }));
-
-    // The honest footnote, shown only when it applies to something on screen.
-    if (rows.some((r) => !r.billedByMonthlyRun)) {
-      root.append(el(d, 'p', {
-        className: 'att-sub',
-        text: 'যেসব ফি মাসিক নয়, সেগুলো মাসিক বিল তৈরির সময় যুক্ত হবে না — সেগুলো আলাদাভাবে আদায় করতে হবে।',
-      }));
-    }
+    frame.append(this.note(rows));
   }
 
-  private controls(data: Body): HTMLElement {
+  /** The five drawn columns, and the office's row actions after them. */
+  private table(data: Body, rows: Structure[]): HTMLElement {
     const d = this.o.doc;
-    const wrap = el(d, 'div', { className: 'ui-fieldset' });
+    const columns: Array<Column<Structure>> = [
+      {
+        key: 'head', header: 'ফির নাম', mobile: 'title',
+        cell: (r) => r.headBn,
+      },
+      {
+        key: 'kind', header: 'ধরন', mobile: 'meta',
+        cell: (r) => this.kindCell(r),
+      },
+      {
+        key: 'scope', header: 'শ্রেণি', mobile: 'subtitle',
+        // A NULL class is the school-wide default. "সব", as drawn, beats an
+        // empty cell the office has to interpret. On a phone there is no
+        // column header above it, so the word শ্রেণি is added there — and
+        // hidden in the table, where the header already says it.
+        cell: (r) => r.classBn ?? el(d, 'span', {},
+          'সব', el(d, 'span', { className: 'fs-scope-word', text: ' শ্রেণি' })),
+      },
+      {
+        // On a phone the price is a line of its own under শ্রেণি, bold. In the
+        // meta line it sat after the due day and the late fee's two figures,
+        // with its hidden "পরিমাণ:" the only thing telling it apart — so a
+        // clerk could read the late-fee cap as the fee.
+        key: 'amount', header: 'পরিমাণ', mobile: 'subtitle', numeric: true,
+        // Money stays Latin (R-8, formatBdt). The whole figure, ৳ included,
+        // is in the numeral face, as the drawn cell is.
+        cell: (r) => el(d, 'span', { className: 'n fs-amount', text: formatBdt(r.amount) }),
+      },
+      {
+        key: 'status', header: 'অবস্থা', mobile: 'status',
+        // The head's own switch — the second half of what the monthly run
+        // reads. A word beside the tone, never the tint alone.
+        cell: (r) => statusBadge(d, {
+          state: r.headActive ? 'active' : 'pending',
+          label: r.headActive ? 'চালু' : 'বন্ধ',
+        }),
+      },
+    ];
+    if (data.canManage) {
+      // On a phone the pair sits on its own line under the row's meta, where
+      // a thumb can reach it — not hidden, not squeezed beside the chip.
+      columns.push({
+        key: 'actions', header: 'ব্যবস্থা', mobile: 'meta',
+        cell: (r) => this.rowActions(r),
+      });
+    }
 
+    return dataTable(d, {
+      caption: 'নির্ধারিত ফি-এর তালিকা',
+      className: 'fs-table',
+      rows,
+      rowKey: (r) => r.id,
+      columns,
+    });
+  }
+
+  /**
+   * ধরন, and — when the price carries them — its due day and late fee, in a
+   * muted line of their own under it, in the table and on a phone alike.
+   * These were the old শেষ তারিখ column; the drawing has no column for them.
+   */
+  private kindCell(r: Structure): HTMLElement {
+    const d = this.o.doc;
+    // Each money figure is one span, ৳ included (as the পরিমাণ cell is), and
+    // does not wrap — so "৳" never ends a line with its figure on the next.
+    const money = (x: number) => el(d, 'span', { className: 'n fs-money', text: formatBdt(x) });
+    const parts: Child[][] = [];
+    if (r.dueDayOfMonth !== null) {
+      parts.push(numText(d, `${bnNum(r.dueDayOfMonth)} তারিখে শেষ`));
+    }
+    if (r.lateFeePerDay) {
+      parts.push(r.lateFeeCap !== null
+        ? ['বিলম্বে দিনে ', money(r.lateFeePerDay), ', সর্বোচ্চ ', money(r.lateFeeCap)]
+        : ['বিলম্বে দিনে ', money(r.lateFeePerDay)]);
+    }
+    // The leading space keeps the words apart in the text (a reader, a copy);
+    // at the start of the block line it takes no room.
+    const terms = parts.flatMap((p, i) => (i > 0 ? [' · ', ...p] : [' ', ...p]));
+
+    return el(d, 'span', { className: 'fs-kind' },
+      freqLabel(r.frequency),
+      parts.length ? el(d, 'span', { className: 'fs-terms' }, ...terms) : null);
+  }
+
+  /** The drawn note under the list, and the honest sentence when it applies. */
+  private note(rows: Structure[]): HTMLElement {
+    const d = this.o.doc;
+    return el(d, 'div', { className: 'fs-note' },
+      el(d, 'p', {
+        text: 'এখানে যা লেখা থাকবে, মাসিক ইনভয়েস ঠিক তাই থেকে তৈরি হবে। চালু ফি বদলালে আগের ইনভয়েস বদলায় না।',
+      }),
+      // Shown only when it applies to something on screen.
+      rows.some((r) => !r.billedByMonthlyRun)
+        ? el(d, 'p', {
+          text: 'যেসব ফি মাসিক নয়, সেগুলো মাসিক বিল তৈরির সময় যুক্ত হবে না — সেগুলো আলাদাভাবে আদায় করতে হবে।',
+        })
+        : null);
+  }
+
+  /**
+   * The search and the year, for the header's cluster. The drawing shows
+   * values only, so each label leaves the screen and stays the control's
+   * `<label for>` — still announced.
+   */
+  private controls(data: Body): HTMLElement[] {
+    const d = this.o.doc;
+
+    const search = field(d, {
+      label: 'খুঁজুন', name: 'q', kind: 'search', value: this.search,
+      placeholder: 'ফি বা শ্রেণির নাম', className: 'fs-search',
+      // The list only, never render(): the box itself must survive the
+      // keystroke (see renderList).
+      onInput: (v) => {
+        this.search = v;
+        if (this.data) this.renderList(this.data);
+      },
+    });
+    // The drawn chip reads "শিক্ষাবর্ষ ২০২৬", and so does this select's value.
+    // It keeps the sheet's input look (R1): a chip there is a static label —
+    // the অবস্থা column's চালু / বন্ধ — and the one control that switches the
+    // year must not look like one. Switching works exactly as it did.
     const year = field(d, {
-      label: 'শিক্ষাবর্ষ', name: 'year', kind: 'select',
+      label: 'শিক্ষাবর্ষ', name: 'year', kind: 'select', className: 'fs-year',
       value: this.yearId,
       options: data.years.map((y) => ({
-        value: y.id, label: y.isCurrent ? `${y.label} (চলতি)` : y.label,
+        value: y.id,
+        label: `শিক্ষাবর্ষ ${formatAcademicYear(y.label)}`,
       })),
       onChange: (v) => { this.yearId = v; void this.load(); },
     });
-    const search = field(d, {
-      label: 'খুঁজুন', name: 'q', kind: 'search', value: this.search,
-      placeholder: 'ফি বা শ্রেণির নাম',
-      onInput: (v) => { this.search = v; this.render(); },
-    });
-    append(wrap, year.root, search.root);
-
-    if (data.canManage) {
-      append(wrap, buttonRow(d, button(d, {
-        label: 'নতুন ফি নির্ধারণ', variant: 'primary', disabled: this.busy,
-        onClick: () => this.openForm(null),
-      })));
+    // An <option> cannot hold a span, so the control carries the numeral
+    // face (R6; `is-num`, or `.ui-input` would override `.n`).
+    year.input.classList.add('n', 'is-num');
+    for (const f of [search, year]) {
+      f.root.querySelector('.ui-field-label')?.classList.add('ui-sr-only');
     }
-    return wrap;
+    return [search.root, year.root];
   }
 
-  private summary(data: Body): HTMLElement {
-    const d = this.o.doc;
-    const billed = data.structures.filter((r) => r.billedByMonthlyRun);
-    // The monthly total for a school-wide student: the class-specific rows
-    // override, so this is deliberately labelled as the school-wide baseline
-    // rather than "what every child pays", which would be a guess.
-    const wide = billed.filter((r) => r.classId === null)
-      .reduce((sum, r) => sum + r.amount, 0);
-    return statRow(d,
-      statCard(d, {
-        label: 'নির্ধারিত ফি', value: bnNum(data.structures.length), glyph: 'wallet',
-      }),
-      statCard(d, {
-        label: 'মাসিক বিলে আসবে', value: bnNum(billed.length), glyph: 'check-square',
-        note: billed.length === 0 ? 'কোনোটিই নয় — বিল খালি আসবে' : undefined,
-        tone: billed.length === 0 ? 'warn' : 'primary',
-      }),
-      statCard(d, {
-        label: 'পুরো প্রতিষ্ঠানের মাসিক', value: formatBdt(wide), glyph: 'percent',
-        note: 'শ্রেণিভিত্তিক ফি আলাদা',
-      }));
-  }
-
+  /**
+   * Secondary, both of them: they repeat on every row, and the page has one
+   * primary. The warning lives where the decision is made — the confirmation
+   * names what stays unchanged and carries the danger button.
+   */
   private rowActions(r: Structure): HTMLElement {
     const d = this.o.doc;
-    return buttonRow(d,
+    const row = buttonRow(d,
       button(d, {
-        label: 'সম্পাদনা', size: 'sm', disabled: this.busy,
+        label: 'সম্পাদনা', size: 'sm', variant: 'secondary', disabled: this.busy,
         onClick: () => this.openForm(r),
       }),
       button(d, {
-        label: 'সরান', size: 'sm', variant: 'danger', disabled: this.busy,
+        label: 'সরান', size: 'sm', variant: 'secondary', disabled: this.busy,
         onClick: () => this.confirmRemove(r),
       }));
+    row.classList.add('fs-actions');
+    return row;
+  }
+
+  /**
+   * Focus somewhere sensible once the overlay now closing is gone, if nothing
+   * else could.
+   *
+   * The shell's focus keeper puts focus back on the rebuilt opener — the new
+   * "নতুন ফি", the same row's সম্পাদনা — and that is left alone. What it
+   * cannot do is find a control that no longer exists: the row a delete took
+   * away, or the empty state's "প্রথম ফি নির্ধারণ করুন" once the first fee is
+   * saved. Focus then waits on the page, and the next Tab starts from the
+   * top. This listener is added after the keeper's, so it runs after it, and
+   * only acts when focus is still lost.
+   */
+  private refocusAfterClose(): void {
+    const d = this.o.doc;
+    d.addEventListener('ui:overlay-closed', () => {
+      if (!focusIsLost(d)) return;
+      const target = this.newButton;
+      if (target?.isConnected && !target.disabled) target.focus();
+    }, { once: true });
   }
 
   private confirmRemove(r: Structure): void {
-    confirmOverlay(this.o.doc, {
+    const handle = confirmOverlay(this.o.doc, {
       title: `${r.headBn} সরাবেন?`,
       // The question an accountant will actually ask, answered before they
       // have to ask it. invoice_lines stores its own amounts and does not
@@ -362,6 +501,9 @@ export class FeeStructuresView {
         // Set after `send` resolves: its own `load()` would have cleared it.
         const msg = await this.send('DELETE', { id: r.id }, 'সরানো হয়েছে।');
         if (msg) { this.error = msg; this.render(); }
+        // The confirm closes as soon as this resolves, and the row's সরান it
+        // would hand focus back to is gone after a delete.
+        if (handle.el.isConnected) this.refocusAfterClose();
       },
     });
   }
@@ -396,6 +538,7 @@ export class FeeStructuresView {
         helper: 'শ্রেণির জন্য আলাদা ফি দিলে সেটিই প্রাধান্য পাবে।',
       });
 
+    // `kind: 'number'` already sets these in the numeral face (`n is-num`).
     const amount = field(d, {
       label: 'টাকার অঙ্ক', name: 'amount', kind: 'number', required: true,
       value: existing ? String(existing.amount) : '',
@@ -440,13 +583,38 @@ export class FeeStructuresView {
       label: existing ? 'সংরক্ষণ করুন' : 'নির্ধারণ করুন',
       variant: 'primary',
       onClick: async () => {
-        const num = (v: string) => (v.trim() === '' ? null : Number(v));
-        const payload: Record<string, unknown> = {
-          amount: Number(amount.input.value),
-          dueDayOfMonth: num(dueDay.input.value),
-          lateFeePerDay: num(lateFee.input.value) ?? 0,
-          lateFeeCap: num(lateCap.input.value),
+        errLine.setAttribute('hidden', 'hidden');
+        // Every figure is read in either numeral system: the boxes open a
+        // numeric keypad, and Bijoy or Avro in Bangla mode types ০–৯ on it.
+        // Number('১৫০০') is NaN, which JSON sends as null — and the server
+        // reads a null amount as "keep the old price" and a null due day or
+        // cap as "clear it", then answers 200. So nothing is sent while a box
+        // holds something that is not a number: the box says so instead.
+        const invalid: Array<{ f: Field; message: string }> = [];
+        /** A box's figure; null when empty. `empty` set: the box is required. */
+        const read = (f: Field, empty: string | null, unreadable: string): number | null => {
+          clearFieldError(f.root);
+          const raw = f.input.value.trim();
+          const value = raw === '' ? null : parseUserNumber(raw);
+          const message = raw === '' ? empty : value === null ? unreadable : null;
+          if (message !== null) invalid.push({ f, message });
+          return value;
         };
+        const payload: Record<string, unknown> = {
+          // Required: an emptied amount used to go out as Number('') = 0.
+          amount: read(amount, 'টাকার অঙ্ক লিখুন।', 'টাকার অঙ্ক শুধু সংখ্যায় লিখুন।'),
+          // The server's own sentence for a due day it will not take.
+          dueDayOfMonth: read(dueDay, null, 'শেষ তারিখ ১ থেকে ২৮-এর মধ্যে দিন।'),
+          lateFeePerDay: read(lateFee, null, 'দৈনিক বিলম্ব ফি শুধু সংখ্যায় লিখুন।') ?? 0,
+          lateFeeCap: read(lateCap, null, 'বিলম্ব ফির সর্বোচ্চ সীমা শুধু সংখ্যায় লিখুন।'),
+        };
+        if (invalid.length) {
+          for (const x of invalid) setFieldError(x.f.root, x.message);
+          // The first wrong box takes focus, so the drawer keeps it and a
+          // reader hears the box's name with its error.
+          invalid[0].f.input.focus();
+          return;
+        }
         if (existing) {
           payload.id = existing.id;
         } else {
@@ -456,7 +624,6 @@ export class FeeStructuresView {
           payload.classId = cls === '' ? null : cls;
         }
 
-        errLine.setAttribute('hidden', 'hidden');
         setBusy(save, true);
         // The drawer closes only once the server has accepted it. It used to
         // close here, before the request was even sent, so a refusal looked
@@ -465,7 +632,15 @@ export class FeeStructuresView {
           existing ? 'সংরক্ষণ করা হয়েছে।' : 'নির্ধারণ করা হয়েছে।');
         setBusy(save, false);
         if (!msg) { handle.close(); return; }
-        errLine.textContent = msg;
+        // Disabling the pressed button for the request dropped focus to
+        // <body>, behind the drawer: Tab then walked the hidden page and
+        // Escape left focus nowhere. It goes back to the button just pressed,
+        // inside the drawer, before the refusal is shown.
+        if (handle.el.isConnected) save.focus();
+        // The server's sentence can carry a figure ("২৮"): numbers in the
+        // numeral face (R6), the text itself unchanged.
+        errLine.textContent = '';
+        append(errLine, ...numText(d, msg));
         errLine.removeAttribute('hidden');
         // Announced as well as shown: focus is on the button just pressed, and
         // a message that only appears is one a screen-reader user never gets.
@@ -476,6 +651,9 @@ export class FeeStructuresView {
       title: existing ? `${existing.headBn} সম্পাদনা` : 'নতুন ফি নির্ধারণ',
       body: form,
       actions: [cancel, save],
+      // A save re-reads the list, so the button that opened this drawer has
+      // been rebuilt by the time it closes — see refocusAfterClose.
+      onClose: () => this.refocusAfterClose(),
     });
   }
 }

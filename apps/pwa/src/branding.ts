@@ -146,9 +146,7 @@ export function clearBrandingCache(): void {
  * title, favicon, theme colour, and the manifest link.
  *
  * Colours go into a <style> element rather than inline styles on <html>
- * so they cascade like the design system's own tokens do — including into
- * the dark-mode block, which redefines a subset of the same custom
- * properties and must still win where it applies.
+ * so they cascade like the design system's own tokens do.
  */
 export function applyBranding(
   doc: Document,
@@ -159,16 +157,14 @@ export function applyBranding(
   const name = brandName(branding, locale);
 
   // ── Colours ──────────────────────────────────────────────────────────
-  // Two blocks. The dark selector must repeat app.css's own
-  // `:root[data-theme='dark']` specificity, or the design system's default
-  // dark steps would win over the tenant's — this <style> sits after
-  // app.css in the head, so at equal specificity the tenant's block wins.
+  // One block: Ata Ekta has no dark mode (§5), so the second block that
+  // repeated `:root[data-theme='dark']` specificity is gone. This <style>
+  // sits after app.css in the head, so at equal specificity the school's
+  // tokens win over the design's defaults.
   const vars = brandingCssVars(branding);
   const decls = (m: Record<string, string>): string =>
     Object.entries(m).map(([k, v]) => `${k}:${v}`).join(';');
-  const css =
-    `:root{${decls(vars.light)}}`
-    + `:root[data-theme='dark']{${decls(vars.dark)}}`;
+  const css = `:root{${decls(vars.light)}}`;
   let style = doc.getElementById(STYLE_ID) as HTMLStyleElement | null;
   if (!style) {
     style = doc.createElement('style');

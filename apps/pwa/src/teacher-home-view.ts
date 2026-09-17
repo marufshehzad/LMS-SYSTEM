@@ -8,11 +8,17 @@
  *
  * §"TEACHER DASHBOARD" asks the screen to answer three questions immediately:
  *
- *   1. What class/section do I have?      → today's periods, in order
- *   2. What do I need to do today?        → the same list, with ✓ where the
- *                                            register is already in
- *   3. What is the most urgent action?    → ONE card at the top, naming the
- *                                            section, going straight to it
+ *   1. What is the most urgent action?    → ONE card at the top ("এখন চলছে"),
+ *                                            naming the section, going
+ *                                            straight to its register
+ *   2. What is left of my day?            → the stat strip: today's classes,
+ *                                            registers still বাকি, new notices
+ *   3. What else do I teach with?         → the task list: homework, marks,
+ *                                            answer scripts
+ *
+ * Ata Ekta (02 Teacher §01) draws exactly those three blocks under the
+ * greeting, and nothing else: the day's full period list lives on #/routine,
+ * one tab away.
  *
  * ── Where the data comes from, and why nothing new was built ───────────────
  * `GET /api/v1/rms/routine?scope=day` already returns every field this screen
@@ -29,16 +35,15 @@
  *
  * ── One dominant action, and only one ──────────────────────────────────────
  * §"Use exactly one visually dominant primary action". When every register is
- * in, there is no urgent card at all — the screen says so and shows the day.
+ * in, there is no urgent card at all — the screen says so in a plain card.
  * A dashboard that always has a big red button teaches people to ignore it.
  */
 import type { Auth } from './auth.ts';
 import {
-  el, append, icon, card, statRow, statCard, button, pageHeader, sectionHeading,
-  badge, statusBadge, list, listItem, listSkeleton, emptyState, errorState,
-  permissionState, humanError, announce,
+  el, append, icon, card, statRow, statCard, button, pageHeader, numText,
+  list, listItem, listSkeleton, errorState, permissionState, humanError, announce,
 } from './ui/index.ts';
-import { formatCount, formatTime, todayLocalIso, weekdayDateBn } from '../../../packages/ui-core/src/format.ts';
+import { formatCount, formatTime, todayLocalIso } from '../../../packages/ui-core/src/format.ts';
 
 /** The subset of the routine slot this screen reads. Mirrors routine-view. */
 export interface TeacherSlot {
@@ -212,13 +217,17 @@ export class TeacherHomeView {
     const root = this.o.root;
     root.textContent = '';
 
-    append(root, pageHeader(d, {
-      title: greetingBn(this.now()) + (this.o.displayName ? `, ${this.o.displayName}` : ''),
-      subtitle: weekdayDateBn(this.now()),
-    }));
+    // 02 Teacher §01: the greeting and the teacher's name, no date line. The
+    // name is the page's h1 and the greeting its sub-line; the header itself
+    // stays the sheet's (Wave 2 lead decision 1).
+    const greeting = greetingBn(this.now());
+    append(root, pageHeader(d, this.o.displayName
+      ? { title: this.o.displayName, subtitle: greeting }
+      : { title: greeting }));
 
     if (this.phase === 'loading') {
-      append(root, listSkeleton(d, 4));
+      // Foundations §04: three grey rows, never a spinner.
+      append(root, listSkeleton(d, 3));
       return;
     }
     if (this.phase === 'denied') {
@@ -237,7 +246,7 @@ export class TeacherHomeView {
       return;
     }
 
-    append(root, this.urgentBlock(), this.summary(), this.todayList(), this.quickRow());
+    append(root, this.urgentBlock(), this.summary(), this.taskList());
   }
 
   /** The single dominant action, or the sentence that replaces it. */
@@ -247,46 +256,45 @@ export class TeacherHomeView {
     const teaching = this.teaching();
 
     if (!teaching.length) {
-      return card(d, { title: 'আজ কোনো ক্লাস নেই', glyph: 'clock', tone: 'info' },
+      return card(d, { title: 'আজ কোনো ক্লাস নেই', glyph: 'clock', className: 'th-day-card' },
         el(d, 'p', { className: 'th-note',
           text: 'আজকের রুটিনে আপনার কোনো ক্লাস নেই। রুটিন দেখে নিশ্চিত হয়ে নিন।' }),
-        button(d, { label: 'রুটিন দেখুন', variant: 'secondary',
-          glyph: 'clock', onClick: () => this.o.go('routine') }));
+        // The way out of an empty moment is a ghost button (lead decision 7).
+        button(d, { label: 'রুটিন দেখুন', variant: 'ghost',
+          onClick: () => this.o.go('routine') }));
     }
 
     if (!next) {
       // Every register is in. No primary action at all — a dashboard that
       // always shows a big button teaches people to stop reading it.
       return card(d, { title: 'আজকের সব হাজিরা নেওয়া হয়েছে', glyph: 'check-square',
-        tone: 'success' },
-        el(d, 'p', { className: 'th-note',
-          text: `আজকের ${formatCount(teaching.length, 'bn')}টি ক্লাসের হাজিরাই জমা হয়েছে।` }));
+        tone: 'success', className: 'th-day-card' },
+        el(d, 'p', { className: 'th-note' },
+          ...numText(d, `আজকের ${formatCount(teaching.length, 'bn')}টি ক্লাসের হাজিরাই জমা হয়েছে।`)));
     }
 
     const now = this.isNow(next);
-    const wrap = el(d, 'section', { className: 'th-urgent', data: { now: String(now) } });
+    // The sheet's card shell. The accent stays on the one primary button
+    // inside it (R5), not on the card's ground.
+    const wrap = el(d, 'section', { className: 'card th-urgent', data: { now: String(now) } });
     append(wrap,
-      el(d, 'p', { className: 'th-urgent-kicker',
-        text: now ? 'এখন চলছে' : 'পরবর্তী ক্লাস' }),
-      el(d, 'h2', { className: 'th-urgent-title',
-        text: `${next.sectionLabel} · ${next.subjectBn ?? 'ক্লাস'}` }),
-      el(d, 'p', { className: 'th-urgent-meta', text: [
-        `${formatTime(next.startsAt, 'bn')}–${formatTime(next.endsAt, 'bn')}`,
-        next.roomCode ? `কক্ষ ${next.roomCode}` : null,
-        next.studentCount != null ? `${formatCount(next.studentCount, 'bn')} জন` : null,
-      ].filter(Boolean).join(' · ') }));
+      el(d, 'p', { className: 'th-urgent-kicker' },
+        `${now ? 'এখন চলছে' : 'পরবর্তী ক্লাস'} · `,
+        el(d, 'span', { className: 'n', text: formatTime(next.startsAt, 'bn') })),
+      el(d, 'h2', { className: 'th-urgent-title' },
+        ...numText(d, `${next.sectionLabel} · ${next.subjectBn ?? 'ক্লাস'}`)));
 
     if (next.isSubstitution) {
       // §"If a substitution exists, clearly explain why and what changed."
       append(wrap, el(d, 'p', { className: 'th-sub-note' },
         icon(d, 'repeat', 'th-sub-glyph'),
-        el(d, 'span', { text: next.coveringForBn
+        el(d, 'span', {}, ...numText(d, next.coveringForBn
           ? `${next.coveringForBn}-এর বদলি হিসেবে আপনি এই ক্লাসটি নিচ্ছেন।`
-          : 'এটি আপনার নিজের ক্লাস নয় — বদলি হিসেবে নিচ্ছেন।' })));
+          : 'এটি আপনার নিজের ক্লাস নয় — বদলি হিসেবে নিচ্ছেন।'))));
     }
 
     append(wrap, button(d, {
-      label: 'হাজিরা নিন', variant: 'primary', glyph: 'check-square', block: true,
+      label: 'হাজিরা নিন', variant: 'primary', block: true,
       className: 'th-urgent-go',
       onClick: () => {
         announce(this.o.doc, `${next.sectionLabel} — হাজিরা খোলা হচ্ছে`);
@@ -300,76 +308,33 @@ export class TeacherHomeView {
   private summary(): HTMLElement {
     const d = this.o.doc;
     const teaching = this.teaching();
-    const done = teaching.filter((s) => s.attendanceTaken).length;
-    return statRow(d,
-      statCard(d, { label: 'আজকের ক্লাস', value: `${formatCount(teaching.length, 'bn')} টি`,
-        glyph: 'clock', tone: 'info' }),
-      statCard(d, { label: 'হাজিরা জমা', value: `${formatCount(done, 'bn')} / ${formatCount(teaching.length, 'bn')}`,
-        glyph: 'check-square', tone: done === teaching.length ? 'success' : 'warn' }),
-      statCard(d, { label: 'নতুন নোটিশ', value: `${formatCount(this.unread, 'bn')} টি`,
-        glyph: 'bell', tone: 'accent2', onClick: () => this.o.go('inbox') }));
+    const pending = teaching.filter((s) => !s.attendanceTaken).length;
+    // `th-stats`: 02 Teacher §01 is drawn at phone width with the three cells
+    // in ONE row, so this strip keeps three across below 1024px too.
+    const row = statRow(d,
+      statCard(d, { label: 'আজকের ক্লাস', value: formatCount(teaching.length, 'bn') }),
+      // Registers not yet taken today. The word is the meaning; the danger
+      // figure only echoes it, and only while something is still due.
+      statCard(d, { label: 'বাকি', value: formatCount(pending, 'bn'),
+        tone: pending > 0 ? 'danger' : undefined }),
+      statCard(d, { label: 'নতুন নোটিশ', value: formatCount(this.unread, 'bn'),
+        onClick: () => this.o.go('inbox') }));
+    row.classList.add('th-stats');
+    return row;
   }
 
-  /** The day, in order, with the register's state spelled out on every row. */
-  private todayList(): HTMLElement {
+  /** The teaching work that is not the register, one row each. */
+  private taskList(): HTMLElement {
     const d = this.o.doc;
-    const wrap = el(d, 'section');
-    append(wrap, sectionHeading(d, {
-      title: 'আজকের ক্লাস',
-      action: button(d, { label: 'পুরো রুটিন', variant: 'ghost', size: 'sm',
-        onClick: () => this.o.go('routine') }),
-    }));
-
-    const teaching = this.teaching();
-    if (!teaching.length) {
-      append(wrap, emptyState(d, {
-        message: 'আজকের রুটিনে আপনার কোনো ক্লাস নেই।',
-        action: { label: 'সাপ্তাহিক রুটিন দেখুন', onClick: () => this.o.go('routine') },
-      }));
-      return wrap;
-    }
-
-    const items = teaching.map((s) => listItem(d, {
-      title: `${s.sectionLabel} · ${s.subjectBn ?? 'ক্লাস'}`,
-      subtitle: [
-        `${formatTime(s.startsAt, 'bn')}–${formatTime(s.endsAt, 'bn')}`,
-        s.roomCode ? `কক্ষ ${s.roomCode}` : null,
-      ].filter(Boolean).join(' · '),
-      meta: s.isSubstitution
-        ? (s.coveringForBn ? `বদলি — ${s.coveringForBn}` : 'বদলি ক্লাস')
-        : undefined,
-      glyph: this.isNow(s) ? 'clock' : 'book-open',
-      // Never colour alone: the word is the status, the tint is the echo.
-      status: s.attendanceTaken
-        ? statusBadge(d, { state: 'present', label: 'হাজিরা জমা' })
-        : statusBadge(d, { state: 'pending', label: 'হাজিরা বাকি' }),
-      onClick: () => this.o.go('attendance'),
-      className: this.isNow(s) ? 'is-now' : undefined,
-    }));
-    append(wrap, list(d, 'আজকের ক্লাস', ...items));
-    return wrap;
-  }
-
-  /** The short tail. Four, not fourteen — the rest is one tap away in আরও. */
-  private quickRow(): HTMLElement {
-    const d = this.o.doc;
-    const wrap = el(d, 'section');
-    append(wrap, sectionHeading(d, { title: 'দ্রুত প্রবেশ' }));
-    const grid = el(d, 'div', { className: 'th-quick' });
-    const tiles: Array<[string, string, string, string]> = [
-      ['roster', 'users', 'সেকশন রোস্টার', 'শিক্ষার্থীর তালিকা'],
+    const rows: Array<[string, string, string, string]> = [
+      ['assignments', 'clipboard', 'বাড়ির কাজ', 'দেওয়া কাজ ও জমা পড়া উত্তর'],
       ['marks', 'edit', 'নম্বর এন্ট্রি', 'CQ · MCQ · ব্যবহারিক'],
-      ['assignments', 'clipboard', 'বাড়ির কাজ', 'কাজ দাও ও নম্বর দাও'],
-      ['calendar', 'calendar', 'শিক্ষাপঞ্জি', 'ছুটি ও পরীক্ষা'],
+      ['scripts', 'camera', 'উত্তরপত্র', 'হাতে-লেখা উত্তরপত্রের ছবি'],
     ];
-    for (const [path, glyph, title, sub] of tiles) {
-      append(grid, card(d, {
-        title, subtitle: sub, glyph, headingLevel: 3,
-        tone: 'primary', onClick: () => this.o.go(path),
-      }));
-    }
-    append(wrap, grid);
-    return wrap;
+    const ul = list(d, 'শিক্ষকের কাজ', ...rows.map(([path, glyph, title, meta]) =>
+      listItem(d, { title, meta, glyph, onClick: () => this.o.go(path) })));
+    ul.classList.add('th-tasks');
+    return ul;
   }
 }
 

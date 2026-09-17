@@ -34,59 +34,15 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { corsHeaders } from '../../../packages/server-core/src/http.ts';
-import {
-  brandName,
-  DEFAULT_BRANDING,
-  type Branding,
-} from '../../../packages/ui-core/src/branding.ts';
+import { DEFAULT_BRANDING } from '../../../packages/ui-core/src/branding.ts';
 import { tenantKey, resolvePublicTenant } from '../src/public-branding.ts';
+// The pure half lives in `src/manifest-build.ts` and is re-exported here so
+// this module stays the one URL-shaped entry point. It is a separate FILE
+// because this one imports the database through `resolvePublicTenant`, and
+// anything importing `buildManifest` from here would load `pg` with it.
+import { buildManifest } from '../src/manifest-build.ts';
 
-/** Platform fallback icons — these exist in apps/pwa/public/icons/. */
-const DEFAULT_ICONS = [
-  { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
-  { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
-];
-
-function mimeOfDataUrl(url: string): string {
-  const m = /^data:(image\/[a-z+]+);/.exec(url);
-  return m ? m[1] : 'image/png';
-}
-
-/**
- * Pure, so the identity rules are testable without a database or a
- * request: this is the function that decides what a school's installed app
- * is called and what colour its splash screen is.
- */
-export function buildManifest(
-  branding: Branding,
-  tenantId: string | null,
-  locale = 'bn',
-): Record<string, unknown> {
-  const name = brandName(branding, locale);
-  const icon = branding.faviconUrl || branding.logoUrl;
-  return {
-    name,
-    short_name: branding.shortName || name,
-    start_url: tenantId ? `/app?tid=${encodeURIComponent(tenantId)}` : '/app',
-    scope: '/app',
-    display: 'standalone',
-    background_color: '#FFFFFF',
-    theme_color: branding.primaryColor,
-    lang: locale === 'en' ? 'en' : 'bn',
-    dir: 'ltr',
-    icons: icon
-      ? [
-          // A data URL has no intrinsic size to disagree with, and Chrome
-          // needs a >=192px candidate to offer installation at all, so the
-          // one asset is declared at both sizes. The platform's maskable
-          // icon is kept as the last resort for launcher shapes.
-          { src: icon, sizes: '192x192', type: mimeOfDataUrl(icon), purpose: 'any' },
-          { src: icon, sizes: '512x512', type: mimeOfDataUrl(icon), purpose: 'any' },
-          ...DEFAULT_ICONS.slice(1),
-        ]
-      : DEFAULT_ICONS,
-  };
-}
+export { buildManifest };
 
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const cors = corsHeaders();

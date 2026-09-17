@@ -10,14 +10,9 @@
  * ── P5: an information architecture, not a form ────────────────────────────
  *
  * The brief asks for settings "grouped logically" and explicitly not for "a
- * giant uncontrolled form". What was here was two `<form class="card">`
- * blocks under two headings, and the honest observation is that the second
- * one was not a form at all — it is a policy switch that saves the moment it
- * is flipped.
+ * giant uncontrolled form". The page is two groups with one job each:
  *
- * So the page is now three groups with one job each:
- *
- *   ১. বার্তা ও খরচ   — the two settings THIS endpoint owns, each with its
+ *   ১. নোটিশ ও এসএমএস  — the two settings THIS endpoint owns, each with its
  *                       own save, its own validation and its own result.
  *   ২. অন্যান্য সেটিংস — the settings that exist but live on their own
  *                       screens. Named rather than duplicated: branding,
@@ -29,6 +24,14 @@
  * A settings hub that lists nothing but two SMS fields tells a head teacher
  * their school has two settings. It has more; they are elsewhere; saying so
  * is the whole value of the group.
+ *
+ * ── Ata Ekta (08 Admin & IT §02, 13 Responsive rule ০৮) ────────────────
+ * One white panel under the page title. Each group is a full-bleed strip, and
+ * each setting is a row: title and sub on the left, the control on the right
+ * at desktop; on a phone the control drops under the words at full width. The
+ * one primary, "সংরক্ষণ", sits in the page header and submits the SMS-length
+ * form through its `form` attribute — the push switch still saves the moment
+ * it is flipped, as it always has.
  *
  * ── The limits come from the server ────────────────────────────────────
  * min, max, default and the segment size all arrive in the GET response
@@ -45,13 +48,14 @@
  * product.
  */
 import type { Auth } from './auth.ts';
-import { skeleton, errorState, successNote, confirmDialog, bnNum } from './view-states.ts';
+import { skeleton, errorState, successNote, bnNum } from './view-states.ts';
 import {
-  pageHeader, sectionHeading, card, button, buttonRow, field, setFieldError,
-  clearFieldError, permissionState, serverMessage, statusBadge, el, append,
-  type Field,
+  pageHeader, sectionHeading, button, field, setFieldError, clearFieldError,
+  permissionState, serverMessage, statusBadge, list, listItem, confirmOverlay,
+  el, append, numText, type Field,
 } from './ui/index.ts';
 import { isDenied } from './http-status.ts';
+import { parseUserNumber } from '../../../packages/ui-core/src/format.ts';
 
 interface SmsSettings {
   noticeMaxChars: number;
@@ -84,16 +88,19 @@ export interface AdminSettingsViewOptions {
  * Listed, never re-implemented. Each is a screen because each has content;
  * a copy of its controls here would be a second place to change one row.
  */
-const ELSEWHERE: Array<{ path: string; titleBn: string; whatBn: string; glyph: string }> = [
-  { path: 'branding', glyph: 'star', titleBn: 'প্রতিষ্ঠানের পরিচয়',
+const ELSEWHERE: Array<{ path: string; titleBn: string; whatBn: string }> = [
+  { path: 'branding', titleBn: 'প্রতিষ্ঠানের পরিচয়',
     whatBn: 'নাম, লোগো, রং ও ছাপা কাগজের শীর্ষভাগ' },
-  { path: 'calendar', glyph: 'calendar', titleBn: 'শিক্ষাপঞ্জি',
+  { path: 'calendar', titleBn: 'শিক্ষাপঞ্জি',
     whatBn: 'ছুটি, পরীক্ষা, অনুষ্ঠান ও কর্মদিবসের সাপ্তাহিক ছুটি' },
-  { path: 'academic', glyph: 'layers', titleBn: 'একাডেমিক কাঠামো',
+  { path: 'academic', titleBn: 'একাডেমিক কাঠামো',
     whatBn: 'শিক্ষাবর্ষ, শ্রেণি, বিভাগ ও সেকশন' },
-  { path: 'users', glyph: 'users', titleBn: 'ব্যবহারকারী ও ভূমিকা',
+  { path: 'users', titleBn: 'ব্যবহারকারী ও ভূমিকা',
     whatBn: 'কে কী দেখতে ও করতে পারবেন' },
 ];
+
+/** The SMS-length form's id, so the header's save can submit it from outside. */
+const SMS_FORM_ID = 'sms-settings-form';
 
 export class AdminSettingsView {
   private readonly o: AdminSettingsViewOptions;
@@ -105,6 +112,8 @@ export class AdminSettingsView {
   private denied = false;
   private notice = '';
   private busy = false;
+  /** The header primary, built by smsRow() and placed by render(). */
+  private saveBtn: HTMLButtonElement | null = null;
 
   constructor(options: AdminSettingsViewOptions) {
     this.o = options;
@@ -163,9 +172,14 @@ export class AdminSettingsView {
     const root = this.o.root;
     root.textContent = '';
 
+    // The panel is built first because it owns the header's primary: the
+    // save button submits the SMS form, so it exists only when that form does.
+    this.saveBtn = null;
+    const panel = !this.denied && !this.loading && this.sms ? this.panel() : null;
+
     root.append(pageHeader(d, {
       title: 'সেটিংস',
-      subtitle: 'প্রতিষ্ঠানের বার্তা, খরচ ও পরিচয় সংক্রান্ত সিদ্ধান্ত',
+      primary: this.saveBtn ?? undefined,
     }));
 
     // A refusal is the whole answer: rendering the groups underneath would
@@ -181,15 +195,23 @@ export class AdminSettingsView {
     if (this.notice) root.append(successNote(d, this.notice));
     if (this.error) root.append(errorState(d, this.error, () => void this.load()));
     if (this.loading) { root.append(skeleton(d, 3)); return; }
-    if (!this.sms) return;
+    if (panel) root.append(panel);
+  }
 
-    root.append(sectionHeading(d, { title: 'বার্তা ও খরচ' }));
-    root.append(this.smsCard());
-    const push = this.pushCard();
-    if (push) root.append(push);
-
-    root.append(sectionHeading(d, { title: 'অন্যান্য সেটিংস' }));
-    root.append(this.elsewhereCard());
+  /** The one settings surface: group strips and setting rows, full bleed. */
+  private panel(): HTMLElement {
+    const d = this.o.doc;
+    const panel = el(d, 'section', { className: 'set-panel' });
+    append(panel,
+      // Once, at the top — it applies to every control below it.
+      this.readOnlyNote(),
+      sectionHeading(d, { title: 'নোটিশ ও এসএমএস', className: 'set-group' }),
+      this.smsRow(),
+      this.pushRow(),
+      sectionHeading(d, { title: 'অন্যান্য সেটিংস', className: 'set-group' }),
+      ...this.elsewhereRows(),
+    );
+    return panel;
   }
 
   /** Read-only note, in the canonical wording, or nothing. */
@@ -197,7 +219,7 @@ export class AdminSettingsView {
     if (this.o.canManage) return null;
     const d = this.o.doc;
     return el(d, 'p', {
-      className: 'ui-card-note',
+      className: 'set-panel-note',
       // Names all four roles the endpoint allows — the old sentence said
       // "প্রধান শিক্ষক ও আইটি অ্যাডমিন" and left out the owner and the
       // coordinator, both of whom may in fact change this.
@@ -207,80 +229,114 @@ export class AdminSettingsView {
   }
 
   // ── group ১a: the notice-SMS length ──────────────────────────────────
-  private smsCard(): HTMLElement {
+  private smsRow(): HTMLElement {
     const d = this.o.doc;
     const sms = this.sms as SmsSettings;
-    const form = el(d, 'form', { className: 'ui-card ui-card-form' });
+    const form = el(d, 'form', { className: 'set-row', attrs: { id: SMS_FORM_ID } });
 
-    append(form, el(d, 'h3', { className: 'ui-card-title', text: 'নোটিশ এসএমএসের দৈর্ঘ্য' }));
+    // Declared before the field so it can ride in the field's control slot,
+    // beside the input it resets. `sync` is assigned below, before any click.
+    const reset = button(d, {
+      label: `প্রস্তাবিত (${bnNum(sms.default)})`, variant: 'secondary', size: 'sm',
+      disabled: !this.o.canManage,
+      // Written back in Bangla digits, like the label it sits beside (R6).
+      onClick: () => { (chars.input as HTMLInputElement).value = bnNum(sms.default); sync(); },
+    });
 
+    // The field's label is the row title and its helper the row sub (08 §02
+    // settingRow), so the label, helper and error keep their association.
     const chars: Field = field(d, {
-      label: 'সর্বোচ্চ অক্ষর',
+      label: 'এসএমএসের সর্বোচ্চ দৈর্ঘ্য',
       name: 'noticeMaxChars',
       kind: 'number',
-      value: String(this.draft),
+      // A count of letters, not an identifier: Bangla digits, as in the
+      // helper and the reset label beside it (R6). Read back with
+      // parseUserNumber, so either numeral system is accepted.
+      value: bnNum(this.draft),
       disabled: !this.o.canManage,
-      helper: `প্রস্তাবিত ${bnNum(sms.default)} · সর্বনিম্ন ${bnNum(sms.min)} · ` +
+      helper: `বাংলায় ${bnNum(sms.charsPerSegment)} অক্ষরে একটি এসএমএস — এর বেশি হলে খরচ দ্বিগুণ। ` +
+              `প্রস্তাবিত ${bnNum(sms.default)} · সর্বনিম্ন ${bnNum(sms.min)} · ` +
               `সর্বোচ্চ ${bnNum(sms.max)}`,
       attrs: { min: sms.min, max: sms.max, step: 1 },
+      suffix: reset,
     });
     append(form, chars.root);
 
     // aria-live so a screen-reader user hears the cost change as they type,
     // which is the entire point of showing it live.
     const cost = el(d, 'p', {
-      className: 'sms-cost', attrs: { 'aria-live': 'polite', id: 'sms-cost-note' },
+      className: 'set-row-note', attrs: { 'aria-live': 'polite', id: 'sms-cost-note' },
     });
     const warn = el(d, 'p', { className: 'inline-notice' });
     warn.hidden = true;
     append(form, cost, warn);
 
     append(form, el(d, 'p', {
-      className: 'ui-card-note',
+      className: 'set-row-note',
       text: 'এসএমএসে সংক্ষিপ্ত বার্তা যাবে; পুরো নোটিশ সবসময় অ্যাপে থাকবে। ' +
             'প্রতিটি এসএমএসে প্রতিষ্ঠানের নাম থাকবে।',
     }));
 
-    const reset = button(d, {
-      label: `প্রস্তাবিত (${bnNum(sms.default)})`, variant: 'secondary',
-      disabled: !this.o.canManage,
-      onClick: () => { (chars.input as HTMLInputElement).value = String(sms.default); sync(); },
-    });
+    // The page's one primary. It lives in the header (08 §02 bar) and reaches
+    // this form through `form=`, so Enter in the field and a click on it are
+    // still the same submit.
     const saveBtn = button(d, {
-      label: 'সংরক্ষণ করুন', variant: 'primary', type: 'submit',
+      label: 'সংরক্ষণ', variant: 'primary', type: 'submit', size: 'sm',
       busy: this.busy, disabled: !this.o.canManage,
+      attrs: { form: SMS_FORM_ID },
     });
+    this.saveBtn = saveBtn;
+
+    /** Refill a line with its numbers in the numeral face (R6). */
+    const say = (node: HTMLElement, text: string): void => {
+      node.textContent = '';
+      append(node, ...numText(d, text));
+    };
+
+    /**
+     * The typed value, in either numeral system. Not `Number()`: the helper
+     * states the range in Bangla digits, so "২৪০" from a Bangla keyboard is the
+     * expected entry, and `Number('২৪০')` is NaN — which silently disabled
+     * save and priced the default instead of what was typed.
+     */
+    const typed = (): number | null => parseUserNumber(chars.value());
+    const inRange = (n: number | null): n is number =>
+      n !== null && n >= sms.min && n <= sms.max;
 
     const sync = (): void => {
-      const n = Number(chars.value());
-      const ok = Number.isFinite(n) && n >= sms.min && n <= sms.max;
-      const segs = this.segments(Number.isFinite(n) ? n : sms.default);
-      cost.textContent =
-        `প্রতি প্রাপকে আনুমানিক ${bnNum(segs)} টি এসএমএস ` +
-        `(বাংলায় প্রতি এসএমএসে ${bnNum(sms.charsPerSegment)} অক্ষর)।`;
+      const n = typed();
+      const ok = inRange(n);
+      if (n === null || n <= 0) {
+        // No number yet: an estimate here would be the bill for a value nobody
+        // typed (the default's, or "১" for an empty field).
+        cost.textContent = '';
+      } else {
+        say(cost, `প্রতি প্রাপকে আনুমানিক ${bnNum(this.segments(n))} টি এসএমএস।`);
+      }
       // The warning appears when the school goes beyond the recommendation,
       // stated as a multiple of the bill rather than as a number of letters.
       const over = ok && n > sms.default;
       warn.hidden = !over;
       if (over) {
         const baseSegs = this.segments(sms.default);
-        warn.textContent =
-          `প্রস্তাবিত দৈর্ঘ্যের চেয়ে বেশি — খরচ প্রায় ${bnNum((segs / baseSegs).toFixed(1))} গুণ হতে পারে। ` +
-          'এসএমএস প্রতিষ্ঠানের সবচেয়ে বড় চলতি খরচ।';
+        say(warn,
+          `প্রস্তাবিত দৈর্ঘ্যের চেয়ে বেশি — খরচ প্রায় ${bnNum((this.segments(n) / baseSegs).toFixed(1))} গুণ হতে পারে। ` +
+          'এসএমএস প্রতিষ্ঠানের সবচেয়ে বড় চলতি খরচ।');
       }
       if (ok) { clearFieldError(chars.root); this.draft = Math.floor(n); }
-      saveBtn.toggleAttribute('disabled', this.busy || !ok || !this.o.canManage);
+      // Save is NOT disabled for a value it will refuse. A greyed button says
+      // nothing about why, and — being the form's submit button — it also
+      // swallowed Enter, so the range message below could never be reached.
+      // The submit handler is the gate; busy and read-only still disable.
+      saveBtn.toggleAttribute('disabled', this.busy || !this.o.canManage);
     };
     chars.input.addEventListener('input', sync);
 
-    append(form, buttonRow(d, reset, saveBtn));
-    const ro = this.readOnlyNote();
-    if (ro) append(form, ro);
-
     form.addEventListener('submit', (e) => {
       e.preventDefault();
-      const n = Number(chars.value());
-      if (!Number.isFinite(n) || n < sms.min || n > sms.max) {
+      if (this.busy || !this.o.canManage) return;
+      const n = typed();
+      if (!inRange(n)) {
         // Field-level, so the number the person typed stays in front of them
         // while they correct it.
         setFieldError(chars.root,
@@ -288,6 +344,8 @@ export class AdminSettingsView {
         chars.input.focus();
         return;
       }
+      // From the field itself, not only from the last `input` event.
+      this.draft = Math.floor(n);
       void this.save();
     });
 
@@ -330,58 +388,61 @@ export class AdminSettingsView {
     }
   }
 
-  private pushCard(): HTMLElement | null {
+  private pushRow(): HTMLElement | null {
     if (!this.push) return null;
     const d = this.o.doc;
     const push = this.push;
-
-    const body: Array<Node | null> = [
-      el(d, 'p', {
-        className: 'ui-card-note',
-        text: 'যাঁরা অ্যাপে নোটিফিকেশন চালু করেছেন, তাঁদের বার্তা ইন্টারনেটে যায় — খরচ নেই। ' +
-              'সেই বার্তার এসএমএসটি বন্ধ রাখলে প্রতিষ্ঠানের খরচ কমে।',
-      }),
-    ];
+    const title = 'নোটিফিকেশন পৌঁছালে একই বার্তার এসএমএস পাঠানো হবে না';
+    const why = 'যাঁরা অ্যাপে নোটিফিকেশন চালু করেছেন, তাঁদের বার্তা ইন্টারনেটে যায় — খরচ নেই। ' +
+                'সেই বার্তার এসএমএসটি বন্ধ রাখলে প্রতিষ্ঠানের খরচ কমে।';
+    const row = el(d, 'div', { className: 'set-row' });
 
     if (!push.available) {
       // The toggle would save and change nothing: suppression only applies to
       // a push a service ACCEPTED, and with no VAPID keys none ever is.
-      body.push(el(d, 'p', {
-        className: 'inline-notice',
-        text: 'এই সার্ভারে নোটিফিকেশন চালু নেই — সেটি চালু হলে এই সুবিধা ব্যবহার করা যাবে।',
-      }));
-      return card(d, {
-        title: 'নোটিফিকেশন ও এসএমএস খরচ', glyph: 'bell',
-        action: statusBadge(d, { state: 'draft', label: 'চালু নেই' }),
-      }, ...body);
+      append(row,
+        el(d, 'div', { className: 'set-row-text' },
+          el(d, 'span', { className: 'set-row-title', text: title }),
+          el(d, 'p', { className: 'set-row-sub', text: why })),
+        el(d, 'div', { className: 'set-row-control' },
+          statusBadge(d, { state: 'draft', label: 'চালু নেই' })),
+        el(d, 'p', {
+          className: 'inline-notice',
+          text: 'এই সার্ভারে নোটিফিকেশন চালু নেই — সেটি চালু হলে এই সুবিধা ব্যবহার করা যাবে।',
+        }));
+      return row;
     }
 
-    const box = el(d, 'input', { className: 'ui-check-box' }) as HTMLInputElement;
-    box.type = 'checkbox';
-    box.id = 'push-replaces-sms';
+    const box = el(d, 'input', {
+      className: 'set-switch-input',
+      attrs: { type: 'checkbox', id: 'push-replaces-sms', role: 'switch' },
+    });
     box.checked = push.replacesSms;
     box.disabled = this.busy || !this.o.canManage;
 
-    const host = card(d, {
-      title: 'নোটিফিকেশন ও এসএমএস খরচ', glyph: 'bell',
-      action: statusBadge(d, {
-        state: push.replacesSms ? 'published' : 'draft',
-        label: push.replacesSms ? 'এসএমএস বন্ধ' : 'দুটোই যাবে',
-      }),
-    }, ...body,
-      // Same idiom as the notice composer's SMS toggle, with the 44px hit
-      // area the bare checkbox does not have.
-      el(d, 'label', { className: 'sms-toggle' },
-        el(d, 'span', { className: 'ui-check' }, box),
-        el(d, 'span', { text: 'নোটিফিকেশন পৌঁছালে একই বার্তার এসএমএস পাঠানো হবে না' })),
-      // The two exceptions are stated on the screen, not just in the code, so
-      // a principal deciding this knows what is NOT being given up.
-      el(d, 'p', {
-        className: 'ui-card-note',
-        text: 'জরুরি নোটিশ ও লগইন কোড সবসময় এসএমএসেও যাবে। ' +
-              'যাঁদের নোটিফিকেশন চালু নেই, তাঁরা আগের মতোই এসএমএস পাবেন।',
-      }),
-      this.readOnlyNote(),
+    append(row,
+      el(d, 'div', { className: 'set-row-text' },
+        // The row title IS the switch's label, so the words are its name.
+        el(d, 'label', { className: 'set-row-title', attrs: { for: 'push-replaces-sms' }, text: title }),
+        el(d, 'p', { className: 'set-row-sub', text: why }),
+        // The two exceptions are stated on the screen, not just in the code, so
+        // a principal deciding this knows what is NOT being given up.
+        el(d, 'p', {
+          className: 'set-row-sub',
+          text: 'জরুরি নোটিশ ও লগইন কোড সবসময় এসএমএসেও যাবে। ' +
+                'যাঁদের নোটিফিকেশন চালু নেই, তাঁরা আগের মতোই এসএমএস পাবেন।',
+        })),
+      el(d, 'div', { className: 'set-row-control' },
+        // The words beside the switch's colour (R5): the state, spelled out.
+        statusBadge(d, {
+          state: push.replacesSms ? 'published' : 'draft',
+          label: push.replacesSms ? 'এসএমএস বন্ধ' : 'দুটোই যাবে',
+        }),
+        // A 44px hit area around the 42×24 track; the native checkbox stays
+        // the control, transparent over the whole area.
+        el(d, 'label', { className: 'set-switch', attrs: { for: 'push-replaces-sms' } },
+          box,
+          el(d, 'span', { className: 'set-switch-track', attrs: { 'aria-hidden': 'true' } }))),
     );
 
     if (this.o.canManage) {
@@ -393,34 +454,35 @@ export class AdminSettingsView {
         // OFF only adds messages, so it is not.
         if (!next) { void this.savePush(false); return; }
         box.checked = push.replacesSms;   // until confirmed
-        host.append(confirmDialog({
-          doc: d,
+        confirmOverlay(d, {
           title: 'এসএমএস বন্ধ করা নিশ্চিত করুন',
           body: 'যাঁদের ফোনে নোটিফিকেশন পৌঁছাবে, তাঁরা ওই বার্তার এসএমএস আর পাবেন না। ' +
                 'জরুরি নোটিশ ও লগইন কোড এতে বাদ যাবে না।',
           confirmLabel: 'বন্ধ করুন',
-          onConfirm: () => void this.savePush(true),
-        }));
+          onConfirm: () => this.savePush(true),
+        });
       });
     }
-    return host;
+    return row;
   }
 
   // ── group ২: what is a setting but lives elsewhere ───────────────────
-  private elsewhereCard(): HTMLElement {
+  private elsewhereRows(): HTMLElement[] {
     const d = this.o.doc;
     const go = this.o.go ?? ((path: string) => {
       const w = d.defaultView;
       if (w) w.location.hash = `#/${path}`;
     });
-    return card(d, {
-      title: 'নিজের নিজের পাতায়', glyph: 'settings',
-      subtitle: 'এগুলোও প্রতিষ্ঠানের সেটিংস — যে জিনিসের সেটিং, সেখানেই আছে।',
-    },
-      ...ELSEWHERE.map((e) => card(d, {
-        title: e.titleBn, subtitle: e.whatBn, glyph: e.glyph,
-        variant: 'interactive', onClick: () => go(e.path),
-      })),
-    );
+    return [
+      el(d, 'div', { className: 'set-row' },
+        el(d, 'p', {
+          className: 'set-row-sub',
+          text: 'এগুলোও প্রতিষ্ঠানের সেটিংস — যে জিনিসের সেটিং, সেখানেই আছে।',
+        })),
+      list(d, 'অন্যান্য সেটিংস',
+        ...ELSEWHERE.map((e) => listItem(d, {
+          title: e.titleBn, subtitle: e.whatBn, onClick: () => go(e.path),
+        }))),
+    ];
   }
 }

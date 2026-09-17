@@ -277,6 +277,24 @@ function decide(request: { url: string; method: string; mode?: string }): RouteD
     };
   }
 
+  // P11. An export is never cached, by any strategy, anywhere.
+  //
+  // Without this rule `/api/v1/academics/export` matches the reference-data
+  // line below on its prefix alone and lands in CACHE_DATA — a school's
+  // entire student roster, as a file, sitting in the browser cache of
+  // whatever machine the clerk used. B-104's tenant-keying would keep it
+  // away from the NEXT school, and that is not the point: the artifact
+  // should not persist at all. It is a one-time download, not reference
+  // data, and the copy the school keeps is the one their browser saved to
+  // disk deliberately.
+  //
+  // Checked before every cached rule rather than after, because the failure
+  // is silent — a cached export returns 200 with the right bytes and looks
+  // exactly like a working one.
+  if (path.includes('/export')) {
+    return { strategy: 'network-only', reason: 'export artifact — never cached, never stale' };
+  }
+
   // Reference reads: render instantly from cache, refresh in the background.
   if (path.startsWith('/api/v1/rms/') || path.startsWith('/api/v1/academics/')) {
     return {

@@ -1327,7 +1327,7 @@ DEFERRED · NOT STARTED · SUPERSEDED · PLANNED**. Historical detail for every
 row is in [PHASE_LOG.md](PHASE_LOG.md); the current snapshot of the repository
 is [07-IMPLEMENTATION-STATUS.md](07-IMPLEMENTATION-STATUS.md).
 
-Last reconciled **2026-09-02**, after **P8**.
+Last reconciled **2026-09-08**, after **P10** — and the reconciliation found the board had stopped at P8 while P9 and P10 shipped, and had carried two contradictory P6 rows since 2026-09-02.
 
 ### Functional roadmap (R-series)
 
@@ -1359,9 +1359,11 @@ Last reconciled **2026-09-02**, after **P8**.
 | P5-0 | Stabilization gate before any UI work | **COMPLETE** 2026-09-01 | B-31 typecheck scope == CI, with a drift guard · B-30 one permission pattern across nine student views. Opened B-32, B-33 |
 | P6 | Missing functional screen design | **COMPLETE** 2026-09-01 | 19 screens across four families on the design system · **14 defects**, two of them security (the teacher's AI generator and the answer-script upload offered to a student) · `emptyState`'s glyph never drew, and five screens had worked around it with a stray U+20DD · `.ui-card`'s `width: 100%` overflowed any card with a horizontal margin · **P5's flake reproduced, diagnosed and fenced** — fixed-uuid fixtures, one advisory lock in 26 suites · 29,942 element checks, 0 failures |
 | P5 | Principal + IT admin final UI **+ B-7** | **COMPLETE** 2026-09-01 | P5-0 · **B-7 RESOLVED** (migration 050) · Principal dashboard · **B-34 RESOLVED**: every IT Admin and Principal screen on the design system, `results` and `inbox` recorded exceptions. Eleven defects fixed, five of them security or privacy — a ledger that fabricated accounts under a 403, three ungated finance endpoints in the public demo, a composer offered to students, `requireRole`'s English role codes reaching a Bangla screen. 19,812 element checks, 0 failures |
-| P6 | Screens that still need designing | **NOT STARTED** | — |
+| P6 | ~~Screens that still need designing~~ | **SUPERSEDED — duplicate row, corrected 2026-09-08** | This row said **NOT STARTED** while the P6 row four lines above says **COMPLETE 2026-09-01** with its evidence. Two rows, one phase, opposite answers, in the file D17 designates as *"the single place that answers what state is every phase in, today"*. The COMPLETE row is the correct one — 19 screens, 14 defects, `f62b8db`→P6 evidence. Kept rather than deleted, per D10/D17: a phase record is never erased, and the fact that the board contradicted itself for six days is itself part of the record. |
 | P7 | Platform Operations Center **+ D16 commercial controls** | **COMPLETE** (2026-09-02) | Plans, manual payments, a derived billing lifecycle, per-institution service control, role portals, student caps and the audit trail all have operator screens; **nothing commercial is SQL-only**. The phase's central finding was that suspension, portals and service switches were all **inert** — written, audited, and read by no application code — so most of P7 is enforcement (migrations 051–056), not restyling. §32 support mode is **deferred with its blocker named** (`B-38`) |
 | P8 | Final legacy cleanup, consistency and release hardening | **COMPLETE** (2026-09-02) | The `--c-*` layer is **retained, with the reason recorded**: all 30 of its tokens are aliases of `--color-*` with 721 live usages, so it is one system with a compatibility layer rather than two competing systems, and "remove only confirmed zero-usage items" does not reach it. What P8 did remove is **491 lines of genuinely dead CSS** (123 classes no source, test, page or built bundle names), six dead exports and eleven duplicate helper copies. The phase also found seven LIVE defects while looking — chiefly that a calendar day was read as UTC at three of four layers (migrations 059/062 and 31 embedded-SQL sites), that a grace period could not be ended by the operator who set it (060), and that P7 left four schema-lint violations including two tenant tables without FORCE ROW LEVEL SECURITY (061) |
+| P9 | Smart Routine — authoring, solving, publishing, eight audiences, print | **COMPLETE** (2026-09-07/08) | P9-0 … P9-9 plus the print-typography pass `1c55de4`. Print is measured in POINTS off a rasterised PDF (11.25pt subject / 10.25pt teacher / 12.5pt day header), one document page per A4 sheet on 28 documents. **B-115 remains NOT OBSERVED / EXTERNAL** — no sheet has come off a physical printer, and that is not claimed as passing |
+| P10 | Platform operator ergonomics at scale | **COMPLETE** (2026-09-08) | `52be75a` … `b84c71f`. Fleet pagination/sort (migration 076), fleet-wide summary (077), attention-queue tuning (078), tenant identity writer (079), operator directory (080) closing **B-39**; the console's first 20 view tests, mutation-checked; `platform.css` 0 → 4 `@media` queries. Opened **B-117**, **B-118**, **B-119** |
 
 **P5 opened with three items and two of them are now closed.** The Pre-P5
 Product Closure Pass took `B-8` (logout and cache privacy, including the
@@ -1906,8 +1908,79 @@ type-checked — measured at 113 errors to fix, which is not P10-sized) and **B-
 **P11 — portability.** Data export, which does not exist in any form today and is the
 clearest customer-trust gap.
 
+### P11 — DONE, 2026-09-08
+
+Ten datasets plus an offboarding manifest, as **streamed CSV per dataset**. The contract
+was decided from this repository rather than from preference: object storage is stubbed
+(B-17), nothing here asked for an archive, and a CSV opens in the software a school office
+runs. No storage dependency was introduced.
+
+| dataset | service | dataset | service |
+|---|---|---|---|
+| students | academics | notices | ops |
+| teachers | ops | audit | ops |
+| guardians | ops | attendance | academics |
+| structure | ops | results | academics |
+| fees | finance | offboarding (manifest) | ops |
+
+**B-11's export half and B-12 are closed by this.** Roles were narrowed, not widened:
+principal / school owner / IT admin, plus the accountant for fees alone. Streaming is real
+on Vercel and buffered on Netlify — the adapter joins written chunks at `end()` — and that
+is written into the code rather than implied.
+
+Security probe 32 → **38 checks**, six of them reading the export FILE rather than its
+status code. That area was rewritten after it passed against a handler mutated to trust
+`?tenantId=`, which turned a 1-row file into 2,000 rows of another school's students.
+
 The pilot gates remain: the four writers, cron scheduling, an alert that reaches a human, the
 SMS aggregator (external), and the 049 → 064 catch-up.
+
+**Pre-pilot hardening pass, 2026-09-08.** Of those gates, **cron scheduling is now
+repository-complete and externally blocked**: `deploy/` carries all six systemd units and
+`shikhon-cron.md`, and what remains is an operator running four commands on the VPS. Also
+closed in that pass: **B-56** (one contact rule across three routes, and a revoked
+guardianship that PATCH could resurrect — reproduced against PostgreSQL before it was fixed),
+**B-119** (the fixture leak; the development database went from 294 tenants to 21) and
+**B-36**. **B-66** was **CLOSED on 2026-09-10**, and it was never this repository's code: a TCP
+socket opened inside a `node --test` per-file child process intermittently aborts that
+child on Node 24 before 24.21.0 on Windows (`0xC0000409`), before it can write a byte —
+which is why the runner could only report the whole file with no assertion and no stderr.
+Proven by a one-variable ladder (20,900 children clean without a socket; 3% with one) and
+by the runtime itself (v24.15.0 → 11 crashes/500 runs, v24.21.0 → 0/500). Concurrency was
+NOT the cause — it reproduces at `--test-concurrency=1` — so the concurrency cap that
+looked indicated would have fixed nothing. CI was never affected because it pins Node 22,
+which is clean at 0/500. Verified on the installed runtime after upgrade: 0 crashes / 500 reproducer
+runs where the same fixture crashed 11/500 before it, plus 10/10 consecutive full 13-workspace
+suites. **B-58 closes with it.** **B-120** was opened for the session/device
+list this plan does not authorize as a phase, and **closed on 2026-09-08** as pre-pilot
+hardening rather than as a phase: three sub-paths on the existing identity dispatcher plus a
+নিরাপত্তা screen, self-service only, keyed by `device_id` because `refresh` rotates. No second
+authentication system and no new privilege — an administrator ending another person's session
+remains unbuilt and unauthorized.
+
+**B-121** closed on 2026-09-08 in the same pre-pilot line: a dead session now says so
+instead of offering a retry that cannot succeed. The load-bearing half is the NEGATIVE one
+— only a 401/403 ends a session, so a 5xx or an offline moment no longer risks signing a
+whole school out over a bad minute — and the unsent outbox survives the ending, because a
+teacher's morning register exists nowhere else.
+
+**P12 ran on 2026-09-10 as a full-system production AUDIT, not as a feature phase** - which is the only form §29's P12 could honestly take while B-5 (a pilot institution) is still open, since the thing that would order a post-pilot feature wave does not yet exist. Verdict **CONDITIONAL GO**: no critical and no major defect, five minor, and four external blockers (DNS, TLS, subdomain routing, SMS contract) that are procurement rather than engineering. Full report: `docs/P12-FINAL-AUDIT-REPORT.md`. **All five minor findings were fixed on 2026-09-10** — and fixing them found more than the audit had: P12-1 was 15 render sites rather than 4, P12-3's tab bar was a symptom of a colour variant carrying a layout margin, and P12-4 was a wrong finding concealing a worse one (the rollback runbook would have skipped 27 of 75 files). The GO condition is unchanged and remains external: DNS, TLS, subdomain routing and an SMS aggregator.
+
+**P13 ran on 2026-09-10 as a production-infrastructure readiness pass.** Verdict **NO-GO for production**, and deliberately so: every repository-side requirement is implemented and evidenced — the subdomain model verified over 16 hostname shapes and the full commercial lifecycle, a restore drill actually run (27 tables and 16 tenants identical, RTO 5.9s), and five undocumented production env vars closed — but two gates the brief itself sets cannot be evidenced from here: the external dependencies (DNS, TLS, SMS aggregator, push keys, alert webhook, backup schedule, secrets) and one complete real pilot journey, which needs a real school. Full report: `docs/P13-PRODUCTION-READINESS-REPORT.md`.
+
+**There is no P12 in this plan, and that is deliberate rather than an omission.** The only
+place the string appears in `docs/` is `FINAL-FULL-PROJECT-AUDIT-REPORT.md` §29 — *"P12 —
+Post-pilot feature wave from §27, ordered by pilot feedback"* — and **B-5, a pilot
+institution, is OPEN**. The candidate pool exists (§27); the thing that would order it does
+not. Recorded 2026-09-08 by the P12 readiness audit.
+
+**§29's numbering is NOT this plan's numbering,** which is worth knowing before reading it as
+a roadmap. What shipped as **P10** is §29's proposed *P11* (the scale pass); what shipped as
+**P11** is this plan's own portability line. §29's proposed **P10 — Identity & Guardian
+polish** (§31 session/device list with revoke, §32 guardian visibility settings) was skipped
+in the renumbering and has never shipped under any name. Its §31 half is confirmed absent in
+code: `identity-svc` exposes `otp/request`, `otp/verify`, `refresh`, `logout`, `activate`
+and nothing that lists or revokes a session.
 
 ## P0 — Core write paths (in progress, 2026-09-02)
 

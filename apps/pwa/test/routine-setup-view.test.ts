@@ -113,16 +113,15 @@ const mount = async () => {
 };
 
 /**
- * The `<section class="ui-card">` whose own title is `titleBn`.
+ * The checklist row (`li.setup-step`) whose own title is `titleBn`.
  *
- * Matched on `.ui-card-title` and not on `textContent`, because the outermost
- * card contains every inner one — a substring match returns the wrapper and
- * every assertion then passes against the wrong element.
+ * Matched on `.ui-list-title` and not on `textContent`: a row that holds an
+ * open editor contains other text, and a substring match could land on the
+ * wrong row — every assertion would then pass against the wrong element.
  */
 const cardFor = (titleBn: string): HTMLElement | undefined =>
-  [...root().querySelectorAll<HTMLElement>('.ui-card')].find((c) =>
-    [...c.querySelectorAll('.ui-card-title')].some(
-      (t) => (t.textContent ?? '').trim() === titleBn));
+  [...root().querySelectorAll<HTMLElement>('li.setup-step')].find((c) =>
+    (c.querySelector('.ui-list-title')?.textContent ?? '').trim() === titleBn);
 const buttonIn = (scope: HTMLElement, text: string) =>
   [...scope.querySelectorAll('button')].find((b) => (b.textContent ?? '').includes(text));
 
@@ -161,7 +160,7 @@ describe('P9-2 — the routine setup checklist', () => {
     await mount();
     const t = root().textContent ?? '';
     assert.match(t, /রুটিন তৈরি করা যাবে/);
-    assert.match(t, /ঐচ্ছিক বিষয় বাকি/,
+    assert.match(t, /ঐচ্ছিক ধাপ বাকি/,
       'the warning is still named — it is not hidden just because it does not block');
   });
 
@@ -173,12 +172,15 @@ describe('P9-2 — the routine setup checklist', () => {
     assert.equal(buttonIn(c, 'ঠিক করুন'), undefined,
       'migration 069 makes this platform-owned; a control here would be an escalation');
     assert.equal(buttonIn(c, 'এই ধাপে যান'), undefined);
+    assert.equal(c.querySelector('button'), null,
+      'no control of any label — a complete row elsewhere reads "খুলুন", and this one must not');
   });
 
   test('a step that lives on another screen navigates there', async () => {
     await mount();
     const c = cardFor('কে কোন বিষয় পড়ান') as HTMLElement;
-    buttonIn(c, 'এই ধাপে যান')?.click();
+    // Blocked, so the row carries the drawn "ঠিক করুন" (06 Routine §01).
+    buttonIn(c, 'ঠিক করুন')?.click();
     await settle();
     assert.deepEqual(navigated, ['teachingassignments'],
       'the assignment matrix already exists — a wizard copy of it would be the one that rots');
@@ -187,7 +189,7 @@ describe('P9-2 — the routine setup checklist', () => {
   test('the bell-times editor opens with the school’s real schedule', async () => {
     await mount();
     const c = cardFor('পিরিয়ড ও বিরতি') as HTMLElement;
-    buttonIn(c, 'ঠিক করুন')?.click();
+    buttonIn(c, 'খুলুন')?.click();
     await settle();
 
     const rows = root().querySelectorAll('.setup-period-row');
@@ -201,7 +203,7 @@ describe('P9-2 — the routine setup checklist', () => {
     // type 09:45 after 09:00 would be a form pretending to be a wizard.
     await mount();
     const c = cardFor('পিরিয়ড ও বিরতি') as HTMLElement;
-    buttonIn(c, 'ঠিক করুন')?.click();
+    buttonIn(c, 'খুলুন')?.click();
     await settle();
     buttonIn(root(), 'পিরিয়ড যোগ করুন')?.click();
     await settle();
@@ -221,7 +223,7 @@ describe('P9-2 — the routine setup checklist', () => {
     };
     await mount();
     const c = cardFor('পিরিয়ড ও বিরতি') as HTMLElement;
-    buttonIn(c, 'ঠিক করুন')?.click();
+    buttonIn(c, 'খুলুন')?.click();
     await settle();
     buttonIn(root(), 'সংরক্ষণ করুন')?.click();
     await settle();
@@ -235,7 +237,7 @@ describe('P9-2 — the routine setup checklist', () => {
   test('every period control has an accessible name, and no raw uuid', async () => {
     await mount();
     const c = cardFor('পিরিয়ড ও বিরতি') as HTMLElement;
-    buttonIn(c, 'ঠিক করুন')?.click();
+    buttonIn(c, 'খুলুন')?.click();
     await settle();
 
     const controls = [...root().querySelectorAll('.setup-period-row input, .setup-period-row select')];
@@ -262,5 +264,135 @@ describe('P9-2 — the routine setup checklist', () => {
     await settle();
     void v;
     assert.match(root().textContent ?? '', /অনুমতি/);
+  });
+});
+
+/**
+ * 06 Routine §01 — what the design adds to the checklist, and what it must
+ * not take away. The drawing is the bar (title + one "৪ / ৬ ধাপ" chip), one
+ * panel of rows with "ঠিক করুন" beside every incomplete row, and a footer
+ * sentence under a 2px rule.
+ */
+describe('Ata Ekta — the setup checklist as drawn', () => {
+  beforeEach(() => {
+    sent = []; navigated = []; readiness = READINESS;
+    postReply = { ok: true, status: 200, body: { periods: 2, teaching: 1 } };
+  });
+
+  test('the bar counts complete steps over all steps, from the server’s rows', async () => {
+    await mount();
+    const chip = root().querySelector('.page-header .setup-count');
+    assert.ok(chip, 'the chip sits in the page header');
+    assert.equal(chip.textContent, '২ / ৪ ধাপ', 'two ok rows of four in the fixture');
+    assert.equal(chip.getAttribute('data-tone'), 'warn');
+    assert.equal(root().querySelectorAll('h1').length, 1, 'exactly one h1');
+  });
+
+  test('every step is one row, and "ঠিক করুন" stands only beside the incomplete ones', async () => {
+    await mount();
+    const rows = [...root().querySelectorAll<HTMLElement>('.setup-panel li.setup-step')];
+    assert.equal(rows.length, 4);
+    for (const row of rows) {
+      const fix = buttonIn(row, 'ঠিক করুন');
+      if (row.dataset.state === 'ok') assert.equal(fix, undefined, `${row.dataset.step} is complete`);
+      else assert.ok(fix, `${row.dataset.step} is ${row.dataset.state} and must offer the fix`);
+    }
+  });
+
+  test('the three states differ in glyph shape, not only in colour', async () => {
+    await mount();
+    const glyphOf = (step: string) =>
+      root().querySelector(`li[data-step="${step}"] .ui-list-glyph svg`)?.innerHTML ?? '';
+    const ok = glyphOf('periods');
+    const blocked = glyphOf('assignments');
+    const warn = glyphOf('availability');
+    assert.ok(ok && blocked && warn, 'every row draws a glyph');
+    assert.notEqual(ok, blocked);
+    assert.notEqual(blocked, warn);
+    assert.notEqual(ok, warn);
+  });
+
+  test('the state word is VISIBLE on every row, not only read aloud', async () => {
+    // P9-2 #1 for sighted readers. `textContent` includes visually hidden
+    // text, so the suite above would still pass if the word were sr-only;
+    // this one reads the detail line a sighted coordinator actually sees.
+    await mount();
+    const expected: Record<string, string> = {
+      workingdays: 'সম্পূর্ণ', periods: 'সম্পূর্ণ', assignments: 'প্রয়োজন', availability: 'ঐচ্ছিক',
+    };
+    for (const row of root().querySelectorAll<HTMLElement>('.setup-panel li.setup-step')) {
+      const word = expected[row.dataset.step ?? ''];
+      const state = row.querySelector('.ui-list-sub .setup-step-state');
+      assert.ok(state, `${row.dataset.step} names its state in the detail line`);
+      assert.equal(state.textContent, word);
+      assert.equal(state.closest('.ui-sr-only'), null, `${row.dataset.step}: the word is not hidden`);
+      assert.equal(row.querySelector('.ui-sr-only'), null, 'no hidden copy of the word either');
+    }
+    const blockedSub = cardFor('কে কোন বিষয় পড়ান')?.querySelector('.ui-list-sub')?.textContent ?? '';
+    const warnSub = cardFor('শিক্ষকের সময়-সীমা')?.querySelector('.ui-list-sub')?.textContent ?? '';
+    assert.match(blockedSub, /^প্রয়োজন · ১২টির মধ্যে/, 'the word leads, the server’s detail follows');
+    assert.match(warnSub, /^ঐচ্ছিক · /);
+  });
+
+  test('a step with no detail sentence still shows its state word', async () => {
+    readiness = {
+      ...READINESS,
+      steps: READINESS.steps.map((s) => s.id === 'availability' ? { ...s, detailBn: '' } : s),
+    };
+    await mount();
+    const row = cardFor('শিক্ষকের সময়-সীমা') as HTMLElement;
+    assert.equal(row.querySelector('.ui-list-sub .setup-step-state')?.textContent, 'ঐচ্ছিক');
+  });
+
+  test('no accent button until an editor is open, and then exactly one', async () => {
+    await mount();
+    assert.equal(root().querySelectorAll('.btn-primary').length, 0,
+      'a blocked row is no longer a primary; the rows are outline controls');
+    buttonIn(cardFor('পিরিয়ড ও বিরতি') as HTMLElement, 'খুলুন')?.click();
+    await settle();
+    assert.equal(root().querySelectorAll('.btn-primary').length, 1);
+  });
+
+  test('an inline step says whether it is open', async () => {
+    await mount();
+    const toggle = () => buttonIn(cardFor('পিরিয়ড ও বিরতি') as HTMLElement, 'খুলুন')
+      ?? buttonIn(cardFor('পিরিয়ড ও বিরতি') as HTMLElement, 'বন্ধ করুন');
+    assert.equal(toggle()?.getAttribute('aria-expanded'), 'false');
+    toggle()?.click();
+    await settle();
+    assert.equal(toggle()?.getAttribute('aria-expanded'), 'true');
+    assert.ok(cardFor('পিরিয়ড ও বিরতি')?.querySelector('.setup-step-editor .setup-period-row'),
+      'the editor opens under its own row');
+  });
+
+  test('numbers are in the numeral face, on the number and not the sentence', async () => {
+    await mount();
+    const foot = root().querySelector('.setup-foot-text') as HTMLElement;
+    assert.ok(foot);
+    assert.equal(foot.classList.contains('n'), false);
+    assert.deepEqual([...foot.querySelectorAll('.n')].map((n) => n.textContent), ['১', '১']);
+    const detail = cardFor('কে কোন বিষয় পড়ান')?.querySelector('.ui-list-sub') as HTMLElement;
+    assert.ok([...detail.querySelectorAll('.n')].some((n) => n.textContent === '১২'));
+  });
+
+  test('a redraw keeps one frame in the root, so the entrance does not replay', async () => {
+    await mount();
+    assert.equal(root().children.length, 1);
+    const frame = root().firstElementChild;
+    buttonIn(cardFor('পিরিয়ড ও বিরতি') as HTMLElement, 'খুলুন')?.click();
+    await settle();
+    assert.equal(root().children.length, 1);
+    assert.equal(root().firstElementChild, frame);
+  });
+
+  test('a refused save is shown beside the editor it came from', async () => {
+    postReply = { ok: false, status: 409, body: { error: 'period_overlap', message: 'দুটি পিরিয়ড একই সময়ে পড়ছে' } };
+    await mount();
+    buttonIn(cardFor('পিরিয়ড ও বিরতি') as HTMLElement, 'খুলুন')?.click();
+    await settle();
+    buttonIn(root(), 'সংরক্ষণ করুন')?.click();
+    await settle();
+    const editor = cardFor('পিরিয়ড ও বিরতি')?.querySelector('.setup-step-editor') as HTMLElement;
+    assert.match(editor.querySelector('[role="alert"]')?.textContent ?? '', /একই সময়ে পড়ছে/);
   });
 });

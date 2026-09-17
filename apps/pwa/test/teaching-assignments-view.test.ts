@@ -5,12 +5,14 @@
  * a server test cannot see, each of which was a real defect in this codebase
  * before it was a test here.
  *
- *   1. BOTH LAYOUTS EXIST AT ONCE. A matrix does not survive 360px, so a
- *      wide table and a narrow card stack are both rendered and CSS picks
- *      one. That means every cell has TWO controls, and editing one used to
- *      leave its twin showing the old teacher — invisible on a phone or a
- *      desktop, and wrong the moment a tablet crossed the breakpoint. Found
- *      in a browser, not in review.
+ *   1. ONE MATRIX, ONE CONTROL PER CELL. Ata Ekta 13 Responsive rule ০৩:
+ *      a matrix never reflows — sections down, subjects across, first
+ *      column frozen on a phone. The old narrow card stack rendered every
+ *      cell TWICE, and editing one used to leave its twin showing the old
+ *      teacher (found in a browser, not in review). With the stack gone
+ *      there is no twin, so the guarantee is now that a cell's own marks —
+ *      unsaved, empty — follow the edit, and that no second copy of any
+ *      cell comes back.
  *
  *   2. A REFUSED SAVE MUST NOT ERASE THE WORK. `writer-save-errors.test.ts`
  *      records the shape: a `finally { load() }` wipes the message and the
@@ -35,7 +37,7 @@ before(() => {
                   { url: 'http://localhost/' });
   const g = globalThis as Record<string, unknown>;
   g.HTMLElement = dom.window.HTMLElement;
-  // `CSS.escape` is used to find a cell's twin. jsdom has it; node does not.
+  // jsdom has `CSS`; node does not. Kept for any selector escaping.
   g.CSS = dom.window.CSS;
   g.confirm = () => true;
   for (const key of ['localStorage', 'location'] as const) {
@@ -77,6 +79,8 @@ const GRID = {
 
 /** The requests the view made, so a test can assert what was SENT. */
 let sent: Array<{ url: string; body: unknown }> = [];
+/** Every GET, so a test can assert that nothing was reloaded. */
+let fetched: string[] = [];
 let postReply: { ok: boolean; status: number; body: unknown } =
   { ok: true, status: 200, body: { opened: 1, closed: 0, unchanged: 0 } };
 
@@ -91,6 +95,7 @@ function auth() {
           json: async () => postReply.body,
         } as unknown as Response;
       }
+      fetched.push(url);
       return {
         ok: true, status: 200,
         json: async () => JSON.parse(JSON.stringify(GRID)),
@@ -119,32 +124,117 @@ const barText = () => doc().getElementById('assign-bar')?.textContent ?? '';
 describe('P9-1 — the teaching-assignment grid', () => {
   beforeEach(() => {
     sent = [];
+    fetched = [];
     postReply = { ok: true, status: 200, body: { opened: 1, closed: 0, unchanged: 0 } };
   });
 
-  test('renders both layouts — the matrix and the card stack', async () => {
+  test('renders one matrix — every cell once, never a card stack', async () => {
     await mount();
     assert.equal(cells('.assign-matrix').length, 4, '2 sections × 2 subjects');
-    assert.equal(cells('.assign-stack').length, 4, 'the same cells, read down');
+    assert.equal(doc().querySelectorAll('select.assign-cell').length, 4,
+      'no second copy of any cell anywhere on the page');
+    assert.equal(doc().querySelectorAll('.assign-stack').length, 0,
+      '13 Responsive ০৩: a matrix never reflows into cards');
   });
 
-  test('THE ONE THAT MATTERS — editing a cell moves its twin', async () => {
+  test('the matrix reads sections down and subjects across', async () => {
     await mount();
-    const wide = cellFor('.assign-matrix', SEC_B, BANGLA);
-    wide.value = KARIM;
-    wide.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
-    await settle();
+    const table = doc().querySelector('table.assign-matrix') as HTMLTableElement;
+    const heads = [...table.querySelectorAll('thead th')];
+    assert.equal(heads[0].textContent, 'সেকশন', 'the frozen column is the sections');
+    assert.ok(heads.every((h) => h.getAttribute('scope') === 'col'));
+    const rows = [...table.querySelectorAll('tbody tr')];
+    assert.equal(rows.length, 2, 'a row per section');
+    for (const [i, sec] of [SEC_A, SEC_B].entries()) {
+      const th = rows[i].querySelector('th') as HTMLElement;
+      assert.equal(th.getAttribute('scope'), 'row');
+      const keys = [...rows[i].querySelectorAll<HTMLSelectElement>('select.assign-cell')]
+        .map((c) => c.dataset.cellKey);
+      assert.deepEqual(keys, [`${sec}|${MATHS}`, `${sec}|${BANGLA}`],
+        'each row holds that section, one cell per subject column');
+    }
+  });
 
-    const narrow = cellFor('.assign-stack', SEC_B, BANGLA);
-    assert.equal(narrow.value, KARIM,
-      'a tablet crossing the breakpoint would have shown the old teacher');
-    assert.equal(narrow.dataset.dirty, 'true', 'and the twin must look unsaved too');
+  test('THE ONE THAT MATTERS — an edited cell looks unsaved, an empty one says so', async () => {
+    await mount();
+    const c = cellFor('.assign-matrix', SEC_B, BANGLA);
+    assert.equal(c.dataset.empty, 'true', 'nobody teaches it yet');
+    assert.notEqual(c.dataset.dirty, 'true');
+    assert.equal(c.selectedOptions[0]?.textContent, 'শিক্ষক দিন', 'the empty cell says what to do');
+
+    c.value = KARIM;
+    c.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    await settle();
+    assert.equal(cellFor('.assign-matrix', SEC_B, BANGLA), c,
+      'the control is not rebuilt under the hand');
+    assert.equal(c.value, KARIM);
+    assert.equal(c.dataset.dirty, 'true', 'the edit must look unsaved');
+    assert.notEqual(c.dataset.empty, 'true', 'and no longer empty');
+
+    const cleared = cellFor('.assign-matrix', SEC_A, MATHS);
+    cleared.value = '';
+    cleared.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    await settle();
+    assert.equal(cleared.dataset.empty, 'true', 'removing a teacher shows the gap at once');
+    assert.equal(cleared.dataset.dirty, 'true');
   });
 
   test('the saved teacher is preselected, not blank', async () => {
     await mount();
     assert.equal(cellFor('.assign-matrix', SEC_A, MATHS).value, RAFIQ);
-    assert.equal(cellFor('.assign-stack', SEC_A, MATHS).value, RAFIQ);
+  });
+
+  test('switching class with unsaved edits asks first, and reloads only on yes', async () => {
+    const OTHER = 'dddddddd-0000-4000-8000-00000000000b';
+    GRID.classes.push({ id: OTHER, nameBn: 'দশম শ্রেণি', levelNo: 10 });
+    try {
+      await mount();
+      const c = cellFor('.assign-matrix', SEC_B, BANGLA);
+      c.value = KARIM;
+      c.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+      await settle();
+      const loads = fetched.length;
+
+      const cls = doc().querySelector('select[name="classId"]') as HTMLSelectElement;
+      cls.value = OTHER;
+      cls.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+      await settle();
+
+      const dialog = doc().querySelector('[role="alertdialog"]') as HTMLElement;
+      assert.ok(dialog, 'the app confirm, not a bare window.confirm()');
+      assert.match(dialog.textContent ?? '', /শ্রেণি বদলালে সেগুলো হারিয়ে যাবে/);
+      assert.equal(cls.value, GRID.classId, 'the class on screen stays until the answer is yes');
+      assert.equal(fetched.length, loads, 'nothing reloaded yet');
+      assert.equal(cellFor('.assign-matrix', SEC_B, BANGLA).value, KARIM, 'the work is still there');
+
+      const yes = [...dialog.querySelectorAll('button')]
+        .find((b) => b.textContent?.includes('বাদ দিন')) as HTMLButtonElement;
+      yes.click();
+      await settle();
+      assert.equal(fetched.length, loads + 1, 'yes reloads once');
+      assert.match(fetched[fetched.length - 1], new RegExp(`classId=${OTHER}`));
+      assert.equal(doc().querySelector('[role="alertdialog"]'), null, 'and the dialog is gone');
+    } finally {
+      GRID.classes.pop();
+    }
+  });
+
+  test('the drawn header: gap chip and one small Save, a bar Save for phones', async () => {
+    await mount();
+    const header = doc().querySelector('.page-header') as HTMLElement;
+    assert.equal(doc().querySelectorAll('h1').length, 1, 'exactly one h1');
+    assert.match(header.textContent ?? '', /৩ ঘর ফাঁকা/, 'required − assigned, in Bangla');
+    const saves = [...doc().querySelectorAll<HTMLButtonElement>('button.btn-primary')];
+    assert.equal(saves.length, 2, 'header Save and the bar Save — CSS shows one per width');
+    assert.ok(header.contains(saves[0]));
+    assert.ok(doc().getElementById('assign-bar')?.contains(saves[1]));
+    assert.ok(saves.every((b) => b.disabled), 'nothing to save yet');
+
+    const c = cellFor('.assign-matrix', SEC_B, MATHS);
+    c.value = KARIM;
+    c.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
+    await settle();
+    assert.ok(saves.every((b) => b.isConnected && !b.disabled), 'both wake, neither rebuilt');
   });
 
   test('progress is shown before anyone reaches Generate', async () => {

@@ -1,5 +1,7 @@
 /**
  * Routine editor — F-502 / F-504 / F-506, wireframe §8.1.
+ * Drawn in Ata Ekta 06 Routine §05 (desktop); the phone follows 13 Responsive
+ * rule ০৩, the matrix.
  *
  * The coordinator's hardest screen: a week of periods against a week of days,
  * where every move can collide with a teacher, a room, or the section itself.
@@ -33,15 +35,32 @@
  * dimension — and never pre-judges teacher or room collisions, which live in
  * other sections' slots it was never sent. Those surface on the attempt, as
  * a sentence naming the class that already owns the hour.
+ *
+ * ── Ata Ekta §05 ─────────────────────────────────────────────────────────
+ * The drawing is one desk: a bar with the title, the section as a neutral
+ * chip and one small primary; a white grid area — a blank corner, inset day
+ * heads, start times right-aligned, square 44px cells, a break drawn as one
+ * inset cell per day — and, flush under the grid, the band that names a
+ * clash in words. The section picker, the undo row, the held-lesson banner,
+ * the legend and the drawers are not drawn and take the same vocabulary.
+ * On a phone the matrix never reflows: the first column is frozen with a
+ * rule and a shadow on its edge, and the primary moves to a bar pinned under
+ * the grid, where a thumb reaches it (13 Responsive, "বুড়ো আঙুলের নাগাল").
+ * The band rides in that pinned dock with it, so a clash is read where the
+ * tap was made and is never left behind the bar or below the fold.
+ * What is drawn but not built — the conflict chip and cell, subject tints,
+ * "সংরক্ষণ", the drag cursor — is recorded in the unit's `deferred`: the
+ * payload carries no conflicts, and every edit is already saved as it is made.
  */
 import type { Auth } from './auth.ts';
 import { emptyState, errorState } from './view-states.ts';
 import {
-  pageHeader, field, statusBadge, listSkeleton, openDrawer, button, buttonRow,
-  el, append, setBusy, announce, confirmOverlay, sectionHeading,
+  pageHeader, field, badge, statusBadge, listSkeleton, openDrawer, button, buttonRow,
+  el, append, numText, numClass, icon, setBusy, announce, confirmOverlay, sectionHeading,
+  permissionState, permissionMessage, serverMessage, deniedContact,
   type OverlayHandle,
 } from './ui/index.ts';
-import { formatCount, formatTime } from '../../../packages/ui-core/src/format.ts';
+import { formatCount, formatTime, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
 
 /**
  * The teaching week comes from the SERVER, which reads `tenants.weekend_days`.
@@ -118,6 +137,12 @@ export interface RoutineEditorViewOptions {
   sectionId?: string;
 }
 
+const TITLE = 'রুটিন সম্পাদনা';
+/** What a refusal names — "রুটিন দেখার অনুমতি আপনার নেই।" (B-30). */
+const SUBJECT = 'রুটিন';
+/** Every connection failure on this screen starts with these words. */
+const OFFLINE_PREFIX = 'সংযোগ নেই';
+
 const SHIFT_BN: Record<string, string> = {
   morning: 'প্রাতঃ', day: 'দিবা', evening: 'সান্ধ্য', single: 'একক',
 };
@@ -126,13 +151,30 @@ const STATUS_BN: Record<string, string> = {
   superseded: 'প্রতিস্থাপিত', archived: 'সংরক্ষিত',
 };
 
+/**
+ * What the band under the grid is saying, which decides its tint:
+ *   ok       an edit was accepted
+ *   warn     accepted, with something to read (publish warnings)
+ *   danger   refused — a clash, a stale version, a pinned lesson (§05's band)
+ *   offline  nothing reached the server
+ */
+type NoticeTone = 'ok' | 'warn' | 'danger' | 'offline';
+interface Notice { text: string; tone: NoticeTone }
+
 export class RoutineEditorView {
   private readonly o: RoutineEditorViewOptions;
+  /**
+   * The one child this view keeps in the shell's view element. Every render
+   * refills THIS, not the root: the shell animates each direct child of the
+   * view element in, and rebuilding the root on every tap replayed that
+   * entrance on every pick-up and every placement.
+   */
+  private readonly screen: HTMLElement;
   private sections: SectionOption[] = [];
   private sectionId: string | null = null;
   private grid: Grid | null = null;
   private selected: string | null = null;
-  private notice: { text: string; tone: 'warn' | 'ok' } | null = null;
+  private notice: Notice | null = null;
   private loading = true;
   /**
    * The load failed. Distinct from `notice`, and the distinction is the
@@ -140,6 +182,10 @@ export class RoutineEditorView {
    * routine, so "no routine has been created" must not be rendered under it.
    */
   private failed = false;
+  /** The server refused this role. Not a failure: retrying cannot help. */
+  private denied = false;
+  private deniedMsg = '';
+  private deniedWho: string | undefined = undefined;
   private busy = false;
   /** §17. True while a lesson drawer holds typing nobody has saved yet. */
   private drawerOpen = false;
@@ -147,9 +193,25 @@ export class RoutineEditorView {
   private changed = new Set<string>();
   /** P9-6 §10. The routine as this screen last saw it. */
   private fingerprint = '';
+  /**
+   * The cell a keyboard or pointer last pressed. Each render rebuilds the
+   * grid, so without this a keyboard user who picks up a class lands back on
+   * the page body and has to tab through the header to find their place.
+   */
+  private lastCell: string | null = null;
+  /**
+   * The cell a result is about, for the next render only. On a phone the
+   * band is pinned over the bottom of the grid; if the sentence it just
+   * gained covers the cell that caused it, the page lifts by the overlap.
+   */
+  private reveal: string | null = null;
 
   constructor(options: RoutineEditorViewOptions) {
     this.o = options;
+    this.screen = options.doc.createElement('div');
+    this.screen.className = 'editor-screen';
+    options.root.textContent = '';
+    options.root.append(this.screen);
     // An explicit section wins over the remembered one: arriving from a
     // generation result means the coordinator has a section in mind, and
     // this device's last choice is not it.
@@ -175,15 +237,28 @@ export class RoutineEditorView {
 
   private async loadGrid(sectionId: string): Promise<void> {
     this.failed = false;
+    this.denied = false;
     this.loading = true;
     this.selected = null;
     this.render();
     try {
       const res = await this.o.auth.authedFetch(
         `/api/v1/rms/editor?sectionId=${encodeURIComponent(sectionId)}`);
-      if (!res.ok) throw new Error(String(res.status));
-      this.grid = (await res.json()) as Grid;
-      this.notice = null;
+      if (res.status === 403) {
+        // A refusal is not a failed fetch: retrying it is futile, and the
+        // person needs to know who can help — the same reading every other
+        // screen gives a 403 (B-30, B-84).
+        const b = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+        this.grid = null;
+        this.notice = null;
+        this.deniedMsg = serverMessage(b, 403, permissionMessage(SUBJECT), SUBJECT);
+        this.deniedWho = deniedContact({ code: b.error });
+        this.denied = true;
+      } else {
+        if (!res.ok) throw new Error(String(res.status));
+        this.grid = (await res.json()) as Grid;
+        this.notice = null;
+      }
     } catch {
       this.grid = null;
       // A FAILURE, not a notice. The render used to draw this warning and
@@ -201,6 +276,22 @@ export class RoutineEditorView {
   /** The institution's own teaching days, never a constant. */
   private days(): Day[] {
     return this.grid?.days?.length ? this.grid.days : FALLBACK_DAYS;
+  }
+
+  /** A refusal, in the tint that says whether the server even heard it. */
+  private refused(text: string): Notice {
+    return { text, tone: text.startsWith(OFFLINE_PREFIX) ? 'offline' : 'danger' };
+  }
+
+  /**
+   * Raise the band, and say it. The band is rebuilt on every render, and a
+   * live region that arrives already filled is one most screen readers never
+   * read — so the same words also go through the persistent announcer. A
+   * refusal interrupts; a confirmation waits its turn.
+   */
+  private tell(notice: Notice): void {
+    this.notice = notice;
+    announce(this.o.doc, notice.text, notice.tone === 'danger' || notice.tone === 'offline');
   }
 
   /**
@@ -238,8 +329,9 @@ export class RoutineEditorView {
     // still refuses, and the bar says so — but it can be selected, edited
     // and unlocked, which is the whole point of being able to lock it.
     if (slot.isDouble || slot.doubleGroupId) {
-      this.notice = {
-        text: 'দ্বৈত পিরিয়ড আলাদা করে সরানো যায় না — দুটি অংশ একসাথেই থাকে।', tone: 'warn' };
+      this.tell(this.refused(
+        'দ্বৈত পিরিয়ড আলাদা করে সরানো যায় না — দুটি অংশ একসাথেই থাকে।'));
+      this.reveal = `${slot.dayOfWeek}-${slot.periodNo}`;
       this.render(); return;
     }
     this.selected = this.selected === slot.id ? null : slot.id;
@@ -253,8 +345,10 @@ export class RoutineEditorView {
     // Selectable, not movable. The server refuses this too; saying it here
     // saves a round trip the coordinator would wait through.
     const held = this.grid?.slots.find((x) => x.id === slotId);
+    const target = `${dow}-${periodNo}`;
     if (held?.isPinned) {
-      this.notice = { text: 'এই ক্লাসটি পিন করা — সরাতে হলে আগে পিন সরান।', tone: 'warn' };
+      this.tell(this.refused('এই ক্লাসটি পিন করা — সরাতে হলে আগে পিন সরান।'));
+      this.reveal = target;
       this.render(); return;
     }
     this.busy = true;
@@ -276,16 +370,18 @@ export class RoutineEditorView {
         this.selected = null;
         this.busy = false;
         await this.loadGrid(this.grid!.sectionId);   // re-read: the DB is the truth
-        this.notice = { text: 'সরানো হয়েছে।', tone: 'ok' };
+        this.tell({ text: 'সরানো হয়েছে।', tone: 'ok' });
+        this.reveal = target;
         this.render();
         return;
       }
       // F-504: the refusal names the class that already owns the hour.
-      this.notice = { text: body.message ?? 'ওই ঘরে বসানো গেল না।', tone: 'warn' };
+      this.tell(this.refused(body.message ?? 'ওই ঘরে বসানো গেল না।'));
     } catch {
-      this.notice = { text: 'সংযোগ নেই — পরিবর্তন সংরক্ষণ হয়নি।', tone: 'warn' };
+      this.tell(this.refused('সংযোগ নেই — পরিবর্তন সংরক্ষণ হয়নি।'));
     }
     this.busy = false;
+    this.reveal = target;
     this.render();
   }
 
@@ -311,15 +407,15 @@ export class RoutineEditorView {
         // say ০টি, and the demo was the only thing that ever made it
         // say otherwise.
         const accepted = body.warnings ?? [];
-        this.notice = accepted.length > 0
-          ? { text: `প্রকাশিত হয়েছে — ${accepted[0].messageBn}`, tone: 'warn' }
-          : { text: 'রুটিন প্রকাশিত হয়েছে।', tone: 'ok' };
+        this.tell(accepted.length > 0
+          ? { text: `প্রকাশিত হয়েছে — ${accepted[0].messageBn}`, tone: 'warn' }
+          : { text: 'রুটিন প্রকাশিত হয়েছে।', tone: 'ok' });
         this.render();
         return;
       }
-      this.notice = { text: body.message ?? 'প্রকাশ করা যায়নি।', tone: 'warn' };
+      this.tell(this.refused(body.message ?? 'প্রকাশ করা যায়নি।'));
     } catch {
-      this.notice = { text: 'সংযোগ নেই — প্রকাশ করা যায়নি।', tone: 'warn' };
+      this.tell(this.refused('সংযোগ নেই — প্রকাশ করা যায়নি।'));
     }
     this.busy = false;
     this.render();
@@ -329,28 +425,44 @@ export class RoutineEditorView {
 
   private render(): void {
     const d = this.o.doc;
-    const root = this.o.root;
-    root.textContent = '';
+    const screen = this.screen;
+    // Which cell had focus, before this render destroys it.
+    const active = d.activeElement as HTMLElement | null;
+    const hadFocus = Boolean(active && screen.contains(active));
+    if (hadFocus && active?.dataset.cell) this.lastCell = active.dataset.cell;
+    screen.textContent = '';
 
     const rt = this.grid?.routine;
-    root.append(pageHeader(d, {
-      title: 'রুটিন সম্পাদনা',
-      // F-506: the shift is named in the header, because a teacher working
-      // both shifts is the most common source of real-world routine failure
-      // and the coordinator must always know which one they are editing.
-      subtitle: rt
-        ? `${rt.sectionLabel} · ${SHIFT_BN[rt.shift] ?? rt.shift}`
-        : 'পিরিয়ড সরান — সংঘর্ষ হলে কারণ জানায়',
-      badge: rt
-        ? statusBadge(d, {
-            state: rt.status === 'published' ? 'published' : 'draft',
+    screen.append(pageHeader(d, {
+      title: TITLE,
+      // §05 draws the bar without a sentence under the title; the purpose
+      // line stays only while there is no week on screen to explain itself.
+      subtitle: rt ? undefined : 'পিরিয়ড সরান — সংঘর্ষ হলে কারণ জানায়',
+      actions: rt
+        ? [
+          // F-506: the shift is named in the header, because a teacher
+          // working both shifts is the most common source of real-world
+          // routine failure and the coordinator must always know which one
+          // they are editing. §05's neutral section chip carries it.
+          badge(d, {
+            label: `${rt.sectionLabel} · ${SHIFT_BN[rt.shift] ?? rt.shift}`, tone: 'neutral',
+          }),
+          statusBadge(d, {
+            state: rt.status,
             label: `${STATUS_BN[rt.status] ?? rt.status} · সংস্করণ ${formatCount(rt.version, 'bn')}`,
-          })
+          }),
+        ]
         : undefined,
+      // The drawn bar's small primary. On a phone it is hidden and the same
+      // action sits in the dock pinned under the grid (see `foot`).
+      primary: rt?.editable ? this.publishButton('editor-publish-top', false) : undefined,
     }));
 
+    // One tool row above the matrix: the section picker and the undo row.
+    // Neither is drawn in §05; both are kept, out of the drawn frame.
+    const toolbar = el(d, 'div', { className: 'editor-toolbar' });
     if (this.sections.length > 0) {
-      root.append(field(d, {
+      toolbar.append(field(d, {
         label: 'শাখা',
         name: 'section',
         kind: 'select',
@@ -358,35 +470,41 @@ export class RoutineEditorView {
         options: this.sections.map((sec) => ({ value: sec.id, label: sec.label })),
         onChange: (v) => {
           this.sectionId = v;
+          // A different week: the last cell pressed is not on it.
+          this.lastCell = null;
           try { localStorage.setItem('shikhon_last_section', v); } catch { /* quota */ }
           void this.loadGrid(v);
         },
       }).root);
+    }
+    const undoBar = this.undoBar();
+    if (undoBar) toolbar.append(undoBar);
+    if (toolbar.childElementCount > 0) screen.append(toolbar);
+
+    if (this.denied) {
+      screen.append(permissionState(d, { message: this.deniedMsg, contact: this.deniedWho }));
+      return;
     }
 
     // A failure is the whole answer. This used to draw the warning AND then
     // "এই শাখার জন্য কোনো রুটিন তৈরি হয়নি" underneath it — two contradictory
     // claims, and the second one is not knowable when the first is true.
     if (this.failed) {
-      root.append(errorState(d, 'রুটিন আনা যায়নি — সংযোগ দেখে আবার চেষ্টা করুন।',
+      screen.append(errorState(d, 'রুটিন আনা যায়নি — সংযোগ দেখে আবার চেষ্টা করুন।',
         () => { if (this.sectionId) void this.loadGrid(this.sectionId); }));
       return;
     }
 
-    if (this.loading && !this.grid) { root.append(listSkeleton(d, 5)); return; }
-
-    if (this.notice) {
-      const n = d.createElement('p');
-      n.className = this.notice.tone === 'warn' ? 'inline-notice is-danger' : 'inline-notice';
-      n.setAttribute('role', 'status');
-      n.textContent = this.notice.text;
-      root.append(n);
-    }
+    if (this.loading && !this.grid) { screen.append(listSkeleton(d, 5)); return; }
 
     if (!this.grid?.routine) {
+      // With no grid there is nothing to sit under, so any notice stands on
+      // its own above the empty state rather than disappearing.
+      const standalone = this.noticeEl(true);
+      if (standalone) screen.append(standalone);
       const setup = this.grid?.setup ?? null;
       if (!setup) {
-        root.append(emptyState(d, {
+        screen.append(emptyState(d, {
           glyph: 'clock',
           message: 'এই শাখার জন্য কোনো রুটিন তৈরি হয়নি।',
         }));
@@ -396,16 +514,16 @@ export class RoutineEditorView {
         // provision_tenant clones a bell schedule per shift from
         // period_template_defaults, which carries only `day` and `morning`
         // rows — an evening shift is provisioned with an empty template.
-        root.append(emptyState(d, {
+        screen.append(emptyState(d, {
           glyph: 'clock',
           message: 'এই শিফটের জন্য ঘণ্টার সময়সূচি (পিরিয়ড টেমপ্লেট) নেই — '
             + 'আগে সেটি তৈরি করতে হবে, তারপর রুটিন বানানো যাবে।',
         }));
         return;
       }
-      root.append(emptyState(d, {
+      screen.append(emptyState(d, {
         glyph: 'clock',
-        message: `${setup.sectionLabel} · ${setup.yearLabel} শিক্ষাবর্ষের জন্য এখনো কোনো রুটিন নেই। `
+        message: `${setup.sectionLabel} · ${formatAcademicYear(setup.yearLabel)} শিক্ষাবর্ষের জন্য এখনো কোনো রুটিন নেই। `
           + 'রুটিন তৈরি করলে সপ্তাহের ছক খুলবে এবং ক্লাস বসানো যাবে।',
         action: { label: 'রুটিন তৈরি করুন', onClick: () => this.openCreate(setup) },
       }));
@@ -416,17 +534,11 @@ export class RoutineEditorView {
     // reads as "nothing is happening" when nothing is.
     if (this.selected) {
       const held = this.grid.slots.find((s) => s.id === this.selected);
-      const bar = d.createElement('div');
-      bar.className = 'card editor-holding';
-      const what = d.createElement('p');
-      what.className = 'editor-holding-what';
-      what.textContent = `সরানো হচ্ছে: ${held?.subjectBn ?? 'ক্লাস'}`
+      const what = `সরানো হচ্ছে: ${held?.subjectBn ?? 'ক্লাস'}`
         + (held?.teacherName ? ` · ${held.teacherName}` : '');
-      const how = d.createElement('p');
-      how.className = 'editor-holding-how';
       // §10. A locked lesson explains its own consequence here, in words,
       // rather than leaving a padlock to carry the meaning.
-      how.textContent = held?.isPinned
+      const how = held?.isPinned
         ? 'এই ক্লাসটি পিন করা — সরানো বা মুছে ফেলা যাবে না, এবং আবার রুটিন '
           + 'তৈরি করলেও এটি বদলাবে না। বদলাতে হলে আগে পিন সরান।'
         : 'যে ঘরে বসাতে চান সেই খালি ঘরে চাপ দিন।';
@@ -450,27 +562,94 @@ export class RoutineEditorView {
           label: 'বাতিল', size: 'sm', variant: 'secondary',
           onClick: () => { this.selected = null; this.render(); },
         }));
-      bar.append(what, how, acts);
-      root.append(bar);
+      screen.append(el(d, 'div', { className: 'editor-hold' },
+        el(d, 'p', { className: 'editor-hold-what' }, ...numText(d, what)),
+        el(d, 'p', { className: 'editor-hold-how' }, how),
+        acts));
     }
 
-    const undoBar = this.undoBar();
-    if (undoBar) root.append(undoBar);
-    root.append(this.buildGrid());
-    root.append(this.legend());
+    // §05's desk: the grid area, then the clash band flush under it, as one
+    // white shell. The band and the phone's primary travel together in one
+    // dock: on a phone the dock is pinned above the tab bar, so what just
+    // happened is read beside the thumb that made it happen, never behind the
+    // bar or below the fold. On a desktop the dock is static and holds only
+    // the band, which is exactly §05.
+    const band = this.noticeEl();
+    const foot = rt?.editable
+      ? el(d, 'div', { className: 'editor-foot' },
+        this.publishButton('editor-publish-bottom', true))
+      : null;
+    const frame = el(d, 'div', { className: 'editor-frame' },
+      el(d, 'div', { className: 'editor-grid-area' }, this.buildGrid(), this.legend()),
+      band || foot ? el(d, 'div', { className: 'editor-dock' }, band, foot) : null);
+    screen.append(frame);
 
-    if (rt?.editable) {
-      const wrap = d.createElement('div');
-      wrap.className = 'editor-actions';
-      const pub = d.createElement('button');
-      pub.type = 'button';
-      pub.className = 'btn-primary';
-      pub.textContent = 'প্রকাশ করুন';
-      pub.disabled = this.busy;
-      pub.addEventListener('click', () => { void this.publish(); });
-      wrap.append(pub);
-      root.append(wrap);
-    }
+    this.restoreFocus(hadFocus || d.activeElement === d.body || !d.activeElement);
+    const reveal = this.reveal;
+    this.reveal = null;
+    if (reveal) this.keepClear(reveal);
+  }
+
+  /**
+   * Lift the page if the pinned dock now covers the cell a result is about,
+   * so the cell and the sentence about it are on screen together. A no-op
+   * wherever the dock is not pinned: a desktop, or the end of the frame.
+   */
+  private keepClear(cellKey: string): void {
+    const win = this.o.doc.defaultView;
+    const dock = this.screen.querySelector<HTMLElement>('.editor-dock');
+    const cell = this.screen.querySelector<HTMLElement>(`[data-cell="${cellKey}"]`);
+    if (!win || !dock || !cell) return;
+    const style = win.getComputedStyle(dock);
+    if (style.position !== 'sticky') return;
+    const c = cell.getBoundingClientRect();
+    const k = dock.getBoundingClientRect();
+    if (c.bottom <= k.top || c.top >= k.bottom) return;
+    // Measured against where the dock settles once pinned, not where it is
+    // now: near the top of the frame a pinned element cannot rise above its
+    // frame, so it travels up with the page for a while before it stays put.
+    const pinnedTop = win.innerHeight - (parseFloat(style.bottom) || 0) - k.height;
+    const lift = Math.ceil(c.bottom - pinnedTop) + 8;
+    if (lift > 0) win.scrollBy({ top: lift, behavior: 'auto' });
+  }
+
+  /**
+   * Put focus back on the cell that had it. Only when this render took focus
+   * away (or it is on nothing): a person who has moved on to the shell or a
+   * drawer is never pulled back to the grid.
+   */
+  private restoreFocus(allowed: boolean): void {
+    if (!allowed || !this.lastCell) return;
+    const again = this.screen.querySelector<HTMLButtonElement>(
+      `button[data-cell="${this.lastCell}"]`);
+    if (again && !again.disabled) again.focus({ preventScroll: true });
+  }
+
+  /** "প্রকাশ করুন": small in the desktop bar, a full-width bar on a phone. */
+  private publishButton(className: string, bottom: boolean): HTMLButtonElement {
+    return button(this.o.doc, {
+      label: 'প্রকাশ করুন',
+      variant: 'primary',
+      size: bottom ? 'md' : 'sm',
+      block: bottom,
+      className,
+      disabled: this.busy,
+      onClick: () => { void this.publish(); },
+    });
+  }
+
+  /**
+   * The band that names what happened, in words. §05 draws it for a clash;
+   * a confirmation and a lost connection take the same band in their own
+   * tint, so a result always appears in the same place.
+   */
+  private noticeEl(standalone = false): HTMLElement | null {
+    if (!this.notice) return null;
+    return el(this.o.doc, 'p', {
+      className: standalone ? 'editor-notice is-standalone' : 'editor-notice',
+      data: { tone: this.notice.tone },
+      attrs: { role: 'status' },
+    }, ...numText(this.o.doc, this.notice.text));
   }
 
   /* ------------------------------------------------------------ drawers */
@@ -484,13 +663,13 @@ export class RoutineEditorView {
     });
     const name = field(d, {
       label: 'রুটিনের নাম', name: 'nameBn', required: true,
-      value: `নিয়মিত রুটিন ${setup.yearLabel}`,
+      value: `নিয়মিত রুটিন ${formatAcademicYear(setup.yearLabel)}`,
       helper: `${SHIFT_BN[setup.shift] ?? setup.shift} শিফট · ঘণ্টার সময়সূচি: ${setup.periodTemplateName ?? '—'}`,
       attrs: { maxlength: 120 },
     });
     append(form, errLine, name.root);
     append(form, el(d, 'p', {
-      className: 'att-sub',
+      className: 'ui-dialog-text',
       text: 'খসড়া হিসেবে তৈরি হবে। ক্লাস বসানো শেষ হলে প্রকাশ করতে পারবেন।',
     }));
 
@@ -515,7 +694,7 @@ export class RoutineEditorView {
         }
         handle.close();
         await this.loadGrid(this.grid!.sectionId);
-        this.notice = { text: 'রুটিন তৈরি হয়েছে — এখন ক্লাস বসান।', tone: 'ok' };
+        this.tell({ text: 'রুটিন তৈরি হয়েছে — এখন ক্লাস বসান।', tone: 'ok' });
         this.render();
       },
     });
@@ -545,7 +724,7 @@ export class RoutineEditorView {
 
     if (subjects.length === 0) {
       append(form, el(d, 'p', {
-        className: 'att-sub',
+        className: 'ui-dialog-text',
         text: 'এই শ্রেণির পাঠ্যসূচিতে কোনো বিষয় নেই — আগে বিষয় নির্ধারণ করুন।',
       }));
     }
@@ -635,7 +814,7 @@ export class RoutineEditorView {
         handle.close();
         this.selected = null;
         await this.loadGrid(g.sectionId);
-        this.notice = { text: existing ? 'হালনাগাদ হয়েছে।' : 'ক্লাস বসানো হয়েছে।', tone: 'ok' };
+        this.tell({ text: existing ? 'হালনাগাদ হয়েছে।' : 'ক্লাস বসানো হয়েছে।', tone: 'ok' });
         this.render();
       },
     });
@@ -662,7 +841,7 @@ export class RoutineEditorView {
         });
         this.selected = null;
         await this.loadGrid(this.grid!.sectionId);
-        this.notice = msg ? { text: msg, tone: 'warn' } : { text: 'সরানো হয়েছে।', tone: 'ok' };
+        this.tell(msg ? this.refused(msg) : { text: 'সরানো হয়েছে।', tone: 'ok' });
         this.render();
       },
     });
@@ -694,8 +873,7 @@ export class RoutineEditorView {
     });
     this.busy = false;
     if (msg) {
-      this.notice = { text: msg, tone: 'warn' };
-      announce(this.o.doc, msg, true);
+      this.tell(this.refused(msg));
       this.render();
       return;
     }
@@ -703,10 +881,9 @@ export class RoutineEditorView {
     const done = slot.isPinned
       ? `${slot.subjectBn ?? 'ক্লাসটির'} পিন খোলা হয়েছে।`
       : `${slot.subjectBn ?? 'ক্লাসটি'} পিন করা হয়েছে — আবার রুটিন তৈরি করলে এটি বদলাবে না।`;
-    this.notice = { text: done, tone: 'ok' };
     // §18: a lock is a state change with consequences, and a padlock glyph
-    // says nothing to a screen reader.
-    announce(this.o.doc, done);
+    // says nothing to a screen reader — `tell` announces it.
+    this.tell({ text: done, tone: 'ok' });
     this.render();
   }
 
@@ -727,15 +904,13 @@ export class RoutineEditorView {
     const msg = await this.send({ action: 'undo', routineId: this.grid.routine.id });
     this.busy = false;
     if (msg) {
-      this.notice = { text: msg, tone: 'warn' };
-      announce(this.o.doc, msg, true);
+      this.tell(this.refused(msg));
       this.render();
       return;
     }
     await this.loadGrid(this.grid.sectionId);
     const done = top ? `ফিরিয়ে নেওয়া হয়েছে — ${top.labelBn}` : 'ফিরিয়ে নেওয়া হয়েছে।';
-    this.notice = { text: done, tone: 'ok' };
-    announce(this.o.doc, done);
+    this.tell({ text: done, tone: 'ok' });
     this.render();
   }
 
@@ -752,7 +927,7 @@ export class RoutineEditorView {
     const stack = this.grid?.undo ?? [];
     if (!this.grid?.routine?.editable) return null;
 
-    const wrap = el(d, 'div', { className: 'edit-undo' });
+    const wrap = el(d, 'div', { className: 'editor-undo' });
     // P9-6. Always available while the routine is editable: recalculating a
     // part is not a recovery action, it is the ordinary response to a change
     // in the school, and it must not be hidden behind having edited first.
@@ -774,15 +949,13 @@ export class RoutineEditorView {
       label: `ফিরিয়ে নিন — ${stack[0].labelBn}`,
       variant: 'secondary',
       size: 'sm',
-      glyph: 'repeat',
+      glyph: 'rotate-ccw',
       disabled: this.busy,
       onClick: () => void this.undo(),
     }));
     if (stack.length > 1) {
-      wrap.append(el(d, 'span', {
-        className: 'ui-cell-meta',
-        text: `আরও ${formatCount(stack.length - 1, 'bn')}টি ধাপ ফিরিয়ে নেওয়া যাবে`,
-      }));
+      wrap.append(el(d, 'span', { className: 'editor-undo-more' },
+        ...numText(d, `আরও ${formatCount(stack.length - 1, 'bn')}টি ধাপ ফিরিয়ে নেওয়া যাবে`)));
     }
     return wrap;
   }
@@ -851,9 +1024,9 @@ export class RoutineEditorView {
     }
 
     let chosen = choices[0];
-    const body = el(d, 'div', { className: 'ui-stack' });
+    const body = el(d, 'div', { className: 'ui-stack editor-resolve' });
     body.append(el(d, 'p', {
-      className: 'ui-card-note',
+      className: 'ui-dialog-text',
       text: 'যে অংশটি আবার হিসাব করতে চান তা বেছে নিন। পিন করা ক্লাসগুলো '
           + 'অপরিবর্তিত থাকবে, এবং বাকি রুটিনের কিছুই নড়বে না।',
     }));
@@ -869,17 +1042,23 @@ export class RoutineEditorView {
     let handle: OverlayHandle | undefined;
     let previewed: Record<string, unknown> | null = null;
 
+    // A refused preview or apply: the same band the grid uses, inside the
+    // drawer, beside the choice that caused it.
+    const showRefusal = (): void => {
+      outcome.textContent = '';
+      const band = this.noticeEl(true);
+      if (band) outcome.append(band);
+      if (this.notice) announce(d, this.notice.text, true);
+    };
+
     const review = button(d, {
       label: 'পর্যালোচনা করুন', variant: 'secondary',
       onClick: async () => {
         setBusy(review, true);
         previewed = await this.sendResolve(chosen.scope, true);
         setBusy(review, false);
+        if (!previewed) { showRefusal(); return; }
         outcome.textContent = '';
-        if (!previewed) {
-          outcome.append(el(d, 'p', { className: 'ui-card-lead', text: this.notice?.text ?? '' }));
-          return;
-        }
         for (const node of this.resolveSummary(previewed, true)) outcome.append(node);
         apply.disabled = false;
         announce(d, String((previewed as { verdictBn?: string }).verdictBn ?? ''));
@@ -894,17 +1073,15 @@ export class RoutineEditorView {
         const before = new Set((this.grid?.slots ?? []).map((s) => s.id));
         const out = await this.sendResolve(chosen.scope, false);
         setBusy(apply, false);
-        if (!out) { outcome.textContent = ''; outcome.append(
-          el(d, 'p', { className: 'ui-card-lead', text: this.notice?.text ?? '' })); return; }
+        if (!out) { showRefusal(); return; }
         handle?.close();
         await this.loadGrid(this.grid!.sectionId);
         // §16. Which cells actually moved, so the grid shows the answer
         // rather than making a coordinator hunt for it.
         this.changed = new Set((this.grid?.slots ?? [])
           .filter((s) => !before.has(s.id)).map((s) => s.id));
-        this.notice = { text: String((out as { verdictBn?: string }).verdictBn ?? 'হয়ে গেছে।'),
-                        tone: 'ok' };
-        announce(d, this.notice.text);
+        this.tell({ text: String((out as { verdictBn?: string }).verdictBn ?? 'হয়ে গেছে।'),
+                    tone: 'ok' });
         this.render();
       },
     });
@@ -941,13 +1118,11 @@ export class RoutineEditorView {
         if (typeof out.fingerprint === 'string') this.fingerprint = out.fingerprint;
         return out;
       }
-      this.notice = {
-        text: typeof out.message === 'string' ? out.message : 'আবার হিসাব করা যায়নি।',
-        tone: 'warn',
-      };
+      this.notice = this.refused(
+        typeof out.message === 'string' ? out.message : 'আবার হিসাব করা যায়নি।');
       return null;
     } catch {
-      this.notice = { text: 'সংযোগ নেই — রুটিন আগের অবস্থাতেই আছে।', tone: 'warn' };
+      this.notice = this.refused('সংযোগ নেই — রুটিন আগের অবস্থাতেই আছে।');
       return null;
     }
   }
@@ -960,118 +1135,112 @@ export class RoutineEditorView {
       lost: number; moved: Array<{ beforeBn: string; afterBn: string }>;
     };
     const nodes: HTMLElement[] = [];
-    nodes.push(el(d, 'p', {
-      className: 'ui-card-lead', text: String(out.verdictBn ?? ''),
-    }));
+    nodes.push(el(d, 'p', { className: 'editor-verdict' },
+      ...numText(d, String(out.verdictBn ?? ''))));
     // Counts as WORDS beside the numbers (§22): a coordinator reading
     // "৭ / ২৯ / ২" has to guess which is which.
-    nodes.push(el(d, 'ul', { className: 'gen-trades' },
+    nodes.push(el(d, 'ul', { className: 'editor-counts' },
       ...[
         [`প্রভাবিত ক্লাস`, s.affected],
         [`অপরিবর্তিত থাকবে`, s.unchanged],
         [`পিন করা — অক্ষত`, s.pinnedPreserved],
         [`কোথাও বসানো যায়নি`, s.lost],
-      ].map(([label, n]) => el(d, 'li', {},
-        el(d, 'span', { className: 'gen-trade-what',
-                        text: `${label}: ${formatCount(Number(n), 'bn')}টি` })))));
+      ].map(([label, n]) => el(d, 'li', { className: 'editor-count' },
+        ...numText(d, `${label}: ${formatCount(Number(n), 'bn')}টি`)))));
 
     if (s.moved.length > 0) {
       nodes.push(sectionHeading(d, { title: 'কোনটি কোথায় যাবে', level: 3 }));
-      const list = el(d, 'ul', { className: 'gen-trades' });
+      const list = el(d, 'ul', { className: 'editor-moves' });
       for (const m of s.moved.slice(0, 12)) {
-        const li = el(d, 'li');
-        li.append(el(d, 'span', { className: 'gen-trade-what', text: `আগে: ${m.beforeBn}` }));
-        li.append(el(d, 'span', { className: 'gen-trade-why', text: `পরে: ${m.afterBn}` }));
-        list.append(li);
+        list.append(el(d, 'li', { className: 'editor-move' },
+          el(d, 'span', { className: 'editor-move-before' }, ...numText(d, `আগে: ${m.beforeBn}`)),
+          el(d, 'span', { className: 'editor-move-after' }, ...numText(d, `পরে: ${m.afterBn}`))));
       }
       nodes.push(list);
       if (s.moved.length > 12) {
-        nodes.push(el(d, 'p', { className: 'ui-card-note',
-          text: `আরও ${formatCount(s.moved.length - 12, 'bn')}টি` }));
+        nodes.push(el(d, 'p', { className: 'editor-resolve-more' },
+          ...numText(d, `আরও ${formatCount(s.moved.length - 12, 'bn')}টি`)));
       }
     }
     if (isPreview) {
       nodes.push(el(d, 'p', {
-        className: 'ui-card-note',
+        className: 'editor-preview-note',
         text: 'এখনো কিছুই বদলানো হয়নি। "প্রয়োগ করুন" চাপলে উপরের পরিবর্তনগুলো হবে।',
       }));
     }
     return nodes;
   }
 
+  /**
+   * §05's matrix, as a real table: a blank corner (named for a screen
+   * reader), the teaching days as column heads, one row per period headed by
+   * its start time. It scrolls sideways inside its own box; the first column
+   * is frozen at every width and carries the rule and shadow on a phone.
+   */
   private buildGrid(): HTMLElement {
     const d = this.o.doc;
     const grid = this.grid!;
-    const scroll = d.createElement('div');
-    // §11: horizontally scrollable with a frozen first column — six columns
-    // do not fit 360px, and the period is the one thing that must stay in
-    // view while the rest scrolls.
-    scroll.className = 'table-scroll';
-    const table = d.createElement('table');
-    table.className = 'data-table routine-grid';
+    const days = this.days();
+    const table = el(d, 'table', { className: 'editor-grid' });
+    // The column count sets the minimum width, so a six-day school scrolls
+    // rather than squeezing its days under the 44px touch floor.
+    table.style.setProperty('--editor-days', String(days.length));
 
-    const thead = d.createElement('thead');
-    const hr = d.createElement('tr');
-    const corner = d.createElement('th');
-    corner.textContent = 'পিরিয়ড';
-    hr.append(corner);
-    for (const day of this.days()) {
-      const th = d.createElement('th');
-      th.textContent = day.bn;
-      hr.append(th);
-    }
-    thead.append(hr);
-    table.append(thead);
+    const head = el(d, 'tr', {},
+      el(d, 'th', { className: 'editor-corner', attrs: { scope: 'col' } },
+        el(d, 'span', { className: 'ui-sr-only', text: 'পিরিয়ড' })),
+      ...days.map((day) => el(d, 'th', { className: 'editor-day', attrs: { scope: 'col' } },
+        el(d, 'span', { className: 'editor-day-label', text: day.bn }))));
+    table.append(el(d, 'thead', {}, head));
 
-    const tbody = d.createElement('tbody');
+    const tbody = el(d, 'tbody');
     for (const p of grid.periods) {
-      const tr = d.createElement('tr');
-      const rowHead = d.createElement('th');
-      rowHead.className = 'routine-period';
-      const no = d.createElement('span');
-      no.className = 'routine-period-no';
-      no.textContent = formatCount(p.periodNo, 'bn');
-      const time = d.createElement('span');
-      time.className = 'routine-period-time';
       // Bangla digits, like every other number on this screen. The grid was
       // rendering the raw `HH:MM` from the API, so a Bangla timetable carried
       // Latin clock times in its one always-visible column.
-      time.textContent = formatTime(p.startsAt, 'bn');
-      rowHead.append(no, time);
-      tr.append(rowHead);
+      const time = formatTime(p.startsAt, 'bn');
+      const rowHead = el(d, 'th', { className: 'editor-period', attrs: { scope: 'row' } },
+        // §05 shows the start time only; the period number stays in the
+        // row's accessible name, where "which period" is asked.
+        el(d, 'span', { className: 'ui-sr-only' },
+          ...numText(d, `পিরিয়ড ${formatCount(p.periodNo, 'bn')}`)),
+        ' ',
+        el(d, 'span', { className: numClass('editor-period-time', time), text: time }));
+      const tr = el(d, 'tr', {}, rowHead);
 
       if (p.kind !== 'teaching') {
-        // The break spans the week as one band, exactly as §8.1 draws it.
-        const td = d.createElement('td');
-        td.className = 'routine-break';
-        td.colSpan = this.days().length;
-        td.textContent = p.labelBn;
-        tr.append(td);
+        // §05 draws the break as one inset cell per day, not a single band.
+        days.forEach(() => {
+          tr.append(el(d, 'td', { className: 'editor-break' },
+            el(d, 'span', { className: 'editor-break-label' }, ...numText(d, p.labelBn))));
+        });
         tbody.append(tr);
         continue;
       }
 
-      for (const day of this.days()) {
-        tr.append(this.buildCell(day.dow, p));
-      }
+      for (const day of days) tr.append(this.buildCell(day.dow, p));
       tbody.append(tr);
     }
     table.append(tbody);
-    scroll.append(table);
-    return scroll;
+    return el(d, 'div', { className: 'ui-table-scroll editor-grid-scroll' }, table);
   }
 
   private buildCell(dow: number, p: Period): HTMLElement {
     const d = this.o.doc;
-    const td = d.createElement('td');
-    td.className = 'routine-cell';
+    const td = el(d, 'td', { className: 'editor-cell' });
     const slot = this.slotAt(dow, p.periodNo);
     const dayBn = this.days().find((x) => x.dow === dow)?.bn ?? '';
+    const cellKey = `${dow}-${p.periodNo}`;
 
-    const btn = d.createElement('button');
-    btn.type = 'button';
-    btn.className = 'routine-slot';
+    const btn = el(d, 'button', {
+      // `routine-slot` is the hook the lock/undo suite reads; `editor-slot`
+      // is the look, scoped so the timetable's own slots are untouched.
+      className: 'routine-slot editor-slot',
+      attrs: { type: 'button' },
+      data: { cell: cellKey },
+    });
     btn.disabled = !this.grid?.routine?.editable || this.busy;
+    btn.addEventListener('click', () => { this.lastCell = cellKey; });
 
     if (slot) {
       btn.dataset.filled = 'true';
@@ -1081,50 +1250,51 @@ export class RoutineEditorView {
       // P9-6 §16. The cells a scoped re-solve just moved, marked until the
       // next action — so a coordinator sees the answer instead of comparing
       // the grid against their memory of it.
-      if (this.changed.has(slot.id)) btn.dataset.changed = 'true';
+      const justMoved = this.changed.has(slot.id);
+      if (justMoved) btn.dataset.changed = 'true';
 
-      const subject = d.createElement('span');
-      subject.className = 'routine-slot-subject';
-      subject.textContent = slot.subjectBn ?? '—';
+      const subject = el(d, 'span', { className: 'editor-slot-subject' },
+        ...numText(d, slot.subjectBn ?? '—'));
       // The wireframe's own legend marks: fork = parallel block (religion or
       // optional-subject split), joined squares = double period.
+      const isDouble = slot.isDouble || Boolean(slot.doubleGroupId);
       if (slot.parallelPool) subject.append(this.mark('⑂', 'সমান্তরাল ব্লক'));
-      if (slot.isDouble || slot.doubleGroupId) subject.append(this.mark('⧉', 'দ্বৈত পিরিয়ড'));
+      if (isDouble) subject.append(this.mark('⧉', 'দ্বৈত পিরিয়ড'));
 
-      const teacher = d.createElement('span');
-      teacher.className = 'routine-slot-meta';
-      teacher.textContent = slot.teacherName ?? 'শিক্ষক নেই';
+      const teacher = el(d, 'span', { className: 'editor-slot-meta' },
+        ...numText(d, slot.teacherName ?? 'শিক্ষক নেই'));
       if (!slot.teacherName) teacher.dataset.missing = 'true';
-
-      const room = d.createElement('span');
-      room.className = 'routine-slot-meta';
-      room.textContent = slot.roomName ?? '';
-
-      btn.append(subject, teacher, room);
+      btn.append(subject, teacher);
+      if (slot.roomName) {
+        btn.append(el(d, 'span', { className: 'editor-slot-meta' }, ...numText(d, slot.roomName)));
+      }
       // §10. The padlock is a reinforcement; the WORD is the carrier. A
       // coordinator who cannot see the glyph, and every screen reader, gets
       // the same fact and the same consequence.
       if (slot.isPinned) {
-        btn.append(el(d, 'span', {
-          className: 'routine-slot-lock', text: '🔒 পিন করা',
-        }));
+        btn.append(el(d, 'span', { className: 'editor-slot-lock' },
+          icon(d, 'lock'), el(d, 'span', { text: 'পিন করা' })));
+      }
+      // The re-solve outline is a colour; this is the word beside it.
+      if (justMoved) {
+        btn.append(el(d, 'span', { className: 'editor-slot-note', text: 'এইমাত্র সরানো' }));
       }
       btn.setAttribute('aria-label',
         `${dayBn}, পিরিয়ড ${formatCount(p.periodNo, 'bn')}, ${slot.subjectBn ?? 'ক্লাস'}`
-        + (slot.teacherName ? `, ${slot.teacherName}` : '')
+        + (slot.teacherName ? `, ${slot.teacherName}` : ', শিক্ষক নেই')
+        + (slot.roomName ? `, ${slot.roomName}` : '')
+        + (slot.parallelPool ? ', সমান্তরাল ব্লক' : '')
+        + (isDouble ? ', দ্বৈত পিরিয়ড' : '')
         + (slot.isPinned
           ? ', পিন করা — আবার রুটিন তৈরি করলে এটি বদলাবে না'
           : '')
-        + (this.changed.has(slot.id) ? ', এইমাত্র সরানো হয়েছে' : ''));
+        + (justMoved ? ', এইমাত্র সরানো হয়েছে' : ''));
       btn.addEventListener('click', () => this.pick(slot));
     } else {
       btn.dataset.filled = 'false';
-      const empty = d.createElement('span');
-      empty.className = 'routine-slot-empty';
       // Plain words, not a warning glyph: an empty period is a fact the
       // coordinator is working ON, not an error being reported AT them.
-      empty.textContent = 'খালি';
-      btn.append(empty);
+      btn.append(el(d, 'span', { className: 'editor-slot-empty', text: 'খালি' }));
       btn.setAttribute('aria-label',
         `${dayBn}, পিরিয়ড ${formatCount(p.periodNo, 'bn')}, খালি`
         + (this.selected ? ' — এখানে বসাতে চাপ দিন' : ' — নতুন ক্লাস বসাতে চাপ দিন'));
@@ -1142,37 +1312,24 @@ export class RoutineEditorView {
     return td;
   }
 
+  /**
+   * A legend glyph inside a cell. Hidden from assistive technology because
+   * the cell's accessible name already says it in words; the title keeps it
+   * explainable on hover and long-press.
+   */
   private mark(glyph: string, label: string): HTMLElement {
-    const s = this.o.doc.createElement('span');
-    s.className = 'routine-mark';
-    s.textContent = glyph;
-    s.title = label;                      // hover / long-press
-    s.setAttribute('aria-label', label);  // and said aloud, not just drawn
-    return s;
+    return el(this.o.doc, 'span', {
+      className: 'editor-mark', text: glyph,
+      attrs: { title: label, 'aria-hidden': 'true' },
+    });
   }
 
   private legend(): HTMLElement {
     const d = this.o.doc;
-    const wrap = d.createElement('div');
-    wrap.className = 'att-legend';
-    for (const [glyph, label] of [['⑂', 'সমান্তরাল ব্লক'], ['⧉', 'দ্বৈত পিরিয়ড']] as const) {
-      const item = d.createElement('span');
-      item.className = 'att-legend-item';
-      const g = d.createElement('span');
-      g.className = 'att-legend-glyph';
-      g.textContent = glyph;
-      const l = d.createElement('span');
-      l.textContent = label;
-      item.append(g, l);
-      wrap.append(item);
-    }
-    return wrap;
-  }
-
-  private msg(text: string): HTMLElement {
-    const p = this.o.doc.createElement('p');
-    p.className = 'page-sub empty';
-    p.textContent = text;
-    return p;
+    return el(d, 'div', { className: 'editor-legend' },
+      ...([['⑂', 'সমান্তরাল ব্লক'], ['⧉', 'দ্বৈত পিরিয়ড']] as const).map(([glyph, label]) =>
+        el(d, 'span', { className: 'editor-legend-item' },
+          el(d, 'span', { className: 'editor-mark', text: glyph, attrs: { 'aria-hidden': 'true' } }),
+          el(d, 'span', { text: label }))));
   }
 }

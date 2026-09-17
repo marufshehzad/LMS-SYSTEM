@@ -83,8 +83,12 @@ const type = (input: HTMLInputElement, value: string) => {
   input.value = value;
   input.dispatchEvent(new dom.window.Event('input'));
 };
-const saveButton = (root: HTMLElement) =>
-  [...root.querySelectorAll('button')].find((b) => b.textContent === 'সংরক্ষণ করুন') as HTMLButtonElement;
+// Ata Ekta 02 Teacher §04 labels the primary "সব সংরক্ষণ". It is in the DOM
+// twice — the header copy (shown ≥1024px) and the sticky footer copy (shown on
+// a phone) — and `.find` takes the first; the last test holds the two in step.
+const saveButtons = (root: HTMLElement) =>
+  [...root.querySelectorAll('button')].filter((b) => b.textContent === 'সব সংরক্ষণ') as HTMLButtonElement[];
+const saveButton = (root: HTMLElement) => saveButtons(root)[0];
 
 describe('marks entry (F-709)', () => {
   test('THE ONE THAT MATTERS — an over-max mark is flagged and saved nowhere', async () => {
@@ -134,5 +138,58 @@ describe('marks entry (F-709)', () => {
     // An over-max value does NOT count as done — it was rejected.
     type(input, '99');
     assert.match(complete.textContent ?? '', /০ \/ ২/, 'the rejected mark is not counted');
+  });
+
+  test('a mark typed in Bangla digits is read, and F-709 still holds for it', async () => {
+    const { root, ops } = await mount();
+    const input = root.querySelector('.marks-input') as HTMLInputElement;
+
+    type(input, '৭৫');
+    assert.equal(input.getAttribute('aria-invalid'), 'true', 'over-max in Bangla digits is rejected too');
+    assert.equal(saveButton(root).disabled, true);
+
+    type(input, '৬৫');
+    assert.equal(input.getAttribute('aria-invalid'), null);
+    saveButton(root).click();
+    await settle();
+    assert.equal(ops.length, 1);
+    assert.equal((ops[0].payload as { cqMarks: number }).cqMarks, 65, 'queued as the number, not the glyphs');
+  });
+
+  test('the total adds up as you type and never counts a rejected mark', async () => {
+    const { root } = await mount();
+    const input = root.querySelector('.marks-input') as HTMLInputElement;
+    const total = input.closest('tr')?.querySelector('.marks-total') as HTMLElement;
+    assert.ok(total, 'each row has a total');
+    assert.equal(total.textContent, '—', 'nothing entered yet');
+
+    type(input, '65');
+    assert.equal(total.textContent, '৬৫');
+
+    type(input, '99');
+    assert.equal(total.textContent, '—', 'the rejected value is not summed');
+  });
+
+  test('both copies of the save button stay in step', async () => {
+    const { root } = await mount();
+    const buttons = saveButtons(root);
+    assert.equal(buttons.length, 2, 'header copy and footer copy');
+    assert.ok(buttons.every((b) => b.disabled), 'nothing to save yet');
+
+    type(root.querySelector('.marks-input') as HTMLInputElement, '65');
+    assert.ok(buttons.every((b) => !b.disabled), 'a valid change enables both');
+  });
+});
+
+describe('marks entry — the picker is named on screen (P6, R8)', () => {
+  test('the exam-subject select keeps a VISIBLE, associated label', async () => {
+    const { root } = await mount();
+    const picker = root.querySelector('[name="examSubject"]') as HTMLSelectElement;
+    const label = root.querySelector(`label[for="${picker.id}"]`) as HTMLLabelElement;
+    assert.ok(label, 'the select has a <label for>');
+    assert.equal(label.textContent, 'পরীক্ষা ও বিষয়');
+    // The design draws the select unlabelled; the P6 guarantee wins. Nothing
+    // between the label and the page may hide it from sight.
+    assert.equal(label.closest('.ui-sr-only, [hidden]'), null, 'the label is not visually hidden');
   });
 });

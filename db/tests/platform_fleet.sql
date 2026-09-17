@@ -22,10 +22,60 @@
 
 \set ON_ERROR_STOP on
 
--- These are SECURITY DEFINER and granted to shikhon_platform, which is the
--- point: the fleet is not readable by the tenant role. Test 7 proves it.
+-- ── This suite brings its own fleet ────────────────────────────────────
+--
+-- It used to assert against whatever tenants the database happened to hold,
+-- which passed on a development machine with 262 of them and FAILED on CI,
+-- where the database is freshly migrated and holds none: `platform_fleet`
+-- returns no rows on an empty fleet, so `SELECT DISTINCT total_count INTO`
+-- left a NULL, and NULL IS DISTINCT FROM 0 raised assertion 2. Green
+-- locally, red on every push since 2026-08-31.
+--
+-- The deeper problem was not the NULL. A suite that pins the behaviour of a
+-- PAGINATED list cannot say anything at all against zero rows: with no
+-- tenants, "the total describes the result, not the page" is vacuously true
+-- and so is every ordering and paging assertion below. It would have gone on
+-- reporting success while proving nothing.
+--
+-- So it seeds seven schools — more than the five-row page size used below,
+-- which is what makes a total that counts the page distinguishable from one
+-- that counts the fleet — and does it the way the rest of db/tests does:
+-- inside a transaction that is rolled back, so the suite is idempotent and
+-- leaves no residue. `database.yml` asserts exactly that after re-running
+-- every suite.
+--
+-- Seeded through `app.create_tenant` rather than a direct INSERT, because
+-- that is what the console calls and it is what writes `tenant_operations`;
+-- a hand-inserted tenant would exercise a shape the product never produces.
+
+BEGIN;
+
 GRANT shikhon_platform TO CURRENT_USER;
 SET ROLE shikhon_platform;
+
+DO $seed$
+DECLARE
+  v_actor uuid := '7c100000-0000-4000-8000-0000000000ac';
+  v_i     int;
+BEGIN
+  FOR v_i IN 1..7 LOOP
+    PERFORM app.create_tenant(
+      p_actor      => v_actor,
+      p_slug       => 'fleet-suite-' || v_i,
+      -- Names deliberately NOT in slug order, so an assertion that sorts by
+      -- name is ordering something rather than agreeing with insertion.
+      p_name_bn    => (ARRAY['ঙ বিদ্যালয়','গ বিদ্যালয়','ক বিদ্যালয়','চ বিদ্যালয়',
+                             'ঘ বিদ্যালয়','খ বিদ্যালয়','ছ বিদ্যালয়'])[v_i],
+      p_name_en    => 'Fleet Suite ' || v_i,
+      p_stream     => 'bangla_medium',
+      p_level      => 'secondary',
+      -- Two plans and two statuses, so the plan filter and the status filter
+      -- each have something to include AND something to exclude.
+      p_plan_code  => (ARRAY['starter','pilot'])[1 + (v_i % 2)],
+      p_status     => (ARRAY['active','trial'])[1 + (v_i % 2)]::tenant_status,
+      p_reason     => 'platform_fleet.sql fixture');
+  END LOOP;
+END $seed$;
 
 DO $$
 DECLARE
@@ -64,6 +114,11 @@ BEGIN
   SELECT count(*) INTO v_total FROM app.platform_fleet_ranked(NULL, NULL, NULL, NULL);
   SELECT DISTINCT total_count INTO v_n
     FROM app.platform_fleet(NULL, NULL, NULL, NULL, 'name', 'asc', 5, 0);
+  -- No rows means no `total_count` to read, so v_n stays NULL rather than 0.
+  -- The seed above makes that unreachable here; the COALESCE stays because
+  -- the NULL is what broke this file on an empty database, and a filtered
+  -- page further down can still legitimately return nothing.
+  v_n := COALESCE(v_n, 0);
 
   IF v_n IS DISTINCT FROM v_total THEN
     RAISE EXCEPTION 'FAIL 2: a five-row page reports a total of %, the fleet has %',
@@ -76,7 +131,7 @@ BEGIN
     FROM app.platform_fleet_ranked(NULL, NULL, NULL, 'critical');
   SELECT DISTINCT total_count INTO v_n
     FROM app.platform_fleet(NULL, NULL, NULL, 'critical', 'name', 'asc', 2, 0);
-  IF v_total > 0 AND v_n IS DISTINCT FROM v_total THEN
+  IF v_total > 0 AND COALESCE(v_n, 0) IS DISTINCT FROM v_total THEN
     RAISE EXCEPTION 'FAIL 2b: filtered total is % but the page says %', v_total, v_n;
   END IF;
   RAISE NOTICE 'PASS 2b — a filtered page reports the filtered total (%)', v_total;
@@ -218,5 +273,10 @@ BEGIN
   END;
 END $$;
 RESET ROLE;
+
+-- The seven fixtures go away with the transaction. Nothing here is committed,
+-- which is why this suite can be re-run any number of times and why the
+-- leak check in database.yml stays at zero.
+ROLLBACK;
 
 \echo 'platform_fleet.sql — all assertions passed'

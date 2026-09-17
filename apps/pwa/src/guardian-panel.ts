@@ -24,7 +24,10 @@
  * invisible is one nobody trusts and everybody works around.
  */
 import type { Auth } from './auth.ts';
-import { humanError, serverMessage } from './ui/index.ts';
+import {
+  humanError, serverMessage, sectionHeading, badge, icon, append, numText,
+  permissionState, permissionMessage,
+} from './ui/index.ts';
 import { skeleton, errorState, emptyState, successNote, confirmDialog, bnNum } from './view-states.ts';
 
 export interface GuardianLink {
@@ -68,6 +71,8 @@ export class GuardianPanel {
   private links: GuardianLink[] = [];
   private candidates: GuardianCandidate[] = [];
   private loading = true;
+  /** The list itself was refused (403): the permission state, and nothing under it. */
+  private denied = false;
   private error = '';
   private notice = '';
   private busy = false;
@@ -83,11 +88,11 @@ export class GuardianPanel {
   }
 
   private async load(): Promise<void> {
-    this.loading = true; this.error = ''; this.render();
+    this.loading = true; this.denied = false; this.error = ''; this.render();
     try {
       const res = await this.o.auth.authedFetch(
         `/api/v1/ops/guardians?studentId=${encodeURIComponent(this.o.studentId)}`);
-      if (res.status === 403) { this.error = 'অভিভাবকের তথ্য দেখার অনুমতি নেই।'; return; }
+      if (res.status === 403) { this.denied = true; return; }
       if (!res.ok) throw new Error(String(res.status));
       const body = (await res.json()) as { guardians: GuardianLink[] };
       this.links = body.guardians ?? [];
@@ -172,16 +177,29 @@ export class GuardianPanel {
     const root = this.o.root;
     root.textContent = '';
 
-    const h = d.createElement('h2');
-    h.className = 'section-heading';
-    h.textContent = 'অভিভাবক';
-    root.append(h);
+    root.append(sectionHeading(d, { title: 'অভিভাবক' }));
+
+    // B-30. A refusal is the whole answer: the canonical permission state,
+    // with who to ask and no retry — never a refusal above an empty state.
+    if (this.denied) {
+      root.append(this.refusal(permissionMessage('অভিভাবকের তথ্য'), 'প্রধান শিক্ষক'));
+      return;
+    }
 
     if (this.notice) root.append(successNote(d, this.notice));
     if (this.error) {
-      root.append(errorState(d, this.error,
-        this.error.includes('অনুমতি') ? undefined : () => void this.load()));
-      if (this.error.includes('অনুমতি')) return;
+      // A change the server refused (serverMessage's canonical refusal) is a
+      // denied state too: the same component, no retry, nothing under it.
+      //
+      // No contact line here. Only principal, school_owner and it_admin are
+      // offered a change (MANAGE_GUARDIANS in app.ts, GUARDIAN_ADMIN on the
+      // server), so "ask the head teacher" would send a principal to
+      // themselves; and a gate refusal (tenant_blocked) has nobody to ask.
+      if (this.error.includes('অনুমতি')) {
+        root.append(this.refusal(this.error));
+        return;
+      }
+      root.append(errorState(d, this.error, () => void this.load()));
     }
     if (this.loading) { root.append(skeleton(d, 2)); return; }
 
@@ -203,33 +221,46 @@ export class GuardianPanel {
     if (this.o.canManage) {
       const add = d.createElement('button');
       add.type = 'button';
-      add.className = 'btn-secondary btn-small';
-      add.style.margin = '0 var(--s-4) var(--s-3)';
+      add.className = 'btn-secondary btn-sm';
       add.textContent = 'আরেকজন অভিভাবক যুক্ত করুন';
       add.addEventListener('click', () => { this.mode = 'add'; this.render(); });
       root.append(add);
     }
   }
 
+  /**
+   * The lock card, announced.
+   *
+   * permissionState is a calm role="note", which a screen reader does not
+   * read out. Both refusals here used to be errorState, whose words sit in a
+   * role="alert", and both arrive with nothing to look at: the list 403 lands
+   * after the student drawer is already open, and a refused change rebuilds
+   * the panel, so the checkbox that had focus is gone. Keep the announcement
+   * (R8): the look is the lock card, the live region is the whole card. It
+   * holds only words and an aria-hidden glyph, so nothing extra is read.
+   */
+  private refusal(message: string, contact?: string): HTMLElement {
+    const card = permissionState(this.o.doc, { message, contact });
+    card.setAttribute('role', 'alert');
+    return card;
+  }
+
   private linkCard(g: GuardianLink): HTMLElement {
     const d = this.o.doc;
     const card = d.createElement('div');
-    card.className = 'card';
-    card.style.margin = '0 var(--s-4) var(--s-3)';
+    // `.card` carries no padding in this system; `gp-card` insets the
+    // contents and spaces one guardian from the next.
+    card.className = 'card gp-card';
 
     const head = d.createElement('div');
     head.className = 'page-header-row';
     const name = d.createElement('p');
-    name.className = 'system-title';
+    name.className = 'gp-name';
     name.textContent = g.nameBn;
     head.append(name);
-    if (g.isPrimary) {
-      const chip = d.createElement('span');
-      chip.className = 'status-chip';
-      chip.setAttribute('data-state', 'success');
-      chip.textContent = 'প্রধান';
-      head.append(chip);
-    }
+    // A label, not a status: "primary guardian" is a role in the family, so
+    // it takes the neutral badge rather than a success colour (§3).
+    if (g.isPrimary) head.append(badge(d, { label: 'প্রধান', tone: 'neutral' }));
     card.append(head);
 
     // The number becomes a call, not a string to copy down.
@@ -245,12 +276,12 @@ export class GuardianPanel {
     // second copy of that rule, free to drift from it — and hiding a number
     // the body still carried is the pattern D13 forbids.
     const meta = d.createElement('p');
-    meta.className = 'att-sub';
+    meta.className = 'gp-meta';
     meta.append(d.createTextNode(RELATION_BN[g.relation] ?? g.relation));
     if (g.phone) {
       meta.append(d.createTextNode(' · '));
       const call = d.createElement('a');
-      call.className = 'ui-call';
+      call.className = 'ui-call n';
       // The href must be the raw E.164 the dialler understands. The visible
       // text stays Latin too — a phone number is an identifier, and Bangla
       // numerals in a number somebody may read aloud or retype is the R-8
@@ -261,14 +292,17 @@ export class GuardianPanel {
       meta.append(call);
     }
     if (g.otherWards > 0) {
-      meta.append(d.createTextNode(
-        ` · এই প্রতিষ্ঠানে আরও ${bnNum(g.otherWards)} জন সন্তান`));
+      // The count in the numeral face (R6), the words around it in the text face.
+      const count = d.createElement('span');
+      count.className = 'n';
+      count.textContent = bnNum(g.otherWards);
+      meta.append(d.createTextNode(' · এই প্রতিষ্ঠানে আরও '), count, d.createTextNode(' জন সন্তান'));
     }
     card.append(meta);
 
     if (!this.o.canManage) {
       const ro = d.createElement('p');
-      ro.className = 'att-sub';
+      ro.className = 'gp-meta';
       ro.textContent =
         (g.receivesSms ? 'এসএমএস পান' : 'এসএমএস পান না') + ' · ' +
         (g.canPayFees ? 'ফি পরিশোধ করতে পারেন' : 'ফি পরিশোধ করতে পারেন না');
@@ -286,10 +320,16 @@ export class GuardianPanel {
       'ইনভয়েস ও ফির নোটিশ কেবল এই অনুমতি থাকা অভিভাবকদের কাছে যায়।',
       (v) => void this.patch(g, { canPayFees: v })));
 
+    // The card's two actions share one row; the confirmation either opens is
+    // appended to the card, under the row.
+    const acts = d.createElement('div');
+    acts.className = 'action-row gp-actions';
+    card.append(acts);
+
     if (!g.isPrimary) {
       const mk = d.createElement('button');
       mk.type = 'button';
-      mk.className = 'btn-ghost btn-small';
+      mk.className = 'btn-ghost btn-sm';
       mk.disabled = this.busy;
       mk.textContent = 'প্রধান অভিভাবক করুন';
       mk.addEventListener('click', () => {
@@ -306,21 +346,21 @@ export class GuardianPanel {
           onConfirm: () => void this.patch(g, { isPrimary: true }),
         }));
       });
-      card.append(mk);
+      acts.append(mk);
     }
 
     // B-7. Ending a relationship. Offered last, and visually last, because it
     // is the one action on this card that another screen cannot undo.
     const end = d.createElement('button');
     end.type = 'button';
-    end.className = 'btn-ghost btn-small';
+    end.className = 'btn-ghost btn-sm';
     end.disabled = this.busy;
     // NOT "মুছে ফেলুন". Nothing is deleted — the link keeps its row and its
     // history, and every receipt and attendance record that references this
     // period stays readable. A delete label would promise otherwise.
     end.textContent = 'সম্পর্ক শেষ করুন';
     end.addEventListener('click', () => { this.ending = g.guardianId; this.render(); });
-    card.append(end);
+    acts.append(end);
 
     if (this.ending === g.guardianId) card.append(this.endForm(g));
     return card;
@@ -337,20 +377,25 @@ export class GuardianPanel {
   private endForm(g: GuardianLink): HTMLElement {
     const d = this.o.doc;
     const box = d.createElement('div');
-    // `is-stacked`: the base confirm bar is a row built for a yes/no, and this
-    // one carries a required reason field as well.
-    box.className = 'card notice-confirm is-stacked';
+    // The head / body / foot anatomy confirmDialog draws beside it (the
+    // "প্রধান অভিভাবক করুন" confirm), so the card's two confirmations look
+    // like one family. Hand-built rather than confirmDialog because the reason
+    // is required and a server refusal must land in THIS box, which
+    // confirmDialog has already removed by the time its handler runs.
+    box.className = 'notice-confirm ui-confirm gp-end';
     box.setAttribute('role', 'alertdialog');
     box.setAttribute('aria-modal', 'false');
     box.setAttribute('aria-label', `${g.nameBn}-এর সাথে সম্পর্ক শেষ করা`);
-    box.style.margin = 'var(--s-3) 0 0';
 
+    const head = d.createElement('div');
+    head.className = 'ui-dialog-head';
     const h = d.createElement('p');
-    h.className = 'notice-confirm-label';
+    h.className = 'notice-confirm-label ui-dialog-title';
     h.textContent = `${g.nameBn}-এর সাথে সম্পর্ক শেষ করবেন?`;
+    head.append(icon(d, 'alert-triangle', 'ui-dialog-glyph'), h);
 
     const what = d.createElement('p');
-    what.className = 'notice-confirm-line';
+    what.className = 'notice-confirm-line ui-dialog-text';
     // The consequences, in the order they will be noticed, and the reassurance
     // last — because the office's first fear is that they are deleting a
     // record and their second is whether the person stops getting messages.
@@ -378,15 +423,15 @@ export class GuardianPanel {
     err.hidden = true;
 
     const row = d.createElement('div');
-    row.className = 'action-row';
+    row.className = 'action-row ui-dialog-foot';
     const cancel = d.createElement('button');
     cancel.type = 'button';
-    cancel.className = 'btn-secondary btn-small';
+    cancel.className = 'btn-secondary ui-btn';
     cancel.textContent = 'বাতিল';
     cancel.addEventListener('click', () => { this.ending = null; this.render(); });
     const go = d.createElement('button');
     go.type = 'button';
-    go.className = 'btn-danger btn-small';
+    go.className = 'btn-danger ui-btn';
     go.textContent = 'সম্পর্ক শেষ করুন';
     go.addEventListener('click', () => {
       const reason = input.value.trim();
@@ -401,7 +446,10 @@ export class GuardianPanel {
     });
     row.append(cancel, go);
 
-    box.append(h, what, label, input, err, row);
+    const body = d.createElement('div');
+    body.className = 'ui-dialog-body';
+    body.append(what, label, input, err);
+    box.append(head, body, row);
     return box;
   }
 
@@ -449,7 +497,7 @@ export class GuardianPanel {
   ): HTMLElement {
     const d = this.o.doc;
     const wrap = d.createElement('div');
-    wrap.style.margin = 'var(--s-2) 0';
+    wrap.className = 'gp-toggle';
 
     const l = d.createElement('label');
     l.className = 'sms-toggle';
@@ -461,7 +509,7 @@ export class GuardianPanel {
     l.append(cb, d.createTextNode(' ' + labelBn));
 
     const why = d.createElement('p');
-    why.className = 'att-sub';
+    why.className = 'gp-meta';
     why.textContent = explainBn;
 
     wrap.append(l, why);
@@ -473,8 +521,7 @@ export class GuardianPanel {
     const wrap = d.createElement('div');
 
     const card = d.createElement('form');
-    card.className = 'card card-form';
-    card.style.margin = '0 var(--s-4) var(--s-3)';
+    card.className = 'card card-form gp-form';
 
     const h = d.createElement('p');
     h.className = 'notice-confirm-label';
@@ -482,7 +529,7 @@ export class GuardianPanel {
     card.append(h);
 
     const hint = d.createElement('p');
-    hint.className = 'att-sub';
+    hint.className = 'gp-meta';
     hint.textContent =
       'আগে খুঁজে দেখুন — একই অভিভাবক প্রতিষ্ঠানে আগে থেকেই থাকতে পারেন। ' +
       'একই ব্যক্তির দুইটি অ্যাকাউন্ট হলে প্রতিটি নোটিশের এসএমএস দুইবার যাবে।';
@@ -517,7 +564,7 @@ export class GuardianPanel {
         }));
       } else {
         const list = d.createElement('div');
-        list.className = 'system-list';
+        list.className = 'system-list gp-candidates';
         for (const c of this.candidates) {
           const row = d.createElement('button');
           row.type = 'button';
@@ -527,8 +574,10 @@ export class GuardianPanel {
           t.textContent = c.nameBn;
           const desc = d.createElement('span');
           desc.className = 'system-desc';
-          desc.textContent = (c.phone ?? '') +
-            (c.wardCount > 0 ? ` · ইতিমধ্যে ${bnNum(c.wardCount)} জন সন্তানের অভিভাবক` : '');
+          // The phone and the count in the numeral face, the words in the text
+          // face (R6) — `n` on the smallest element that holds each number.
+          append(desc, ...numText(d, (c.phone ?? '') +
+            (c.wardCount > 0 ? ` · ইতিমধ্যে ${bnNum(c.wardCount)} জন সন্তানের অভিভাবক` : '')));
           row.append(t, desc);
           row.addEventListener('click', () => wrap.append(this.detailsForm(c.id, c.nameBn)));
           list.append(row);
@@ -541,8 +590,7 @@ export class GuardianPanel {
 
     const cancel = d.createElement('button');
     cancel.type = 'button';
-    cancel.className = 'btn-ghost btn-small';
-    cancel.style.margin = '0 var(--s-4) var(--s-4)';
+    cancel.className = 'btn-ghost btn-sm gp-cancel';
     cancel.textContent = 'বাতিল';
     cancel.addEventListener('click', () => {
       this.mode = 'list'; this.candidates = []; this.searched = false; this.render();
@@ -560,8 +608,7 @@ export class GuardianPanel {
   private detailsForm(guardianId: string | null, nameOfChosen: string | null): HTMLElement {
     const d = this.o.doc;
     const form = d.createElement('form');
-    form.className = 'card card-form';
-    form.style.margin = '0 var(--s-4) var(--s-3)';
+    form.className = 'card card-form gp-form';
 
     const h = d.createElement('p');
     h.className = 'notice-confirm-label';
@@ -584,7 +631,7 @@ export class GuardianPanel {
       pf.textContent = 'মোবাইল';
       phone = d.createElement('input');
       phone.type = 'tel';
-      phone.className = 'field-input';
+      phone.className = 'field-input n';
       phone.placeholder = '01XXXXXXXXX';
       pf.append(phone);
 
@@ -620,7 +667,8 @@ export class GuardianPanel {
     const canPayFees = mk('ফি পরিশোধ করতে পারবেন', true);
 
     const err = d.createElement('p');
-    err.className = 'login-error';
+    // The sheet's field error (--danger), not the login screen's class.
+    err.className = 'ui-field-error';
     err.setAttribute('role', 'alert');
     err.hidden = true;
     form.append(err);

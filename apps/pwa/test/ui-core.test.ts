@@ -11,7 +11,7 @@ import { JSDOM } from 'jsdom';
 
 import { el, append, icon, lang, uid, resetUid } from '../src/ui/dom.ts';
 import { button, iconButton, setBusy, onClickBusy } from '../src/ui/button.ts';
-import { card, statCard, avatar, initial, tintOf } from '../src/ui/card.ts';
+import { card, statCard, statRow, avatar, initial, tintOf } from '../src/ui/card.ts';
 import { pageHeader, breadcrumb, sectionHeading } from '../src/ui/page-header.ts';
 import { badge, statusBadge, countBadge } from '../src/ui/badge.ts';
 import {
@@ -124,6 +124,30 @@ describe('P2 — buttons', () => {
     assert.equal(b.querySelector('.btn-glyph'), null);
     setBusy(b, false);
     assert.equal(b.querySelector('.btn-spinner'), null);
+    assert.ok(b.querySelector('.btn-glyph'), 'the glyph comes back');
+    assert.equal(b.firstElementChild?.className, 'btn-glyph');
+  });
+
+  test('the small size is the sheet\'s btn-sm, never the legacy btn-small', () => {
+    // `btn-small` resolves to a carried legacy rule (44px, 14px) that sits
+    // later in app.css; emitting it — alone or beside btn-sm — renders every
+    // designed small button at the legacy size.
+    const b = button(doc(), { label: 'আগে', size: 'sm' });
+    assert.match(b.className, /\bbtn-sm\b/);
+    assert.doesNotMatch(b.className, /btn-small/);
+  });
+
+  test('numbers in a label are set in the number face, the words are not', () => {
+    // R6: `n` on the smallest element holding the number. A whole-label `n`
+    // would switch the Bangla words to the numeral face.
+    const mixed = button(doc(), { label: 'বাকি ২ জনে যান' }).querySelector('.btn-label')!;
+    assert.equal(mixed.className, 'btn-label');
+    assert.equal(mixed.querySelector('.n')?.textContent, '২');
+    assert.equal(mixed.textContent, 'বাকি ২ জনে যান', 'the accessible name must not change');
+    assert.equal(button(doc(), { label: '৫' }).querySelector('.btn-label')?.className, 'btn-label n');
+    const plain = button(doc(), { label: 'সংরক্ষণ' }).querySelector('.btn-label')!;
+    assert.equal(plain.className, 'btn-label');
+    assert.equal(plain.querySelector('.n'), null);
   });
 
   test('destructive is its own variant, not a tinted primary', () => {
@@ -160,6 +184,61 @@ describe('P2 — cards', () => {
   test('a plain card is a section, and carries no button semantics', () => {
     const c = card(doc(), { title: 'সারাংশ' });
     assert.equal(c.tagName, 'SECTION');
+  });
+
+  test('the card root carries the sheet shell class and the ui-card hook', () => {
+    const c = card(doc(), { title: 'সারাংশ' });
+    assert.ok(c.classList.contains('card'), 'the stylesheet shell');
+    assert.ok(c.classList.contains('ui-card'), 'the hook tests and .ui-card-grid select');
+  });
+
+  test('a glyph without a tone, or with primary, is neutral, not accent-tinted', () => {
+    // R5 / §3: the accent never goes on an icon. An explicit 'primary' must not
+    // reach the sheet's accent glyph rules; a meaningful tone still must.
+    assert.equal(card(doc(), { title: 'x', glyph: 'user' })
+      .querySelector('.ui-card-glyph')?.hasAttribute('data-tone'), false);
+    assert.equal(card(doc(), { title: 'x', glyph: 'user', tone: 'primary' })
+      .querySelector('.ui-card-glyph')?.hasAttribute('data-tone'), false);
+    assert.equal(card(doc(), { title: 'x', glyph: 'user', tone: 'warn' })
+      .querySelector('.ui-card-glyph')?.getAttribute('data-tone'), 'warn');
+    const sp = statCard(doc(), {
+      label: 'শিক্ষার্থী', value: '৭৮৪', glyph: 'users', tone: 'primary', onClick: () => {},
+    });
+    assert.equal(sp.hasAttribute('data-tone'), false);
+    assert.equal(sp.querySelector('.ui-stat-glyph')?.hasAttribute('data-tone'), false);
+  });
+
+  test('numbers take the .n face without changing what is read', () => {
+    const c = card(doc(), { title: 'গত ৯০ দিনের হাজিরা', subtitle: '২০২৬' });
+    const t = c.querySelector('.ui-card-title')!;
+    assert.equal(t.textContent, 'গত ৯০ দিনের হাজিরা');
+    assert.equal(t.classList.contains('n'), false, 'the words stay in the text face');
+    assert.equal(t.querySelector('.n')?.textContent, '৯০');
+    assert.ok(c.querySelector('.ui-card-sub')!.classList.contains('n'));
+    // The accessible name still resolves to the full title.
+    const id = c.getAttribute('aria-labelledby')!;
+    assert.equal(c.querySelector(`#${id}`)?.textContent, 'গত ৯০ দিনের হাজিরা');
+
+    const s = statCard(doc(), { label: 'মোট', value: '২৮৬', note: 'এ মাসে ৯৪%' });
+    assert.ok(s.querySelector('.ui-stat-value')!.classList.contains('n'));
+    assert.equal(s.querySelector('.ui-stat-note .n')?.textContent, '৯৪%');
+    assert.equal(s.querySelector('.ui-stat-note')?.textContent, 'এ মাসে ৯৪%');
+  });
+
+  test('a stat row knows its count, so three stats stack rather than 1 + 2', () => {
+    const r = statRow(doc(),
+      statCard(doc(), { label: 'a', value: '১' }),
+      null,
+      statCard(doc(), { label: 'b', value: '২' }),
+      statCard(doc(), { label: 'c', value: '৩' }));
+    assert.equal(r.dataset.count, '3', 'null children are not counted');
+  });
+
+  test('a stat tone lands on the cell, so the figure can carry the meaning', () => {
+    assert.equal(statCard(doc(), { label: 'বকেয়া', value: '৳৮৬,৫০০', tone: 'danger' })
+      .dataset.tone, 'danger');
+    assert.equal(statCard(doc(), { label: 'মোট', value: '৭৮৪' })
+      .hasAttribute('data-tone'), false);
   });
 
   test('a stat reads label-then-value, whatever the eye sees first', () => {
@@ -259,6 +338,56 @@ describe('P2 — the page header', () => {
   test('a section heading is h2 by default, so the outline is title → section', () => {
     assert.equal(sectionHeading(doc(), { title: 'আজকের ক্লাস' })
       .querySelector('.ui-section-title')?.tagName, 'H2');
+  });
+
+  test('numbers sit in the .n face on the smallest element that holds them', () => {
+    // R6, in all three cases: the whole element only when it holds nothing but
+    // a number, a span.n around number runs inside words, and the old DOM when
+    // there are no digits. textContent never changes.
+    const h = pageHeader(doc(), {
+      title: 'শিক্ষাবর্ষ ২০২৬', subtitle: 'ধাপ ১ / ৪',
+      crumbs: [{ label: 'সেকশন ১', path: 'x' }, { label: '২০২৬' }],
+    });
+    const h1 = h.querySelector('h1')!;
+    assert.equal(h1.hasAttribute('class'), false, 'the title words stay in the text face');
+    assert.equal(h1.querySelectorAll('span.n').length, 1);
+    assert.equal(h1.querySelector('span.n')?.textContent, '২০২৬');
+    assert.equal(h1.textContent, 'শিক্ষাবর্ষ ২০২৬');
+
+    const sub = h.querySelector('.page-sub')!;
+    assert.equal(sub.classList.contains('n'), false);
+    assert.deepEqual([...sub.querySelectorAll('span.n')].map((n) => n.textContent), ['১', '৪']);
+    assert.equal(sub.textContent, 'ধাপ ১ / ৪');
+
+    const link = h.querySelector('a.ui-crumb-link')!;
+    assert.equal(link.classList.contains('n'), false);
+    assert.equal(link.querySelector('span.n')?.textContent, '১');
+    const current = h.querySelector('.ui-crumb-current')!;
+    assert.ok(current.classList.contains('n'));
+    assert.equal(current.childElementCount, 0);
+
+    // Only a number: `n` on the element itself.
+    assert.equal(pageHeader(doc(), { title: '২০২৬' }).querySelector('h1')?.className, 'n');
+
+    // No digits: exactly the DOM the 29 hand-built headers produce.
+    const plain = pageHeader(doc(), { title: 'ব্যবহারকারী', subtitle: 'শিক্ষক' });
+    assert.equal(plain.querySelector('h1')!.hasAttribute('class'), false);
+    assert.equal(plain.querySelector('h1')!.childElementCount, 0);
+    assert.equal(plain.querySelector('.page-sub')?.className, 'page-sub');
+
+    const dated = sectionHeading(doc(), { title: 'তারিখ ১২' }).querySelector('.ui-section-title')!;
+    assert.equal(dated.classList.contains('n'), false);
+    assert.equal(dated.querySelector('span.n')?.textContent, '১২');
+    assert.ok(sectionHeading(doc(), { title: '১০:৪৫' }).querySelector('.ui-section-title.n'));
+    assert.equal(sectionHeading(doc(), { title: 'সেবা' }).querySelector('.n'), null);
+
+    let hit = 0;
+    const trail = breadcrumb(doc(), [{ label: '২০২৬', onClick: () => { hit++; } }, { label: 'ক' }]);
+    const btn = trail.querySelector<HTMLButtonElement>('button.ui-crumb-link.n')!;
+    assert.ok(btn, 'a handler crumb that is only a number is button.ui-crumb-link.n');
+    assert.equal(btn.getAttribute('type'), 'button');
+    btn.click();
+    assert.equal(hit, 1, 'the handler survives the number-face rewrite');
   });
 });
 
@@ -401,6 +530,55 @@ describe('P2 — fields', () => {
     assert.equal((f.input as HTMLSelectElement).value, '9');
     assert.equal(f.root.querySelectorAll('option').length, 2);
   });
+
+  test('a figure field is set in the number face', () => {
+    // §2 `<input class="n is-num">`: `.n` alone loses to `.ui-input`'s font.
+    for (const kind of ['number', 'tel', 'date', 'time', 'month'] as const) {
+      const f = field(doc(), { label: 'x', name: kind, kind });
+      assert.ok(f.input.classList.contains('n'), `${kind} lacks n`);
+      assert.ok(f.input.classList.contains('is-num'), `${kind} lacks is-num`);
+    }
+    for (const kind of ['text', 'email', 'password'] as const) {
+      const f = field(doc(), { label: 'x', name: kind, kind });
+      assert.equal(f.input.classList.contains('n'), false, `${kind} has n`);
+      assert.equal(f.input.classList.contains('is-num'), false, `${kind} has is-num`);
+    }
+  });
+
+  test('an error is visible on the box, and typing takes it away', () => {
+    // is-error is the only thing that turns on the sheet's --danger box.
+    const f = field(doc(), { label: 'নাম', name: 'name' });
+    setFieldError(f.root, 'x');
+    assert.ok(f.root.classList.contains('is-error'));
+    clearFieldError(f.root);
+    assert.equal(f.root.classList.contains('is-error'), false, 'clearFieldError left it');
+
+    setFieldError(f.root, 'x');
+    assert.ok(f.root.classList.contains('is-error'));
+    f.input.dispatchEvent(new dom.window.Event('input'));
+    assert.equal(f.root.classList.contains('is-error'), false, 'typing left it');
+  });
+
+  test('numbers in label, helper and error use the number face without changing the text', () => {
+    const helper = '২–৩১ অক্ষর';
+    const f = field(doc(), { label: 'রোল ১২', name: 'roll', helper });
+    const label = f.root.querySelector('.ui-field-label > span')!;
+    assert.equal(label.textContent, 'রোল ১২');
+    assert.equal(label.classList.contains('n'), false);
+    assert.equal(label.querySelector('span.n')?.textContent, '১২');
+    const help = f.root.querySelector('.ui-field-help')!;
+    assert.equal(help.textContent, helper);
+    assert.equal(help.querySelector('span.n')?.textContent, '২–৩১');
+
+    setFieldError(f.root, '১১ সংখ্যার নম্বর দিন');
+    assert.equal(f.root.querySelector('.ui-field-error')?.textContent, '১১ সংখ্যার নম্বর দিন');
+    assert.equal(f.root.querySelector('.ui-field-error span.n')?.textContent, '১১');
+
+    const plain = field(doc(), { label: 'নাম', name: 'name' });
+    const plainLabel = plain.root.querySelector('.ui-field-label > span')!;
+    assert.equal(plainLabel.hasAttribute('class'), false);
+    assert.equal(plainLabel.childElementCount, 0);
+  });
 });
 
 describe('P2 — search', () => {
@@ -442,6 +620,16 @@ describe('P2 — search', () => {
     assert.equal(s.root.getAttribute('role'), 'search');
     assert.equal(s.root.querySelector('label')?.getAttribute('for'), s.input.id);
   });
+
+  test('the result note keeps its words and live region', () => {
+    const s = searchField(doc(), {
+      label: 'খুঁজুন', onSearch: () => {}, resultNote: '১২টি ফলাফল',
+    });
+    const note = s.root.querySelector('.ui-search-note')!;
+    assert.equal(note.getAttribute('aria-live'), 'polite');
+    assert.equal(note.textContent, '১২টি ফলাফল');
+    assert.equal(note.querySelector('span.n')?.textContent, '১২');
+  });
 });
 
 describe('P2 — file upload', () => {
@@ -466,5 +654,54 @@ describe('P2 — file upload', () => {
     });
     assert.equal(u.input.getAttribute('capture'), 'environment');
     assert.equal(u.input.hasAttribute('multiple'), true);
+  });
+
+  test('a picked file is confirmed by name in the polite live region', () => {
+    const got: File[][] = [];
+    const u = fileUpload(doc(), { label: 'CSV নির্বাচন', name: 'f', onFiles: (f) => { got.push(f); } });
+    Object.defineProperty(u.input, 'files', {
+      value: [new dom.window.File(['a'], 'students.csv')],
+    });
+    u.input.dispatchEvent(new dom.window.Event('change'));
+    assert.equal(got.length, 1);
+    assert.equal(got[0].length, 1);
+    const name = u.root.querySelector(
+      '.ui-upload-chosen[aria-live="polite"] .ui-upload-file[data-state="done"] .ui-upload-file-name');
+    assert.equal(name?.textContent, 'students.csv');
+    assert.ok(name?.classList.contains('n'));
+  });
+
+  test('an oversize file is refused by name and size, in Bangla digits, before the caller sees it', () => {
+    // The file never reaches the caller, so it never travels over 2G.
+    let called = false;
+    const u = fileUpload(doc(), {
+      label: 'ছবি', name: 'p', maxBytes: 1_000_000, onFiles: () => { called = true; },
+    });
+    Object.defineProperty(u.input, 'files', {
+      value: [new dom.window.File([new Uint8Array(3_400_000)], 'photos.zip')],
+    });
+    u.input.dispatchEvent(new dom.window.Event('change'));
+    assert.equal(called, false, 'the caller saw an oversize file');
+    assert.equal(u.input.value, '');
+    const alert = u.root.querySelector<HTMLElement>('[role="alert"]')!;
+    assert.equal(alert.hidden, false);
+    assert.ok(alert.querySelector('.ui-upload-file[data-state="error"]'));
+    assert.match(alert.textContent ?? '',
+      /photos\.zip ফাইলটি অনেক বড় \(৩\.২ MB\)। সর্বোচ্চ ১\.০ MB।/);
+    assert.equal(u.root.querySelector('.ui-upload-chosen')?.childElementCount, 0);
+
+    u.reset();
+    assert.equal(alert.hidden, true);
+    assert.equal(alert.childNodes.length, 0);
+  });
+
+  test('glyph option only changes the drawn glyph', () => {
+    const u = fileUpload(doc(), { label: 'ছবি তুলুন', name: 'p', glyph: 'camera', onFiles: () => {} });
+    const trigger = u.root.querySelector('label')!;
+    assert.equal(trigger.getAttribute('for'), u.input.id);
+    assert.ok(trigger.querySelector('.btn-glyph svg'));
+    const plain = fileUpload(doc(), { label: 'ছবি তুলুন', name: 'p', onFiles: () => {} });
+    assert.notEqual(trigger.querySelector('.btn-glyph')?.innerHTML,
+      plain.root.querySelector('label .btn-glyph')?.innerHTML, 'camera drew the default glyph');
   });
 });

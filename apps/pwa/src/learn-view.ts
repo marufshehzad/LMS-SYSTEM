@@ -1,25 +1,48 @@
 /**
  * Learn (পড়াশোনা) — the syllabus browse + topic reader.
  *
- * The first genuinely student-facing screen in the product. Two modes in
+ * The first genuinely student-facing screen in the product. Three modes in
  * one view because they share cached data and the transition between them
  * should never hit the network twice:
  *
- *   list   — chapters for the student's class, each with a progress ring
- *   reader — one topic's blocks, with progress written to the outbox
+ *   list    — one subject's chapters, each with a progress bar
+ *   topics  — one chapter's lessons
+ *   reader  — one topic's blocks, with progress written to the outbox
  *
  * Offline behaviour matches attendance: chapter lists and opened topics
  * are cached in localStorage, and reading progress is enqueued as a
  * `topic_progress` op rather than PUT directly — a student on a bus with
  * no signal still records what they read.
+ *
+ * ── Ata Ekta (03 Student §০২ learnScreen) ─────────────────────────────────
+ *
+ * The chapter list is drawn as an --inset strip holding one subject <select>
+ * over flush rows: the chapter's name with its percentage at the right, then
+ * an 8px pill bar. No ring, no card, no chevron. The select is a filter over
+ * chapters ALREADY loaded — changing it refills the list in place, fetches
+ * nothing, and never re-renders, so focus stays on the control. It starts on
+ * the subject tapped on আমার বিষয় when the route passes one (`subjectId`),
+ * else on the first subject — the grouped page it replaced showed every
+ * subject, so arriving from a subject must not land on a different one.
+ *
+ * The bar's tint is the percentage's own meaning, set on the row as
+ * `data-progress-tone` (not `data-tone`, which other rules key colour on):
+ * done → ok, past half → warn, under half → danger, not started → ink-3.
+ * The figure beside it always says the number in words' place.
+ *
+ * Topics and the reader are not drawn anywhere; they are built from the
+ * shared components — backLink, pageHeader, list/listItem, sectionHeading,
+ * the full-width flush-left primary — and every state the §7 table asks for.
  */
 import type { Auth } from './auth.ts';
-import { emptyState } from './view-states.ts';
 import { formatCount } from '../../../packages/ui-core/src/format.ts';
 import { PracticeView, type PracticeQuestion } from './practice-view.ts';
+import { cachedSubjectName } from './subjects-view.ts';
 import { refuseUnlessOk, isDenied } from './http-status.ts';
 import {
-  permissionState, permissionMessage, deniedMessage, deniedContact, pageHeader, sectionHeading, listSkeleton,
+  el, append, icon, clear, numText, field, backLink, statusBadge, list, listItem,
+  pageHeader, sectionHeading, listSkeleton, emptyState, errorState, button,
+  permissionState, deniedMessage, deniedContact, announce, focusIsLost,
 } from './ui/index.ts';
 
 export interface Chapter {
@@ -67,12 +90,34 @@ export interface LearnViewOptions {
   outbox: LearnOutbox;
   /** The student's class; in demo mode this is a sample id. */
   classId?: string;
+  /**
+   * The subject to show first — the one the student tapped on আমার বিষয়
+   * (F-802). Only the strip's starting choice: it fetches nothing and filters
+   * nothing the server sends. Absent, the first subject is shown; unknown or
+   * without chapters, the first subject is shown UNDER a notice that says so
+   * (finding 15) — never silently in its place.
+   */
+  subjectId?: string;
 }
 
 const CHAPTERS_CACHE = 'shikhon_chapters_cache';
 const TOPIC_CACHE_PREFIX = 'shikhon_topic_cache_';
 
+/**
+ * The class ui/dom.ts's focus keeper puts on a heading it lands focus on,
+ * for its light focus style. Written out rather than imported so this view
+ * does not depend on the keeper's internals; if the name ever changes, only
+ * the style is lost, never the focus.
+ */
+const FOCUS_LANDING_CLASS = 'ui-focus-landing';
+
+/** The one sentence under every "could not fetch" title (00 Foundations §04). */
+const FETCH_FAILED_DETAIL = 'ইন্টারনেট নেই বা সার্ভার সাড়া দিচ্ছে না।';
+
 type Mode = { kind: 'list' } | { kind: 'topics'; chapter: Chapter } | { kind: 'reader'; chapter: Chapter; topicId: string };
+
+/** How far through a chapter, as the meaning its bar is tinted with. */
+type ProgressTone = 'success' | 'warn' | 'danger' | 'neutral';
 
 export class LearnView {
   private readonly o: LearnViewOptions;
@@ -91,14 +136,55 @@ export class LearnView {
   /** B-84. The refusal itself, so the screen can say which kind it was. */
   private deniedErr: unknown = null;
   private loading = true;
+  /**
+   * §7 error states. Each is set only when a fetch failed AND there is
+   * nothing cached to show in its place — with a cache, the cached copy under
+   * the offline banner is the better answer. Without these three, a failed
+   * first load looked exactly like an empty syllabus.
+   */
+  private loadFailed = false;
+  private topicsFailed = false;
+  private readerFailed = false;
+  /** The subject chosen in the strip. Survives a trip into a chapter and back. */
+  private subjectId: string | null = null;
+  /**
+   * The subject asked for on arrival, held until the loaded chapters include
+   * it. The cached list can predate a subject the fresh one has, so the first
+   * paint must not spend the request; and once the student picks for
+   * themselves, their pick wins over a late fetch.
+   */
+  private wantedSubjectId: string | null;
+  /**
+   * The chapters request has answered (or failed) since this load began.
+   * Until then a cached list that lacks the wanted subject is not evidence
+   * that the subject has no chapters.
+   */
+  private chaptersSettled = false;
+  /**
+   * Finding 15. The subject asked for on arrival turned out to have no
+   * chapters here; its id while the notice over the strip stands. Cleared by
+   * the student's own pick and by opening a chapter.
+   */
+  private missingSubjectId: string | null = null;
+  /**
+   * A `data-focus-key` to move focus to once the view that holds it has
+   * loaded — the topic row a student came back from, which exists only after
+   * the chapter's topics arrive. Until then focus waits on the title.
+   */
+  private focusWhenLoaded: string | null = null;
   private readingSince = 0;
   private lastBlockSeen = 0;
   private questions: PracticeQuestion[] = [];
   private practising = false;
+  /** The practice card on screen, so focus can be put on its question. */
+  private practice: PracticeView | null = null;
+  /** "পাঠ সম্পন্ন" was pressed, or the practice set finished, for this topic. */
+  private markedDone = false;
   private textSize = LearnView.loadTextSize();
 
   constructor(options: LearnViewOptions) {
     this.o = options;
+    this.wantedSubjectId = options.subjectId || null;
     void this.loadChapters();
   }
 
@@ -143,6 +229,7 @@ export class LearnView {
   /* --------------------------------------------------------------- loads */
 
   private async loadChapters(): Promise<void> {
+    this.chaptersSettled = false;
     const cached = this.cacheGet<Chapter[]>(CHAPTERS_CACHE);
     if (cached) { this.chapters = cached; this.loading = false; }
     this.render();
@@ -156,6 +243,7 @@ export class LearnView {
       const body = (await res.json()) as { chapters: Chapter[] };
       this.chapters = body.chapters;
       this.offline = false;
+      this.loadFailed = false;
       this.cacheSet(CHAPTERS_CACHE, this.chapters);
     } catch (err) {
       if (isDenied(err)) {
@@ -164,18 +252,32 @@ export class LearnView {
         try { localStorage.removeItem(CHAPTERS_CACHE); } catch { /* private mode */ }
         // These two have no `finally { render() }`, so a bare return
         // computed the denied state and never painted it.
+        this.chaptersSettled = true;
         this.loading = false; this.render(); return;
       }
       this.offline = this.chapters.length > 0;
+      this.loadFailed = this.chapters.length === 0;
     }
+    this.chaptersSettled = true;
     this.loading = false;
     this.render();
   }
 
-  private async openChapter(chapter: Chapter): Promise<void> {
+  /** `fromTopicId`: the lesson the student is coming back from, for focus. */
+  private async openChapter(chapter: Chapter, fromTopicId?: string): Promise<void> {
     this.mode = { kind: 'topics', chapter };
     this.loading = true;
+    this.topicsFailed = false;
+    this.missingSubjectId = null;
+    // The control that opened this view is gone with the render. The shell's
+    // focus keeper lands focus on the new view's title. Back from a lesson,
+    // focus moves on from that title to the lesson's row once the rows
+    // arrive (settleFocus) — and the title is put in focus here, because the
+    // keeper would first match the reader's back link to this view's back
+    // link at the same place ("সব অধ্যায়", one more Enter from the list).
+    this.focusWhenLoaded = fromTopicId ? `learn-topic-${fromTopicId}` : null;
     this.render();
+    if (fromTopicId && focusIsLost(this.o.doc)) this.focusTitle();
     try {
       const res = await this.o.auth.authedFetch(
         `/api/v1/academics/topics?chapterId=${encodeURIComponent(chapter.id)}`,
@@ -185,8 +287,11 @@ export class LearnView {
       this.topics = body.topics;
       this.offline = false;
     } catch {
+      // Topics are never cached, so a failed fetch has nothing saved to fall
+      // back on: it is the error state, not "offline — showing saved lessons"
+      // over a false "no lessons in this chapter".
       this.topics = [];
-      this.offline = true;
+      this.topicsFailed = true;
     }
     this.loading = false;
     this.render();
@@ -195,9 +300,12 @@ export class LearnView {
   private async openTopic(chapter: Chapter, topicId: string): Promise<void> {
     this.mode = { kind: 'reader', chapter, topicId };
     this.loading = true;
+    this.readerFailed = false;
     this.readingSince = Date.now();
     this.lastBlockSeen = 0;
     this.practising = false;
+    this.markedDone = false;
+    this.focusWhenLoaded = null;
     this.questions = [];
 
     const cached = this.cacheGet<{ title: string; blocks: Block[] }>(TOPIC_CACHE_PREFIX + topicId);
@@ -215,9 +323,11 @@ export class LearnView {
       this.topicTitle = body.topic.title.bn;
       this.blocks = body.blocks;
       this.offline = false;
+      this.readerFailed = false;
       this.cacheSet(TOPIC_CACHE_PREFIX + topicId, { title: this.topicTitle, blocks: this.blocks });
     } catch {
       this.offline = this.blocks.length > 0;
+      this.readerFailed = this.blocks.length === 0;
     }
     this.loading = false;
     this.render();
@@ -274,21 +384,34 @@ export class LearnView {
   private render(): void {
     const d = this.o.doc;
     const root = this.o.root;
+    // What had focus inside the view, by the key that names it across a
+    // rebuild — only this view's own keyed controls; the shell's keeper
+    // looks after the rest.
+    const active = d.activeElement;
+    const heldKey = active && active !== root && root.contains(active)
+      ? active.getAttribute('data-focus-key') : null;
     root.textContent = '';
+    this.practice = null;
+    this.paint();
+    this.settleFocus(heldKey);
+  }
+
+  private paint(): void {
+    const d = this.o.doc;
+    const root = this.o.root;
 
     if (this.mode.kind === 'reader') { this.renderReader(); return; }
     if (this.mode.kind === 'topics') { this.renderTopics(); return; }
 
     // ---------------------------------------------------------- chapter list
-    const header = pageHeader(d, {
+    root.append(this.header({
       title: 'পড়াশোনা',
       subtitle: 'তোমার শ্রেণির অধ্যায় ও পাঠ',
-    });
-    root.append(header);
+    }));
 
-    // B-30. A refusal outranks the offline banner, the skeleton and the
-    // empty state: nothing is loading, there is nothing to show, and
-    // calling it "offline" is the lie this item exists to remove.
+    // B-30. A refusal outranks the error, the skeleton and the empty state:
+    // nothing is loading, there is nothing to show, and calling it "offline"
+    // is the lie this item exists to remove.
     if (this.denied) {
       root.append(permissionState(d, {
         message: deniedMessage(this.deniedErr, 'পড়াশোনার বিষয়বস্তু'),
@@ -297,90 +420,144 @@ export class LearnView {
       return;
     }
 
-    if (this.offline) root.append(this.offlineBanner());
-
-    if (this.loading && this.chapters.length === 0) {
-      root.append(this.msg('লোড হচ্ছে…'));
-      return;
-    }
-    if (this.chapters.length === 0) {
-      root.append(emptyState(d, {
-        glyph: 'book-open',
-        message: 'এখনো কোনো অধ্যায় যুক্ত হয়নি। শিক্ষক পাঠ যোগ করলে এখানে দেখা যাবে।',
+    if (this.loadFailed && this.chapters.length === 0) {
+      root.append(errorState(d, `অধ্যায়ের তালিকা আনা গেল না। ${FETCH_FAILED_DETAIL}`, () => {
+        this.loadFailed = false;
+        this.loading = true;
+        void this.loadChapters();
       }));
       return;
     }
 
-    // Group by subject so the syllabus reads the way a textbook shelf does.
-    const bySubject = new Map<string, Chapter[]>();
-    for (const c of this.chapters) {
-      const list = bySubject.get(c.subject.bn) ?? [];
-      list.push(c);
-      bySubject.set(c.subject.bn, list);
+    if (this.loading && this.chapters.length === 0) {
+      root.append(listSkeleton(d, 5));
+      return;
     }
 
-    for (const [subjectBn, list] of bySubject) {
-      root.append(sectionHeading(d, { title: subjectBn }));
+    if (this.chapters.length === 0) {
+      root.append(emptyState(d, {
+        glyph: 'book-open',
+        message: 'এখনো কোনো অধ্যায় যুক্ত হয়নি। শিক্ষক পাঠ যোগ করলে এখানে দেখা যাবে।',
+        // The subject list is the way into chapters (app.ts F-802), so it is
+        // where a student with an empty syllabus goes next.
+        action: { label: 'আমার বিষয় দেখো', onClick: () => { location.hash = '/subjects'; } },
+      }));
+      return;
+    }
 
-      // A grid at desktop. A syllabus is a set of choices, each with a
-      // progress ring — cards, not a table, and not one full-width strip per
-      // chapter down a 1110px page.
-      const ul = d.createElement('ul');
-      ul.className = 'chapter-list ui-card-grid';
-      for (const c of list) {
-        const li = d.createElement('li');
-        const btn = d.createElement('button');
-        btn.type = 'button';
-        btn.className = 'card chapter-card';
+    // Group by subject — by id, so two subjects that share a Bangla name stay
+    // two choices — in the order the API sent them.
+    const bySubject = new Map<string, { bn: string; chapters: Chapter[] }>();
+    for (const c of this.chapters) {
+      const group = bySubject.get(c.subject.id) ?? { bn: c.subject.bn, chapters: [] };
+      group.chapters.push(c);
+      bySubject.set(c.subject.id, group);
+    }
+    // Arriving from আমার বিষয়: start on the subject that was tapped, as soon as
+    // the chapters on hand include it.
+    const wanted = this.wantedSubjectId;
+    if (wanted !== null && bySubject.has(wanted)) {
+      this.subjectId = wanted;
+      this.wantedSubjectId = null;
+    } else if (wanted !== null && !this.chaptersSettled) {
+      // The saved list predates it, and the fresh one is still on its way.
+      // Wait in the loading state: painting the first subject meanwhile is
+      // the "tapped গণিত, got বাংলা" this screen must not show (finding 15).
+      root.append(listSkeleton(d, 5));
+      return;
+    } else if (wanted !== null) {
+      // The chapters have answered and this subject is not among them (or,
+      // offline, not among the saved ones). Show the first subject so there
+      // is still something to read — under a notice, said once aloud.
+      this.wantedSubjectId = null;
+      this.missingSubjectId = wanted;
+      announce(d, this.missingMessage(wanted));
+    }
+    if (this.subjectId === null || !bySubject.has(this.subjectId)) {
+      this.subjectId = bySubject.keys().next().value ?? null;
+    }
+
+    const wrap = el(d, 'div', { className: 'learn-list' });
+    if (this.offline) wrap.append(this.offlineBanner());
+    const notice = this.missingSubjectId !== null ? this.missingNotice(this.missingSubjectId) : null;
+    if (notice) wrap.append(notice);
+
+    // The subject's name as the level-2 heading the grouped sections used to
+    // give, kept for heading navigation; the select already shows it.
+    const heading = el(d, 'h2', { className: 'ui-sr-only' });
+    const ul = el(d, 'ul', { className: 'chapter-list' });
+    const fill = (): void => {
+      const group = bySubject.get(this.subjectId ?? '');
+      clear(heading);
+      clear(ul);
+      if (!group) return;
+      append(heading, ...numText(d, group.bn));
+      ul.setAttribute('aria-label', `${group.bn} — অধ্যায়`);
+      for (const c of group.chapters) ul.append(el(d, 'li', {}, this.chapterRow(c)));
+    };
+
+    const subject = field(d, {
+      kind: 'select',
+      name: 'subject',
+      label: 'বিষয়',
+      value: this.subjectId ?? undefined,
+      options: [...bySubject].map(([id, group]) => ({ value: id, label: group.bn })),
+      // Refill only the list: a re-render would rebuild the select and take
+      // focus away from the person still choosing. A pick of their own
+      // answers the notice, so it goes.
+      onChange: (v) => {
+        this.subjectId = v;
+        this.wantedSubjectId = null;
+        this.missingSubjectId = null;
+        notice?.remove();
+        fill();
+      },
+    });
+    // Drawn without a visible label; the word stays the select's name.
+    subject.root.querySelector('.ui-field-label')?.classList.add('ui-sr-only');
+
+    wrap.append(el(d, 'div', { className: 'learn-subject' }, subject.root), heading, ul);
+    fill();
+    root.append(wrap);
+  }
+
+  /** One chapter: name and percentage on a line, the bar under them. */
+  private chapterRow(c: Chapter): HTMLElement {
+    const d = this.o.doc;
+    const pct = c.topicCount > 0 ? Math.round((c.completedCount / c.topicCount) * 100) : 0;
+    const tone: ProgressTone = pct >= 100 ? 'success' : pct <= 0 ? 'neutral' : pct >= 50 ? 'warn' : 'danger';
+
+    const btn = el(d, 'button', {
+      className: 'chapter-card',
+      // The key brings focus back to this row from the chapter it opens.
+      data: { progressTone: tone, focusKey: `learn-chapter-${c.id}` },
+      attrs: {
+        type: 'button',
         // Bangla. This announced "…, 2 of 4 topics done" in the middle of a
         // Bangla page, to the one reader who has nothing but the announcement.
-        btn.setAttribute('aria-label',
-          `${c.name.bn} — ${c.topicCount === 0 ? 'কোনো পাঠ নেই'
-            : `${formatCount(c.topicCount, 'bn')} পাঠের মধ্যে `
-              + `${formatCount(c.completedCount, 'bn')}টি শেষ`}`);
+        'aria-label': `${c.name.bn} — ${c.topicCount === 0 ? 'কোনো পাঠ নেই'
+          : `${formatCount(c.topicCount, 'bn')} পাঠের মধ্যে `
+            + `${formatCount(c.completedCount, 'bn')}টি শেষ`}`,
+      },
+    });
 
-        const ring = d.createElement('span');
-        ring.className = 'chapter-ring';
-        const pct = c.topicCount > 0 ? Math.round((c.completedCount / c.topicCount) * 100) : 0;
-        ring.style.setProperty('--pct', String(pct));
-        ring.dataset.complete = pct === 100 ? 'true' : 'false';
-        const ringText = d.createElement('span');
-        ringText.className = 'chapter-ring-text';
-        ringText.textContent = pct === 100 ? '✓' : formatCount(pct, 'bn');
-        ring.append(ringText);
+    const head = el(d, 'span', { className: 'chapter-head' },
+      el(d, 'span', { className: 'chapter-title' }, ...numText(d, c.name.bn)));
+    if (!c.isPublished) head.append(statusBadge(d, { state: 'draft', label: 'খসড়া' }));
+    head.append(el(d, 'span', { className: 'chapter-pct n', text: `${formatCount(pct, 'bn')}%` }));
+    btn.append(head);
 
-        const body = d.createElement('span');
-        body.className = 'chapter-body';
-        const title = d.createElement('span');
-        title.className = 'chapter-title';
-        title.textContent = c.name.bn;
-        const meta = d.createElement('span');
-        meta.className = 'chapter-meta';
-        meta.textContent =
-          `${formatCount(c.completedCount, 'bn')}/${formatCount(c.topicCount, 'bn')} পাঠ · ` +
-          `${formatCount(c.estMinutes, 'bn')} মিনিট`;
-        body.append(title, meta);
-
-        if (c.prerequisite) {
-          const pre = d.createElement('span');
-          pre.className = 'chapter-pre';
-          pre.textContent = `আগে পড়ো: ${c.prerequisite.nameBn}`;
-          body.append(pre);
-        }
-        if (!c.isPublished) {
-          const draft = d.createElement('span');
-          draft.className = 'chapter-draft';
-          draft.textContent = 'খসড়া';
-          body.append(draft);
-        }
-
-        btn.append(ring, body);
-        btn.addEventListener('click', () => { void this.openChapter(c); });
-        li.append(btn);
-        ul.append(li);
-      }
-      root.append(ul);
+    if (c.prerequisite) {
+      btn.append(el(d, 'span', { className: 'chapter-pre' },
+        ...numText(d, `আগে পড়ো: ${c.prerequisite.nameBn}`)));
     }
+
+    // The label already says how far; the bar is the same fact drawn.
+    btn.append(el(d, 'span', { className: 'ui-progress-track', attrs: { 'aria-hidden': 'true' } },
+      el(d, 'span', { className: 'ui-progress-fill', style: { width: `${pct}%` } })));
+
+    btn.addEventListener('click', () => { void this.openChapter(c); });
+    return btn;
   }
 
   private renderTopics(): void {
@@ -388,56 +565,63 @@ export class LearnView {
     const d = this.o.doc;
     const root = this.o.root;
     const chapter = this.mode.chapter;
+    const back = (): void => {
+      this.mode = { kind: 'list' };
+      this.focusWhenLoaded = null;
+      this.render();
+      // Back to the row that opened this chapter, the way a browser's back
+      // returns a reader to where they left; the list's title if that row is
+      // not on screen.
+      this.land(`learn-chapter-${chapter.id}`);
+    };
 
-    root.append(this.backBar('সব অধ্যায়', () => { this.mode = { kind: 'list' }; this.render(); }));
+    root.append(backLink(d, 'সব অধ্যায়', back));
 
-    root.append(pageHeader(d, {
+    root.append(this.header({
       title: chapter.name.bn,
       subtitle: chapter.summaryBn || undefined,
     }));
 
-    if (this.offline) root.append(this.offlineBanner());
-    if (this.loading) { root.append(listSkeleton(d, 4)); return; }
-    if (this.topics.length === 0) {
-      root.append(emptyState(d, {
-        glyph: 'book-open', message: 'এই অধ্যায়ে এখনো পাঠ যুক্ত হয়নি।',
+    if (this.topicsFailed) {
+      root.append(errorState(d, `পাঠের তালিকা আনা গেল না। ${FETCH_FAILED_DETAIL}`, () => {
+        void this.openChapter(chapter);
       }));
       return;
     }
 
-    const ul = d.createElement('ul');
-    ul.className = 'topic-list';
-    for (const l of this.topics) {
-      const li = d.createElement('li');
-      const btn = d.createElement('button');
-      btn.type = 'button';
-      btn.className = 'card topic-card';
-      btn.dataset.state = l.progress?.state ?? 'new';
-
-      const mark = d.createElement('span');
-      mark.className = 'topic-mark';
-      mark.setAttribute('aria-hidden', 'true');
-      mark.textContent = l.progress?.state === 'completed' ? '✓'
-        : l.progress?.state === 'started' ? '◐' : '○';
-
-      const body = d.createElement('span');
-      body.className = 'topic-body';
-      const title = d.createElement('span');
-      title.className = 'topic-title';
-      title.textContent = l.title.bn;
-      const meta = d.createElement('span');
-      meta.className = 'topic-meta';
-      meta.textContent = l.progress?.state === 'completed'
-        ? `সম্পন্ন · ${formatCount(l.estMinutes, 'bn')} মিনিট`
-        : `${formatCount(l.estMinutes, 'bn')} মিনিট`;
-      body.append(title, meta);
-
-      btn.append(mark, body);
-      btn.addEventListener('click', () => { void this.openTopic(chapter, l.id); });
-      li.append(btn);
-      ul.append(li);
+    if (this.offline) root.append(this.offlineBanner(true));
+    if (this.loading) { root.append(listSkeleton(d, 4)); return; }
+    if (this.topics.length === 0) {
+      root.append(emptyState(d, {
+        glyph: 'book-open',
+        message: 'এই অধ্যায়ে এখনো পাঠ যুক্ত হয়নি।',
+        action: { label: 'সব অধ্যায়', onClick: back },
+      }));
+      return;
     }
-    root.append(ul);
+
+    root.append(list(d, `${chapter.name.bn} — পাঠ`,
+      ...this.topics.map((t) => this.topicRow(chapter, t))));
+  }
+
+  /** One lesson, as a list row. The state glyph is decoration; the words carry it. */
+  private topicRow(chapter: Chapter, t: Topic): HTMLElement {
+    const d = this.o.doc;
+    const state = t.progress?.state ?? 'new';
+    const minutes = `${formatCount(t.estMinutes, 'bn')} মিনিট`;
+    const li = listItem(d, {
+      title: t.title.bn,
+      meta: state === 'completed' ? `সম্পন্ন · ${minutes}` : minutes,
+      glyph: state === 'completed' ? 'check-circle' : state === 'started' ? 'clock' : 'book-open',
+      onClick: () => { void this.openTopic(chapter, t.id); },
+    });
+    const hit = li.querySelector<HTMLElement>('.ui-list-hit');
+    if (hit) {
+      hit.classList.add('topic-card');
+      hit.dataset.state = state;
+      hit.dataset.focusKey = `learn-topic-${t.id}`;
+    }
+    return li;
   }
 
   private renderReader(): void {
@@ -446,14 +630,23 @@ export class LearnView {
     const root = this.o.root;
     const { chapter, topicId } = this.mode;
 
-    root.append(this.backBar(chapter.name.bn, () => {
+    root.append(backLink(d, chapter.name.bn, () => {
       void this.recordProgress(topicId, 'started');
-      void this.openChapter(chapter);
+      void this.openChapter(chapter, topicId);
     }));
 
-    root.append(pageHeader(d, { title: this.topicTitle || 'পাঠ' }));
+    root.append(this.header({ title: this.topicTitle || 'পাঠ' }));
 
-    if (this.offline) root.append(this.offlineBanner());
+    // Before the tools and the done button: a lesson that never arrived has
+    // no text to resize and nothing to mark as read.
+    if (this.readerFailed && this.blocks.length === 0) {
+      root.append(errorState(d, `পাঠটি আনা গেল না। ${FETCH_FAILED_DETAIL}`, () => {
+        void this.openTopic(chapter, topicId);
+      }));
+      return;
+    }
+
+    if (this.offline) root.append(this.offlineBanner(true));
     if (this.loading && this.blocks.length === 0) { root.append(listSkeleton(d, 4)); return; }
 
     // Was 'topic-reader', but the stylesheet only ever styled '.lesson-reader'
@@ -499,16 +692,11 @@ export class LearnView {
     root.append(article);
 
     if (this.practising && this.questions.length > 0) {
-      const practiceWrap = d.createElement('section');
-      practiceWrap.className = 'prac-wrap';
-      const h2 = d.createElement('h2');
-      h2.className = 'section-heading';
-      h2.textContent = 'অনুশীলন';
-      practiceWrap.append(h2);
-      const host = d.createElement('div');
-      practiceWrap.append(host);
+      const host = el(d, 'div');
+      const practiceWrap = el(d, 'section', { className: 'prac-wrap' },
+        sectionHeading(d, { title: 'অনুশীলন' }), host);
       root.append(practiceWrap);
-      new PracticeView({
+      this.practice = new PracticeView({
         root: host,
         doc: d,
         questions: this.questions,
@@ -517,122 +705,209 @@ export class LearnView {
           // Finishing the practice set is a far better completion signal
           // than a self-declared button, so it marks the topic done.
           void this.recordProgress(topicId, 'completed');
+          this.markedDone = true;
           this.practising = false;
           this.render();
+          // "শেষ করো" went with the card. Back to the button the practice was
+          // started from, which now stands where the card stood.
+          this.land('learn-practice');
         },
       });
       practiceWrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
       return;
     }
 
+    // One primary on the page: practice when there is any, else "done".
+    // Full width and flush left (14 Components §08). The label is ONE span:
+    // btn-block spreads its children, and a bare "(৩টি" would be pushed apart.
     if (this.questions.length > 0) {
-      const start = d.createElement('button');
-      start.type = 'button';
-      start.className = 'btn-primary topic-done';
-      start.textContent = `অনুশীলন করো (${formatCount(this.questions.length, 'bn')}টি প্রশ্ন)`;
-      start.addEventListener('click', () => { this.practising = true; this.render(); });
+      const start = el(d, 'button', {
+        className: 'btn-primary btn-block topic-done', attrs: { type: 'button' },
+      }, el(d, 'span', { className: 'btn-label' },
+        ...numText(d, `অনুশীলন করো (${formatCount(this.questions.length, 'bn')}টি প্রশ্ন)`)));
+      start.dataset.focusKey = 'learn-practice';
+      start.addEventListener('click', () => {
+        this.practising = true;
+        this.render();
+        // The button is gone; the first question is where the work starts.
+        // No scroll of its own: the section is already scrolling into view.
+        if (focusIsLost(d)) this.practice?.focusQuestion(false);
+      });
       root.append(start);
     }
 
-    const done = d.createElement('button');
-    done.type = 'button';
-    done.className = this.questions.length > 0 ? 'btn-secondary topic-done-alt' : 'btn-primary topic-done';
-    done.textContent = 'পাঠ সম্পন্ন ✓';
+    const doneLabel = el(d, 'span', { className: 'btn-label' });
+    const done = el(d, 'button', {
+      className: this.questions.length > 0
+        ? 'btn-secondary btn-block topic-done-alt'
+        : 'btn-primary btn-block topic-done',
+      attrs: { type: 'button' },
+      data: { focusKey: 'learn-done' },
+    }, doneLabel, icon(d, 'check', 'btn-glyph'));
+    // Finding 12(b). Done is marked with aria-disabled, never `disabled`: a
+    // button disabled under the finger is blurred by the browser, so pressing
+    // "পাঠ সম্পন্ন" dropped the student's focus to <body>. aria-disabled keeps
+    // focus on it and is still announced as unavailable; the handler ignores
+    // a second press, so it is still one op. Kept in `markedDone`, so a
+    // re-render (practice questions arriving late) does not offer it again.
+    const showDone = (): void => {
+      doneLabel.textContent = this.markedDone ? 'সম্পন্ন হয়েছে' : 'পাঠ সম্পন্ন';
+      if (this.markedDone) done.setAttribute('aria-disabled', 'true');
+    };
+    showDone();
     done.addEventListener('click', () => {
+      if (this.markedDone) return;
+      this.markedDone = true;
       void this.recordProgress(topicId, 'completed');
-      done.textContent = 'সম্পন্ন হয়েছে ✓';
-      done.disabled = true;
+      showDone();
+      // The focused button's name changed; not every screen reader says so.
+      announce(d, 'পাঠটি সম্পন্ন হিসেবে রাখা হলো');
     });
     root.append(done);
   }
 
   private renderBlock(b: Block): HTMLElement {
     const d = this.o.doc;
+    const body = b.bodyBn ?? '';
     switch (b.kind) {
-      case 'key_point': {
-        const el = d.createElement('aside');
-        el.className = 'block-key-point';
-        el.textContent = b.bodyBn ?? '';
-        return el;
-      }
-      case 'formula': {
-        const el = d.createElement('div');
-        el.className = 'block-formula';
-        el.textContent = b.bodyBn ?? '';
-        return el;
-      }
-      case 'example': {
-        const el = d.createElement('div');
-        el.className = 'block-example';
-        const label = d.createElement('span');
-        label.className = 'block-label';
-        label.textContent = 'উদাহরণ';
-        const body = d.createElement('p');
-        body.textContent = b.bodyBn ?? '';
-        el.append(label, body);
-        return el;
-      }
-      case 'practice_prompt': {
-        const el = d.createElement('div');
-        el.className = 'block-practice';
-        const label = d.createElement('span');
-        label.className = 'block-label';
-        label.textContent = 'নিজে করো';
-        const body = d.createElement('p');
-        body.textContent = b.bodyBn ?? '';
-        el.append(label, body);
-        return el;
-      }
+      case 'key_point':
+        return el(d, 'aside', { className: 'block-key-point' }, ...numText(d, body));
+      case 'formula':
+        // A formula is a figure: the whole block takes the numeral face.
+        return el(d, 'div', { className: 'block-formula n', text: body });
+      case 'example':
+        return el(d, 'div', { className: 'block-example' },
+          el(d, 'span', { className: 'block-label label', text: 'উদাহরণ' }),
+          el(d, 'p', {}, ...numText(d, body)));
+      case 'practice_prompt':
+        return el(d, 'div', { className: 'block-practice' },
+          el(d, 'span', { className: 'block-label label', text: 'নিজে করো' }),
+          el(d, 'p', {}, ...numText(d, body)));
       case 'image': {
-        const fig = d.createElement('figure');
-        fig.className = 'block-figure';
-        const img = d.createElement('img');
-        img.src = `/media/${b.mediaKey ?? ''}`;
-        img.alt = b.altTextBn ?? '';
-        img.loading = 'lazy';
-        fig.append(img);
-        if (b.captionBn) {
-          const cap = d.createElement('figcaption');
-          cap.textContent = b.captionBn;
-          fig.append(cap);
-        }
+        const fig = el(d, 'figure', { className: 'block-figure' },
+          el(d, 'img', {
+            attrs: { src: `/media/${b.mediaKey ?? ''}`, alt: b.altTextBn ?? '', loading: 'lazy' },
+          }));
+        if (b.captionBn) fig.append(el(d, 'figcaption', {}, ...numText(d, b.captionBn)));
         return fig;
       }
-      default: {
-        const el = d.createElement('p');
-        el.className = 'block-text';
-        el.textContent = b.bodyBn ?? '';
-        return el;
-      }
+      default:
+        return el(d, 'p', { className: 'block-text' }, ...numText(d, body));
     }
+  }
+
+  /* --------------------------------------------------------------- focus */
+
+  /**
+   * The page header, its title keyed. Opening a chapter or a lesson removes
+   * the control that did it, and the shell's keeper (ui/dom.ts) lands focus
+   * on the new view's `<h1>` — the key is how settleFocus recognises focus
+   * waiting there. Not made focusable here: the keeper does that, with its
+   * own light focus style, for as long as the title holds focus.
+   */
+  private header(o: { title: string; subtitle?: string }): HTMLElement {
+    const head = pageHeader(this.o.doc, o);
+    head.querySelector('h1')?.setAttribute('data-focus-key', 'learn-title');
+    return head;
+  }
+
+  /**
+   * Focus this view's title the way the keeper lands on one: focusable and
+   * marked with the keeper's landing class (its light focus style, rather
+   * than the accent ring round the whole title row) only while it holds
+   * focus. For the one case the keeper would land somewhere worse first.
+   */
+  private focusTitle(): void {
+    const h1 = this.findKey('learn-title');
+    if (!h1) return;
+    const tidy: Array<() => void> = [];
+    if (!h1.hasAttribute('tabindex')) {
+      h1.setAttribute('tabindex', '-1');
+      tidy.push(() => h1.removeAttribute('tabindex'));
+    }
+    if (!h1.classList.contains(FOCUS_LANDING_CLASS)) {
+      h1.classList.add(FOCUS_LANDING_CLASS);
+      tidy.push(() => h1.classList.remove(FOCUS_LANDING_CLASS));
+    }
+    h1.addEventListener('blur', () => { for (const t of tidy) t(); }, { once: true });
+    h1.focus({ preventScroll: true });
+  }
+
+  private findKey(key: string): HTMLElement | null {
+    for (const node of this.o.root.querySelectorAll<HTMLElement>('[data-focus-key]')) {
+      if (node.dataset.focusKey === key) return node;
+    }
+    return null;
+  }
+
+  /**
+   * After a change of view the student asked for, when a better place than
+   * the title exists (back to the chapter row that was opened, back to
+   * "অনুশীলন করো" after practice): the control they used has gone, so focus
+   * goes to `key`. Synchronous, so the keeper — which runs a microtask later
+   * and lands on a heading only when focus is still lost — leaves it there.
+   * Only when focus was lost: a person who has already moved on stays put.
+   * Not on screen, nothing happens here and the keeper lands on the title.
+   */
+  private land(key: string): void {
+    if (!focusIsLost(this.o.doc)) return;
+    this.findKey(key)?.focus();
+  }
+
+  /**
+   * After every rebuild. Focus waiting on this view's title (where the keeper
+   * landed it while the view loaded) moves on to the place `focusWhenLoaded`
+   * names once the view has loaded and that place exists. Anything else that
+   * had focus is the keeper's to restore.
+   */
+  private settleFocus(heldKey: string | null): void {
+    const pending = this.loading ? null : this.focusWhenLoaded;
+    if (!this.loading) this.focusWhenLoaded = null;
+    if (heldKey !== 'learn-title' || pending === null || !focusIsLost(this.o.doc)) return;
+    this.findKey(pending)?.focus();
   }
 
   /* --------------------------------------------------------------- bits */
 
-  private backBar(label: string, onBack: () => void): HTMLElement {
+  /** Finding 15, in words: which subject, and what the student can do. */
+  private missingMessage(subjectId: string): string {
+    const name = cachedSubjectName(subjectId);
+    if (this.offline) {
+      return `${name ? `${name} বিষয়ের` : 'এই বিষয়ের'} অধ্যায় এই যন্ত্রে সংরক্ষিত নেই। `
+        + 'ইন্টারনেট এলে আবার খোলো, বা নিচে অন্য বিষয় বেছে নাও।';
+    }
+    return `${name ? `${name} বিষয়ে` : 'এই বিষয়ে'} এখনো কোনো অধ্যায় যুক্ত হয়নি। `
+      + 'নিচে অন্য বিষয় বেছে নাও।';
+  }
+
+  /**
+   * The --info-tint strip over the subject select: the subject asked for has
+   * no chapters, so what is shown below is the first subject. Its action goes
+   * back to আমার বিষয়, as the empty syllabus's does.
+   */
+  private missingNotice(subjectId: string): HTMLElement {
     const d = this.o.doc;
-    const bar = d.createElement('div');
-    bar.className = 'back-bar';
-    const btn = d.createElement('button');
-    btn.type = 'button';
-    btn.className = 'btn-ghost back-btn';
-    btn.textContent = `← ${label}`;
-    btn.addEventListener('click', onBack);
-    bar.append(btn);
-    return bar;
+    return el(d, 'div', { className: 'learn-missing', data: { subjectId } },
+      icon(d, 'info'),
+      el(d, 'p', { className: 'learn-missing-text' }, ...numText(d, this.missingMessage(subjectId))),
+      button(d, {
+        label: 'আমার বিষয় দেখো',
+        variant: 'ghost',
+        size: 'sm',
+        className: 'learn-missing-action',
+        onClick: () => { location.hash = '/subjects'; },
+      }));
   }
 
-  private offlineBanner(): HTMLElement {
-    const p = this.o.doc.createElement('p');
-    p.className = 'inline-notice';
-    p.textContent = 'অফলাইন — সংরক্ষিত পাঠ দেখানো হচ্ছে';
-    return p;
-  }
-
-  private msg(text: string): HTMLElement {
-    const p = this.o.doc.createElement('p');
-    p.className = 'page-sub empty';
-    p.textContent = text;
-    return p;
+  /**
+   * The --warn-tint strip (00 Foundations §04). In the chapter list it is the
+   * list shell's first row and runs edge to edge; above topics and the reader
+   * it stands alone, so it takes its own edge (`learn-offline`).
+   */
+  private offlineBanner(standalone = false): HTMLElement {
+    const d = this.o.doc;
+    return el(d, 'p', { className: standalone ? 'offline-banner learn-offline' : 'offline-banner' },
+      icon(d, 'wifi-off', 'offline-icon'),
+      el(d, 'span', { text: 'অফলাইন — সংরক্ষিত পাঠ দেখানো হচ্ছে' }));
   }
 }

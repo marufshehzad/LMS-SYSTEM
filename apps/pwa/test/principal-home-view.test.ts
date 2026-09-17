@@ -108,16 +108,19 @@ describe('P5 — the principal dashboard', () => {
 
   test('answers "what needs attention" first, and only the non-zero rows', () => {
     const sections = [...root().querySelectorAll('section')];
-    assert.match(sections[0].textContent ?? '', /যা নজর দেওয়া দরকার/,
+    assert.match(sections[0].textContent ?? '', /এখনই দেখা দরকার/,
       'the queue leads — it is the only block with this person’s name on it');
+    // Ata Ekta: one sentence per open item — the sentence is the decision.
     // 0 students-without-section must not appear as a row.
-    assert.match(text(), /২ শ্রেণি শিক্ষক নেই/);
-    assert.match(text(), /৩ বিষয় শিক্ষক নেই/);
-    assert.match(text(), /১ ফলাফল প্রকাশ বাকি/);
-    assert.doesNotMatch(text(), /০ সেকশনে নেই/, 'a zero is not a task');
+    assert.match(text(), /২টি সেকশনে শ্রেণি শিক্ষক নির্ধারণ করা হয়নি/);
+    assert.match(text(), /৩টি বিষয়ে শিক্ষক নির্ধারণ করা হয়নি/);
+    assert.match(text(), /১টি পরীক্ষার ফলাফল প্রকাশের অপেক্ষায়/);
+    assert.doesNotMatch(text(), /০ জন শিক্ষার্থী কোনো সেকশনে নেই/, 'a zero is not a task');
   });
 
   test('an empty queue is one calm line, not four zeroes', async () => {
+    // FULL still has 22 of 26 registers: attendance is not a queue item, so it
+    // must not keep the calm line away.
     await mount({ ...FULL, pending: {
       sectionsWithoutClassTeacher: 0, subjectsWithoutTeacher: 0,
       examsAwaitingPublication: 0, studentsWithoutSection: 0,
@@ -127,21 +130,58 @@ describe('P5 — the principal dashboard', () => {
     // calm line itself ("কোথাও কিছু বাকি নেই") and in the fee card's
     // "২১২টি ইনভয়েস বাকি"; what must not exist is a queue ROW.
     const queue = [...root().querySelectorAll('section')]
-      .find((x) => x.textContent?.includes('যা নজর দেওয়া দরকার'));
+      .find((x) => x.textContent?.includes('এখনই দেখা দরকার'));
     assert.ok(queue);
     assert.equal(queue.querySelectorAll('.ui-list-item').length, 0,
       'nothing is outstanding, so there is no row saying so');
+    // The all-clear vouches only for what the queue checks.
+    assert.doesNotMatch(queue.textContent ?? '', /হাজিরা/,
+      'the queue does not check registers, so its all-clear must not claim them');
   });
 
   test('"nobody has taken attendance yet" is not 0%', async () => {
     await mount({ ...FULL, attendanceToday: {
       present: 0, marked: 0, percent: null, sessionsTaken: 0, sectionsExpected: 26,
-    } });
+    }, absentToday: { total: 0, shown: [] } });
     assert.match(text(), /এখনো নেওয়া হয়নি/);
+    const attCell = [...root().querySelectorAll('.ui-stat')]
+      .find((c) => c.querySelector('.ui-stat-label')?.textContent === 'আজ উপস্থিত');
+    assert.match(attCell?.querySelector('.ui-stat-note')?.textContent ?? '', /^এখনো নেওয়া হয়নি/,
+      'the strip itself says it');
     assert.doesNotMatch(text(), /০%/,
       '0% at 8:05 puts a head teacher on the phone to a teacher who did nothing wrong');
-    // The denominator is still worth saying: 0 of 26 sections taken.
-    assert.match(text(), /০ \/ ২৬ সেকশন/);
+    // The denominator is still worth saying: 0 of 26 sections taken. (\s: the
+    // spaces are no-break, so the fraction never splits across a line.)
+    assert.match(text(), /০\s\/\s২৬\sসেকশন/);
+    // …as a fact, not as an alarm: at 8:05 (or on a Friday) open registers are
+    // not something that "needs attention now".
+    assert.doesNotMatch(text(), /সেকশনের হাজিরা এখনো নেওয়া হয়নি/);
+    assert.equal(root().querySelectorAll('.ph-attention .ui-list-item').length, 3,
+      'only the pending queue makes rows');
+    // …and "০ absent" before anyone has marked a register is the same lie.
+    const absentCell = [...root().querySelectorAll('.ui-stat')]
+      .find((c) => c.querySelector('.ui-stat-label')?.textContent === 'আজ অনুপস্থিত');
+    assert.equal(absentCell?.querySelector('.ui-stat-value')?.textContent, '—');
+    assert.match(text(), /হাজিরা নেওয়া শুরু হলে অনুপস্থিত শিক্ষার্থীদের নাম এখানে আসবে/,
+      'the absentee panel says why it is empty, rather than "nobody is absent"');
+    assert.doesNotMatch(text(), /আজ কোনো শিক্ষার্থী অনুপস্থিত নেই/);
+  });
+
+  test('the register count is a neutral note under the figure, never a queue row', async () => {
+    const attCell = [...root().querySelectorAll('.ui-stat')]
+      .find((c) => c.querySelector('.ui-stat-label')?.textContent === 'আজ উপস্থিত');
+    assert.equal(attCell?.querySelector('.ui-stat-note')?.textContent, '২২\u00a0/\u00a0২৬\u00a0সেকশন',
+      'no-break spaces: the fraction never splits across a line');
+    // A period-wise school has one session per period: 30 sessions from 5
+    // sections is "more than 26", and must not read as an all-clear for
+    // attendance either.
+    await mount({ ...FULL, attendanceToday: {
+      present: 150, marked: 160, percent: 94, sessionsTaken: 30, sectionsExpected: 26,
+    }, pending: {
+      sectionsWithoutClassTeacher: 0, subjectsWithoutTeacher: 0,
+      examsAwaitingPublication: 0, studentsWithoutSection: 0,
+    } });
+    assert.doesNotMatch(root().querySelector('.ph-calm')?.textContent ?? '', /হাজিরা/);
   });
 
   test('the fee block is ABSENT for a role the server does not send it to', async () => {
@@ -151,7 +191,7 @@ describe('P5 — the principal dashboard', () => {
     // Nothing hidden: no element carrying the numbers exists at all.
     assert.equal(root().querySelectorAll('[hidden]').length, 0);
     // …and the rest of the screen is unaffected.
-    assert.match(text(), /আজকের উপস্থিতি/);
+    assert.match(text(), /আজ উপস্থিত/);
   });
 
   test('money uses the endpoint’s own field names', () => {
@@ -193,7 +233,10 @@ describe('P5 — the principal dashboard', () => {
       .flatMap((tr) => [...tr.children].map((c) => c.textContent ?? ''));
     assert.ok(cells.includes('7'), `a roll is Latin: ${cells.join('|')}`);
     assert.match(text(), /রোল/, 'and the column says what it is');
-    assert.match(text(), /৭৮ জন/, 'a count is Bangla');
+    const absentCell = [...root().querySelectorAll('.ui-stat')]
+      .find((c) => c.querySelector('.ui-stat-label')?.textContent === 'আজ অনুপস্থিত');
+    assert.equal(absentCell?.querySelector('.ui-stat-value')?.textContent, '৭৮',
+      'a count is Bangla');
   });
 
   test('no charts, and no platform or subscription wording', () => {
@@ -223,8 +266,10 @@ describe('P5 — the principal dashboard', () => {
   test('every stat card is a route somewhere useful', async () => {
     const seen: string[] = [];
     await mount(FULL, 200, (p) => seen.push(p));
+    // Ata Ekta: the strip is শিক্ষার্থী · আজ উপস্থিত · আজ অনুপস্থিত · বকেয়া.
+    // The three that have a screen behind them are buttons.
     const cards = [...root().querySelectorAll('button.ui-stat')] as HTMLElement[];
-    assert.ok(cards.length >= 5);
+    assert.ok(cards.length >= 3);
     for (const c of cards) c.click();
     assert.ok(seen.includes('students'));
     assert.ok(seen.includes('academic'));
@@ -237,5 +282,61 @@ describe('P5 — the principal dashboard', () => {
       assert.doesNotMatch(s, /undefined|null|[0-9a-f]{8}-[0-9a-f]{4}-/);
     }
     assert.doesNotMatch(text(), /undefined|\[object/);
+  });
+
+  test("Ata Ekta header: one h1, today's date as a figure, one primary", () => {
+    const r = root();
+    const h1s = r.querySelectorAll('h1');
+    assert.equal(h1s.length, 1, 'exactly one page heading');
+    assert.equal(h1s[0].textContent, 'আজকের অবস্থা');
+    const date = r.querySelector('.page-header time.ph-date');
+    assert.ok(date, 'the date sits in the header');
+    assert.equal(date.textContent, '১ সেপ্টেম্বর ২০২৬');
+    assert.equal(date.getAttribute('datetime'), '2026-09-01');
+    assert.ok(date.classList.contains('n'), 'the date is set in the numeral face');
+    // R5: the accent is on one button only.
+    const primaries = [...r.querySelectorAll('.btn-primary')];
+    assert.equal(primaries.length, 1);
+    assert.equal(primaries[0].textContent, 'নোটিশ পাঠান');
+  });
+
+  test('the primary goes to the composer', async () => {
+    const seen: string[] = [];
+    await mount(FULL, 200, (p) => seen.push(p));
+    (root().querySelector('.page-header .btn-primary') as HTMLElement).click();
+    assert.deepEqual(seen, ['compose']);
+  });
+
+  test('a refused principal is not offered "নোটিশ পাঠান"', async () => {
+    await mount({}, 403);
+    assert.equal(root().querySelectorAll('h1').length, 1);
+    assert.equal(root().querySelectorAll('.btn-primary').length, 0);
+  });
+
+  test('the attention rows keep their way to the screen that closes them', async () => {
+    const seen: string[] = [];
+    await mount(FULL, 200, (p) => seen.push(p));
+    const queue = root().querySelector('.ph-attention') as HTMLElement;
+    assert.ok(queue);
+    const rows = [...queue.querySelectorAll('.ui-list-item')];
+    // 2 class teachers, 3 subject teachers, 1 result. The 4 open registers are
+    // the attendance note, not a row.
+    assert.equal(rows.length, 3);
+    for (const b of queue.querySelectorAll('button.ui-list-hit')) (b as HTMLElement).click();
+    assert.deepEqual(seen, ['academic', 'academic', 'publish']);
+  });
+
+  test("loading is the page's own shape in shimmer, never a spinner", () => {
+    root().textContent = '';
+    new PrincipalHomeView({
+      root: root(), doc: dom.window.document,
+      auth: { authedFetch: () => new Promise(() => {}) } as never,
+      go: () => {}, now: AT_NOON,
+    });
+    const busy = root().querySelector('[aria-busy="true"]');
+    assert.ok(busy, 'the loading region is announced as busy');
+    assert.ok(busy.querySelectorAll('.skel').length > 0);
+    assert.equal(root().querySelectorAll('.ui-spinner').length, 0);
+    assert.equal(root().querySelectorAll('h1').length, 1, 'the header is there while it loads');
   });
 });

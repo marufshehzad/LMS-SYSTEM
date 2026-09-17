@@ -22,9 +22,22 @@
  * form does not draw a checkbox for a column that is not there. A disabled
  * field for a value nothing stores is worse than its absence: it tells the
  * office they set something.
+ *
+ * ── The look (Ata Ekta, 14 Components §09) ─────────────────────────────
+ * One column on the card: the title, the fields label-over-control, then the
+ * validation panel, then two small buttons side by side — বাতিল, and the
+ * primary last. The same shape at both widths; the year and class forms are
+ * the section form's structure with their own fields.
+ *
+ * The message sits AFTER the fields, directly above the buttons, because that
+ * is where the eye is when "তৈরি করুন" did nothing. It keeps role=alert, so
+ * where it sits on screen changes nothing a screen reader hears.
  */
 import { emptyState, successNote, bnNum } from './view-states.ts';
-import { levelNameBn } from '../../../packages/ui-core/src/format.ts';
+import { levelNameBn, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
+import {
+  append, clear, icon, numText, hasDigit, button, buttonRow,
+} from './ui/index.ts';
 
 export interface StructureOptions {
   defaultStream: string;
@@ -72,8 +85,9 @@ const SHIFT_BN: Record<string, string> = {
 export function structureForm(o: StructureFormOptions): HTMLElement {
   const d = o.doc;
   const form = d.createElement('form');
-  form.className = 'card card-form';
-  form.style.margin = '0 var(--s-4) var(--s-3)';
+  // No inline side margin: the form lines up with the page header and the
+  // tree below it, as drawn. Its spacing lives in app.css.
+  form.className = 'card card-form structure-form';
 
   const title = d.createElement('p');
   title.className = 'notice-confirm-label';
@@ -82,17 +96,28 @@ export function structureForm(o: StructureFormOptions): HTMLElement {
     : 'নতুন সেকশন';
   form.append(title);
 
+  // Built here, appended just above the buttons (see the header note).
   const err = d.createElement('p');
-  err.className = 'login-error';
+  err.className = 'structure-form-error';
   err.setAttribute('role', 'alert');
   err.hidden = true;
-  form.append(err);
 
-  const field = (labelBn: string, el: HTMLElement): void => {
+  const field = (labelBn: string, control: HTMLElement): void => {
     const l = d.createElement('label');
     l.className = 'field';
     l.textContent = labelBn;
-    l.append(el);
+    if (control.tagName === 'SELECT') {
+      // The drawn chevron. The wrapper sits INSIDE the label, so the label
+      // still names the select and its text is still the label's first child;
+      // the glyph is aria-hidden and lets the pointer through, so a tap on it
+      // opens the select like a tap anywhere else on the control.
+      const wrap = d.createElement('span');
+      wrap.className = 'structure-select';
+      wrap.append(control, icon(d, 'chevron-down', 'structure-select-glyph'));
+      l.append(wrap);
+    } else {
+      l.append(control);
+    }
     form.append(l);
   };
 
@@ -114,6 +139,10 @@ export function structureForm(o: StructureFormOptions): HTMLElement {
       if (it.selected) opt.selected = true;
       s.append(opt);
     }
+    // R6. An <option> cannot hold a span, so the control carries the numeral
+    // face when any of its choices has a figure in it ("২০২৬ (চলতি)",
+    // "৯ — নবম শ্রেণি").
+    if (items.some((it) => hasDigit(it.label))) s.classList.add('n');
     return s;
   };
 
@@ -124,6 +153,8 @@ export function structureForm(o: StructureFormOptions): HTMLElement {
     label.placeholder = '২০২৭';
     const startsOn = input('date');
     const endsOn = input('date');
+    // The year's name and both dates are figures (R6).
+    for (const figure of [label, startsOn, endsOn]) figure.classList.add('n');
     const current = d.createElement('input');
     current.type = 'checkbox';
     current.checked = o.options.years.length === 0;
@@ -131,15 +162,14 @@ export function structureForm(o: StructureFormOptions): HTMLElement {
     field('শিক্ষাবর্ষের নাম', label);
     field('শুরু', startsOn);
     field('শেষ', endsOn);
+    // The whole row is the tap target, the box beside the words (app.css).
     const cl = d.createElement('label');
-    cl.className = 'field';
-    cl.style.flexDirection = 'row';
-    cl.style.alignItems = 'center';
-    cl.append(current, d.createTextNode(' চলতি শিক্ষাবর্ষ হিসেবে নির্ধারণ করুন'));
+    cl.className = 'structure-form-check';
+    cl.append(current, d.createTextNode('চলতি শিক্ষাবর্ষ হিসেবে নির্ধারণ করুন'));
     form.append(cl);
 
     const note = d.createElement('p');
-    note.className = 'att-sub';
+    note.className = 'structure-form-note';
     note.textContent = 'চলতি বছর একটিই থাকে — নতুনটি চলতি করলে আগেরটি স্বয়ংক্রিয়ভাবে সরে যাবে।';
     form.append(note);
 
@@ -184,7 +214,7 @@ export function structureForm(o: StructureFormOptions): HTMLElement {
     field('ধারা', stream);
 
     const note = d.createElement('p');
-    note.className = 'att-sub';
+    note.className = 'structure-form-note';
     // Say why there is no year field, rather than leaving the office looking
     // for one.
     note.textContent =
@@ -200,33 +230,31 @@ export function structureForm(o: StructureFormOptions): HTMLElement {
       };
     };
   } else {
+    // Empty: what is missing, what to do about it, and the way out as the
+    // state's own button (Foundations §04) rather than a bar under the card.
     if (o.options.years.length === 0) {
       form.append(emptyState(d, {
+        glyph: 'calendar',
         message: 'সেকশন তৈরির আগে একটি শিক্ষাবর্ষ দরকার।',
+        detail: 'এটি বন্ধ করে আগে শিক্ষাবর্ষ তৈরি করুন, তারপর সেকশন যোগ করুন।',
+        action: { label: 'বন্ধ করুন', onClick: o.onCancel },
       }));
-      const back = d.createElement('button');
-      back.type = 'button';
-      back.className = 'btn-secondary';
-      back.textContent = 'বন্ধ করুন';
-      back.addEventListener('click', o.onCancel);
-      form.append(back);
       return form;
     }
     if (o.options.classes.length === 0) {
       form.append(emptyState(d, {
+        glyph: 'layers',
         message: 'সেকশন তৈরির আগে একটি শ্রেণি দরকার।',
+        detail: 'এটি বন্ধ করে আগে শ্রেণি তৈরি করুন, তারপর সেকশন যোগ করুন।',
+        action: { label: 'বন্ধ করুন', onClick: o.onCancel },
       }));
-      const back = d.createElement('button');
-      back.type = 'button';
-      back.className = 'btn-secondary';
-      back.textContent = 'বন্ধ করুন';
-      back.addEventListener('click', o.onCancel);
-      form.append(back);
       return form;
     }
 
     const year = select(o.options.years.map((y) => ({
-      value: y.id, label: y.label + (y.isCurrent ? ' (চলতি)' : ''), selected: y.isCurrent,
+      value: y.id,
+      label: formatAcademicYear(y.label) + (y.isCurrent ? ' (চলতি)' : ''),
+      selected: y.isCurrent,
     })));
     const klass = select(o.options.classes.map((c) => ({
       value: c.id,
@@ -241,6 +269,7 @@ export function structureForm(o: StructureFormOptions): HTMLElement {
     const capacity = input('number', '60');
     capacity.min = '1';
     capacity.max = '300';
+    capacity.classList.add('n');
 
     field('শিক্ষাবর্ষ', year);
     field('শ্রেণি ও বিভাগ', klass);
@@ -262,24 +291,26 @@ export function structureForm(o: StructureFormOptions): HTMLElement {
   }
 
   function show(message: string): void {
-    err.textContent = message;
+    // "ধারণক্ষমতা ১ থেকে ৩০০-এর মধ্যে দিন": the figures in the numeral face,
+    // the words left in the text face. textContent is the message exactly.
+    clear(err);
+    append(err, ...numText(d, message));
     err.hidden = false;
   }
 
-  const row = d.createElement('div');
-  row.className = 'action-row';
-  const cancel = d.createElement('button');
-  cancel.type = 'button';
-  cancel.className = 'btn-secondary';
-  cancel.textContent = 'বাতিল';
-  cancel.addEventListener('click', o.onCancel);
-  const save = d.createElement('button');
-  save.type = 'submit';
-  save.className = 'btn-primary';
-  save.disabled = o.busy;
-  save.textContent = o.busy ? 'তৈরি হচ্ছে…' : 'তৈরি করুন';
-  row.append(cancel, save);
-  form.append(row);
+  // Small, side by side, primary last (§09). `button()` gives the intrinsic
+  // width and an explicit type; the save is the form's real submit control,
+  // so Enter in a field still creates. While creating it reads
+  // "তৈরি হচ্ছে…" and is busy — disabled and aria-busy — so it cannot be
+  // pressed twice.
+  const cancel = button(d, {
+    label: 'বাতিল', variant: 'secondary', size: 'sm', onClick: o.onCancel,
+  });
+  const save = button(d, {
+    label: o.busy ? 'তৈরি হচ্ছে…' : 'তৈরি করুন',
+    variant: 'primary', size: 'sm', type: 'submit', busy: o.busy,
+  });
+  form.append(err, buttonRow(d, cancel, save));
 
   form.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -295,8 +326,9 @@ export function structureForm(o: StructureFormOptions): HTMLElement {
 export function createdNote(doc: Document, body: {
   kind?: string; label?: string; nameBn?: string; name?: string; classNameBn?: string;
 }): HTMLElement {
-  const what = body.kind === 'year' ? `শিক্ষাবর্ষ ${body.label} তৈরি হয়েছে।`
+  const what = body.kind === 'year' ? `শিক্ষাবর্ষ ${formatAcademicYear(body.label)} তৈরি হয়েছে।`
     : body.kind === 'class' ? `${body.nameBn} তৈরি হয়েছে — এবার এর সেকশন তৈরি করুন।`
     : `${body.classNameBn ?? ''} সেকশন ${body.name} তৈরি হয়েছে।`;
+  // successNote sets the year's figures in the numeral face itself (R6).
   return successNote(doc, what);
 }

@@ -313,7 +313,7 @@ describe('P5 — settings is grouped, and says who may change it', () => {
       root: root(), doc: dom.window.document, canManage: true, auth: auth('it_admin', SETTINGS),
     } as never);
     await settle();
-    assert.match(text(), /বার্তা ও খরচ/);
+    assert.match(text(), /নোটিশ ও এসএমএস/);
     assert.match(text(), /অন্যান্য সেটিংস/);
     // Named, never re-implemented: a second place to change one row is how
     // two places end up disagreeing.
@@ -343,7 +343,9 @@ describe('P5 — settings is grouped, and says who may change it', () => {
     } as never);
     await settle();
     assert.match(text(), /অনুমতি/);
-    assert.doesNotMatch(text(), /সর্বোচ্চ অক্ষর/, 'no form under a refusal');
+    // The field's own label ("এসএমএসের সর্বোচ্চ দৈর্ঘ্য"): it renders on a 200,
+    // so its absence here really means no form was drawn.
+    assert.doesNotMatch(text(), /সর্বোচ্চ দৈর্ঘ্য/, 'no form under a refusal');
     assert.doesNotMatch(text(), /৪৮০/, 'and none of the school’s numbers');
   });
 });
@@ -378,35 +380,67 @@ describe('P5 — system health speaks in states a person reads', () => {
     assert.equal(root().querySelectorAll('.ui-facts-val').length, 4);
   });
 
-  test('a desktop gets a table', async () => {
+  test('every service is a tile that says its state in words', async () => {
     root().textContent = '';
     new SystemView({ root: root(), doc: dom.window.document, auth: auth('it_admin', {}) } as never);
     await settle();
-    const heads = [...root().querySelectorAll('thead th')].map((h) => h.textContent);
-    assert.deepEqual(heads, ['সেবা', 'কী করে', 'অবস্থা', 'কারিগরি অবস্থান']);
+    // 08 Admin & IT §05 draws a two-column tile grid in place of the old
+    // 4-column table. Every service is still listed, and each one still
+    // carries all four things the columns used to: its name, what it does,
+    // its state AS A WORD beside the colour dot, and where it lives.
+    const tiles = [...root().querySelectorAll('.sys-grid > li.sys-tile')];
+    assert.equal(tiles.length, 12);
+    assert.equal(root().querySelectorAll('table').length, 0);
+    for (const t of tiles) {
+      assert.ok(t.querySelector('.sys-dot[data-tone][aria-hidden="true"]'));
+      assert.ok(t.querySelector('.sys-tile-title')?.textContent);
+      // "<state word> · <what it does>" — colour never carries meaning alone.
+      assert.match(t.querySelector('.sys-tile-detail')?.textContent ?? '',
+                   /^(চালু আছে|সবসময় চালু|ইচ্ছাকৃতভাবে বন্ধ|যাচাই করা যায়নি).* · .+/);
+      assert.ok(t.querySelector('.sys-tile-path')?.textContent);
+    }
+    // The old <caption>'s job: the collection still names itself.
+    assert.equal(root().querySelector('.sys-grid')?.getAttribute('aria-label'),
+                 'সেবা ও ইন্টিগ্রেশনের অবস্থা');
+    // The probes never answer here, so nothing may claim they did.
+    assert.doesNotMatch(text(), /সব স্বাভাবিক/,
+                        'no all-clear over rows that were never probed');
   });
 });
 
 // ═══════════════════════════════════════════════════════════════════════
 describe('P5 — the academic hierarchy is a table at every depth', () => {
-  const TREE = { '/academics/hierarchy': { status: 200, body: {
-    years: [{ id: 'y-1', label: '২০২৬', isCurrent: true }],
-    year: { id: 'y-1', label: '২০২৬' },
-    classes: [{
-      levelNo: 9, nameBn: 'নবম শ্রেণি', nameEn: 'Class 9',
-      sectionCount: 2, studentCount: 80,
-      groups: [{
-        classId: 'c-1', group: 'science', groupBn: 'বিজ্ঞান',
+  // The stub matches with `url.includes(k)` in insertion order, so the
+  // section route must come BEFORE the tree route it also contains. A section
+  // row opens the section itself (one request); without this entry the stub
+  // would answer `?sectionId=` with the tree body.
+  const TREE = {
+    '/academics/hierarchy?sectionId': { status: 200, body: {
+      section: { id: 's-1', name: 'A', shift: 'day', capacity: 40, studentCount: 40,
+                 classId: 'c-1', levelNo: 9, classNameBn: 'নবম শ্রেণি', groupBn: 'বিজ্ঞান',
+                 yearId: 'y-1', yearLabel: '২০২৬' },
+      classTeacher: { id: 't-1', nameBn: 'রহিম স্যার', since: null },
+      subjectTeachers: [], unassignedSubjects: [], roster: [], history: [],
+    } },
+    '/academics/hierarchy': { status: 200, body: {
+      years: [{ id: 'y-1', label: '২০২৬', isCurrent: true }],
+      year: { id: 'y-1', label: '২০২৬' },
+      classes: [{
+        levelNo: 9, nameBn: 'নবম শ্রেণি', nameEn: 'Class 9',
         sectionCount: 2, studentCount: 80,
-        sections: [
-          { id: 's-1', name: 'A', shift: 'day', capacity: 40, studentCount: 40,
-            classTeacher: { id: 't-1', nameBn: 'রহিম স্যার' }, subjectTeacherCount: 5 },
-          { id: 's-2', name: 'B', shift: 'day', capacity: 40, studentCount: 40,
-            classTeacher: null, subjectTeacherCount: 3 },
-        ],
+        groups: [{
+          classId: 'c-1', group: 'science', groupBn: 'বিজ্ঞান',
+          sectionCount: 2, studentCount: 80,
+          sections: [
+            { id: 's-1', name: 'A', shift: 'day', capacity: 40, studentCount: 40,
+              classTeacher: { id: 't-1', nameBn: 'রহিম স্যার' }, subjectTeacherCount: 5 },
+            { id: 's-2', name: 'B', shift: 'day', capacity: 40, studentCount: 40,
+              classTeacher: null, subjectTeacherCount: 3 },
+          ],
+        }],
       }],
-    }],
-  } } };
+    } },
+  };
 
   beforeEach(async () => {
     root().textContent = '';
@@ -417,23 +451,32 @@ describe('P5 — the academic hierarchy is a table at every depth', () => {
     await settle();
   });
 
-  test('the class list is a table with the counts as columns', () => {
-    const heads = [...root().querySelectorAll('thead th')].map((h) => h.textContent);
-    assert.deepEqual(heads.slice(0, 4), ['শ্রেণি', 'বিভাগ', 'সেকশন', 'শিক্ষার্থী']);
-    assert.ok(root().querySelector('.ui-list'), 'and a list for a phone');
+  test('the class tree carries the counts at every level', () => {
+    // 05 Principal §02 replaces the class table with a tree whose rows carry
+    // the counts, and 13 Responsive ০৪ gives the phone the same tree with the
+    // row actions behind one dot. Every level still states its sections and
+    // students, and the totals are shown.
+    const meta = (key: string) =>
+      root().querySelector(`.ac-node[data-node="${key}"] > .ac-row .ac-node-meta`)?.textContent;
+    assert.equal(meta('L:9'), '১ বিভাগ · ২ সেকশন · ৮০ জন');
+    assert.equal(meta('G:c-1'), '২ সেকশন · ৮০ জন');
+    assert.equal(root().querySelector('.ac-tree-foot')?.textContent,
+                 'মোট ১ শ্রেণি · ১ বিভাগ · ২ সেকশন · ৮০ শিক্ষার্থী');
+    assert.ok(root().querySelector('.ac-node-more'), 'and the phone shape: the actions behind one dot');
   });
 
-  test('a section with no class teacher is a STATE, not a clause', async () => {
-    (root().querySelector('table.ui-table tbody .ui-row-open') as HTMLElement | null)?.click();
-    await settle();
-    const heads = [...root().querySelectorAll('thead th')].map((h) => h.textContent);
-    assert.ok(heads.includes('অবস্থা'));
-    assert.match(text(), /শিক্ষক নেই/);
-    assert.match(text(), /সম্পূর্ণ/);
+  test('a section with no class teacher is a STATE, not a clause', () => {
+    // A status component on THAT section's row — not a sentence somewhere on
+    // the page, and not on the staffed section beside it.
+    const b = root().querySelector('.ac-node[data-node="S:s-2"]');
+    assert.equal(b?.querySelector('.ui-status')?.textContent, 'শিক্ষক নেই');
+    const a = root().querySelector('.ac-node[data-node="S:s-1"]');
+    assert.equal(a?.querySelector('.ui-status'), null, 'a staffed section carries no state');
+    assert.match(a?.textContent ?? '', /রহিম স্যার/);
   });
 
   test('drilling in gives a crumb that goes back', async () => {
-    (root().querySelector('table.ui-table tbody .ui-row-open') as HTMLElement | null)?.click();
+    (root().querySelector('.ac-node[data-depth="2"] .ac-node-hit') as HTMLElement | null)?.click();
     await settle();
     const crumbs = [...root().querySelectorAll('.ui-crumb-link')];
     assert.ok(crumbs.length >= 1, 'a real control, not a sentence');
@@ -446,8 +489,10 @@ describe('P5 — the academic hierarchy is a table at every depth', () => {
 
   test('no uuid reaches the screen at any depth', async () => {
     assert.doesNotMatch(text(), /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/);
-    (root().querySelector('table.ui-table tbody .ui-row-open') as HTMLElement | null)?.click();
+    (root().querySelector('.ac-node[data-depth="2"] .ac-node-hit') as HTMLElement | null)?.click();
     await settle();
+    assert.equal(root().querySelector('h1')?.textContent, 'সেকশন A',
+      'the click must actually reach the section, or "any depth" checks only the tree');
     assert.doesNotMatch(text(), /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/);
   });
 

@@ -22,7 +22,15 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { route, PRECACHE, CACHE_SHELL, APP_SHELL_URL, isAppPath } from '../src/sw-router.ts';
-import { buildManifest } from '../../../services/ops-svc/api/manifest.ts';
+// From `src/manifest-build.ts`, NOT from `api/manifest.ts`, and the
+// distinction is the whole reason that file exists. The API module also
+// exports the request handler, which reaches `resolvePublicTenant` →
+// `server-core/src/db.ts` → `pg`; an ES import loads the graph, so this
+// browser-surface test used to need a Postgres driver installed to check a
+// pure function. It is installed at the repo root and NOT in the `frontend`
+// CI job, which runs `cd apps/pwa && npm install` — so this suite passed on
+// every developer machine and failed on every push from 2026-08-31.
+import { buildManifest } from '../../../services/ops-svc/src/manifest-build.ts';
 import { parseBranding, DEFAULT_BRANDING } from '../../../packages/ui-core/src/branding.ts';
 
 // fileURLToPath, not URL.pathname: this repo's path contains spaces, which
@@ -220,6 +228,73 @@ describe('an installed PWA opens the application', () => {
  * `/api/v1/ops/users` and friends: "management reads precede mutations — a
  * stale one is acted on".
  */
+/**
+ * P11. An export is an artifact, not reference data.
+ *
+ * `/api/v1/academics/export` matches the reference-data rule on its prefix
+ * alone, so without an explicit carve-out it lands in CACHE_DATA — a
+ * school's entire student roster, as a file, persisting in the browser
+ * cache of whatever office machine the clerk used. B-104's tenant-keying
+ * would keep it away from the NEXT school; it would not stop it being
+ * there. The failure is silent, because a cached export returns 200 with
+ * the right bytes and looks exactly like a working one.
+ */
+/**
+ * B-120. A session list and a revoke are never served from a cache.
+ *
+ * They fall to the `unclassified` network-only default today rather than to
+ * a rule of their own, which is the right answer and an accident away from
+ * a wrong one: anything later matching `/api/v1/auth/` would silently make a
+ * security screen stale, and a stale session list is one that still shows a
+ * device the person has already ended.
+ */
+describe('B-120 — session management is never cached', () => {
+  const get = (url: string) => route({ url, method: 'GET' });
+
+  test('THE ONE THAT MATTERS — the session list is network-only', () => {
+    const d = get('https://x.test/api/v1/auth/sessions?deviceId=abc');
+    assert.equal(d.strategy, 'network-only');
+    assert.equal(d.cache, undefined, 'a session list was given a cache bucket');
+  });
+
+  test('and so is every auth route beside it', () => {
+    for (const p of ['/api/v1/auth/refresh', '/api/v1/auth/logout',
+                     '/api/v1/auth/sessions/revoke',
+                     '/api/v1/auth/sessions/revoke-others']) {
+      assert.equal(get(`https://x.test${p}`).strategy, 'network-only', p);
+    }
+  });
+});
+
+describe('P11 — exports are never cached', () => {
+  const get = (url: string) => route({ url, method: 'GET' });
+
+  test('THE ONE THAT MATTERS — an export is network-only, not stale-while-revalidate', () => {
+    const d = get('https://x.test/api/v1/academics/export?dataset=students');
+    assert.equal(d.strategy, 'network-only');
+    assert.equal(d.cache, undefined, 'an export was given a cache bucket');
+  });
+
+  test('the sibling reference read it would otherwise match is still cached', () => {
+    // Proves the carve-out is the export and not the whole prefix — without
+    // this, deleting the rule and breaking `/academics/` entirely would
+    // still pass the test above.
+    const d = get('https://x.test/api/v1/academics/hierarchy');
+    assert.equal(d.strategy, 'stale-while-revalidate');
+  });
+
+  test('every service that will own an export gets the same answer', () => {
+    // §30 adds ops-svc and finance-svc exports next. The rule is written on
+    // the path segment rather than per service so they arrive protected.
+    for (const url of [
+      'https://x.test/api/v1/ops/export?dataset=notices',
+      'https://x.test/api/v1/finance/export?dataset=fees',
+    ]) {
+      assert.equal(get(url).strategy, 'network-only', url);
+    }
+  });
+});
+
 describe('authoring registers are network-only', () => {
   const get = (url: string) => route({ url, method: 'GET' });
 

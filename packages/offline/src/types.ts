@@ -142,6 +142,33 @@ export interface SyncEngineOptions {
   onProgress?: (state: SyncState) => void;
 }
 
+/** How one `SyncEngine.flush()` call should behave. Every field is optional. */
+export interface FlushOptions {
+  /**
+   * A person asked for this send ("আবার পাঠান"), so it happens now: this
+   * session's pending ops are sent whether their backoff has elapsed or not.
+   *
+   * Backoff exists to spread the MACHINE's retries — the 30 s timer, the
+   * reconnect, Background Sync — so a school's phones do not hammer a flaky
+   * tower in lockstep. A tap is not that. Without this a tap during the wait
+   * sent nothing and said nothing, and the teacher learned the button was dead.
+   *
+   * What it does not change:
+   *  - only `pending` ops of this session's owner (B-8); `failed` and
+   *    `conflict` ops still need `retry()`;
+   *  - a failed attempt still counts and still backs off: the automatic
+   *    retries after it wait exactly as they would after any other failure;
+   *  - within one flush an op is attempted at most once, however full the
+   *    batch.
+   * One thing differs on purpose: a person's attempt never uses up the retry
+   * budget. A teacher tapping retry on a bad link would otherwise park her own
+   * register as `failed` in a dozen taps, where only `retry()` reaches it.
+   *
+   * Automatic callers leave this unset; their behaviour is unchanged.
+   */
+  ignoreBackoff?: boolean;
+}
+
 export interface SyncState {
   pending: number;
   inflight: number;

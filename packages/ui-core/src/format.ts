@@ -52,6 +52,35 @@ export function formatIdentifier(n: number | string): string {
 }
 
 /**
+ * An academic year, as it is READ rather than as it is stored.  (P12-1)
+ *
+ * The other side of `formatIdentifier` above. A year is not an identifier
+ * nobody cross-checks it against a bank slip or a paper register; it is read
+ * aloud inside a Bangla sentence, beside a Bangla date:
+ *
+ *   বৃহস্পতিবার, ১০ সেপ্টেম্বর · শিক্ষাবর্ষ ২০২৬
+ *
+ * The P12 audit found `শিক্ষাবর্ষ 2026` on four surfaces — home, academic
+ * structure, import and exams — with a correctly-Bangla date beside it, so the
+ * mismatch sat inside a single line. The cause was not carelessness at any one
+ * screen: the label is a DATABASE value, and every screen interpolated it raw.
+ * `import-view.ts` passed the step number through a numeral helper on the same
+ * line while leaving the year alone.
+ *
+ * That is why this lives here rather than being fixed five times. It is also
+ * why `bangla-numerals.test.ts` could not catch it: that guard reads source
+ * literals, and these digits never appear in source.
+ *
+ * **Idempotent on purpose.** `academic_years.label` is free text and the
+ * database already contains both `2026` and `২০২৬`; `toBanglaDigits` only
+ * rewrites ASCII digits, so a label that is already Bangla passes through
+ * untouched, and a label like `2026-27` keeps its separator.
+ */
+export function formatAcademicYear(label: string | number | null | undefined): string {
+  return label === null || label === undefined ? '' : toBanglaDigits(String(label));
+}
+
+/**
  * The one money formatter in the product.  (R-8 audit — "money formatting",
  * carried open since R-5, decided here.)
  *

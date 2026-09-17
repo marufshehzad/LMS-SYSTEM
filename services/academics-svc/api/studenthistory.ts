@@ -45,7 +45,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { sharedDb } from '../../../packages/server-core/src/db.ts';
 import { corsHeaders, query, json, HttpError } from '../../../packages/server-core/src/http.ts';
-import { authenticate } from '../../../packages/server-core/src/auth.ts';
+import { authenticate, CONTACT_ROLES } from '../../../packages/server-core/src/auth.ts';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -57,15 +57,14 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const MAY_SEE_FEES = ['principal', 'school_owner', 'accountant', 'guardian', 'student'];
 
 /**
- * Contact details are shown to the people who administer the child and to the
- * family itself. R-3 settled this for the guardian panel — a phone number is
- * not something every staff member gets because they can open a drawer — and
- * the same line is drawn here, on the server.
+ * Contact details are shown to the people who administer the child and to
+ * the family itself. R-3 settled this for the guardian panel — a phone
+ * number is not something every staff member gets because they can open a
+ * drawer — and B-56 made it one shared list rather than three: this used to
+ * be a local copy, and `/academics/roster` had no copy at all.
  */
-const MAY_SEE_CONTACT = [
-  'principal', 'school_owner', 'academic_coordinator', 'it_admin', 'class_teacher',
-  'accountant', 'guardian', 'student',
-];
+const MAY_SEE_CONTACT = CONTACT_ROLES;
+
 
 /**
  * Which R-5 documents this viewer may print for this child.

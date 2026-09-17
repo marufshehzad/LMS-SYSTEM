@@ -111,6 +111,84 @@ const PATHS: Record<string, string> = {
   // means "open a menu that is not there", and this sidebar never leaves.
   'panel-left':
     '<rect x="3" y="4" width="18" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/>',
+  // P11. The export action. Added rather than borrowed: no existing glyph
+  // here means "this produces a file you keep", and the fallback dot on the
+  // one button of a new screen is the button looking broken.
+  'download':
+    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+    + '<polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
+
+  // Ata Ekta (14 Components). The glyphs the redesign's shared components
+  // draw: the state cards (inbox / alert-circle / check-circle), the toasts
+  // (+ info), the file rows of an upload (file-text, check) and the icon-only
+  // delete button (trash-2). Same Feather geometry and stroke as the rest.
+  inbox:
+    '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/>'
+    + '<path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+  'alert-circle':
+    '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>',
+  'check-circle':
+    '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>',
+  info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
+  check: '<polyline points="20 6 9 17 4 12"/>',
+  'file-text':
+    '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'
+    + '<line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>',
+  // Wave 2D. list: the MCQ tile of the teacher's AI helper (02 Teacher §07).
+  // layout-dashboard, building-2: the platform console's nav (10 Platform).
+  list:
+    '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>'
+    + '<line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>',
+  'layout-dashboard':
+    '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/>'
+    + '<rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
+  'building-2':
+    '<path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/>'
+    + '<path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/>',
+  // Wave 2C. plus / minus: the academic tree's add action and section leaf,
+  // and a not-allowed cell in the roles matrix (08 Admin & IT). git-branch:
+  // the বিভাগ rows. more-vertical: the phone row menu (13 Responsive ০৪).
+  plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+  minus: '<line x1="5" y1="12" x2="19" y2="12"/>',
+  'git-branch':
+    '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>'
+    + '<path d="M18 9a9 9 0 0 1-9 9"/>',
+  'more-vertical':
+    '<circle cx="12" cy="5" r="1.6" fill="currentColor" stroke="none"/>'
+    + '<circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>'
+    + '<circle cx="12" cy="19" r="1.6" fill="currentColor" stroke="none"/>',
+  // Wave 2B. chevron-left: the calendar's month arrows (04 Guardian §05).
+  // save: the marks sheet's offline note (02 Teacher §04). credit-card,
+  // receipt, printer: the document cells (04 §05, 05 Principal §07).
+  // trending-down: the results strip when a GPA fell (03 Student §04).
+  'chevron-left': '<polyline points="15 18 9 12 15 6"/>',
+  save:
+    '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>'
+    + '<polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>',
+  'credit-card': '<rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/>',
+  receipt:
+    '<path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1z"/>'
+    + '<line x1="8" y1="8" x2="16" y2="8"/><line x1="8" y1="12" x2="16" y2="12"/><line x1="8" y1="16" x2="13" y2="16"/>',
+  printer:
+    '<polyline points="6 9 6 2 18 2 18 9"/>'
+    + '<path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/>'
+    + '<rect x="6" y="14" width="12" height="8"/>',
+  'trending-down': '<polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/>',
+  // 01 Shell §ঙ, the device rows of the security screen.
+  smartphone: '<rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/>',
+  tablet: '<rect x="4" y="2" width="16" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/>',
+  monitor:
+    '<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/>'
+    + '<line x1="12" y1="17" x2="12" y2="21"/>',
+  // 08 Admin & IT, rollover checklist rows: promote, repeat a year, archive.
+  'arrow-up': '<line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>',
+  'rotate-ccw': '<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>',
+  archive:
+    '<polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/>'
+    + '<line x1="10" y1="12" x2="14" y2="12"/>',
+  'trash-2':
+    '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>'
+    + '<line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>',
 };
 
 /** A stable fallback so an unknown name renders a neutral dot, never blank. */

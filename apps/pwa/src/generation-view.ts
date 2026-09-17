@@ -1,23 +1,27 @@
 /**
- * Routine generation result — F-503, F-505, wireframe §8.2
+ * Routine generation result — F-503, F-505, wireframe §8.2, 06 Routine §04
  *
- *   ✓ কঠিন শর্ত লঙ্ঘন: ০
- *   নরম শর্ত ছাড় দেওয়া হয়েছে: ৭
- *   যা ছাড় দিতে হয়েছে
- *   • রফিক ইসলাম — সাপ্তাহিক ২৬ পিরিয়ড (লক্ষ্য ২৪) — যোগ্য গণিত শিক্ষক কম
- *   [ কেন এই বরাদ্দ? ]  স্লট বেছে নিন
- *   [ গ্রহণ করুন ] [ পুনরায় তৈরি ] [ বাতিল ]
+ *   রুটিন ফলাফল                                         [তৈরি সম্পন্ন]
+ *   ┌ সাজানো হয়েছে ┬ ফাঁকা রয়ে গেছে ┬ সংঘর্ষ ┬ সময় লেগেছে ┐
+ *   │  ৪১৪ / ৪২০   │       ৬        │   ০    │   ৫২ সে    │
+ *   ৬টি পিরিয়ড বসানো যায়নি
+ *   ▌ "chemistry_lab" কক্ষে ১২টি পিরিয়ড দরকার; ১টি কক্ষে ৮টি খালি
+ *   যা ছাড় দিতে হয়েছে · ৭টি
+ *   রফিক ইসলাম — সাপ্তাহিক ২৬ পিরিয়ড     যোগ্য গণিত শিক্ষক কম
+ *   যা যাচাই করা হয়নি · কেন এই বরাদ্দ? [ স্লট বেছে নিন ]
+ *   [ আবার চালান ] [ বাতিল ]                          [ গ্রহণ করুন ]
  *
  * The screen where a coordinator decides whether to accept a machine's
  * timetable for 1,200 children. Three things it must not do.
  *
- * It must not bury the trade-offs. §8.2 puts the soft-constraint count in
- * the header, beside the hard count, and the list immediately under it —
- * before the accept button, not behind a disclosure. "Nothing is silently
- * accepted" is a layout requirement as much as a data one.
+ * It must not bury the trade-offs. The stats band says how much was placed,
+ * how much was not, and how many conflicts remain; the soft-constraint count
+ * heads its own list immediately under it — before the accept button, not
+ * behind a disclosure. "Nothing is silently accepted" is a layout requirement
+ * as much as a data one.
  *
  * It must not show a clean report that isn't. When rules could not be
- * evaluated the screen says which, because "০ লঙ্ঘন" otherwise means
+ * evaluated the screen says which, because "০ সংঘর্ষ" otherwise means
  * "০ of the rules I happen to check" and reads as a guarantee.
  *
  * It must not explain a slot until asked. §8.2 makes the explanation a
@@ -26,9 +30,13 @@
  */
 import type { Auth } from './auth.ts';
 import { errorState } from './view-states.ts';
-import { formatCount, formatTime } from '../../../packages/ui-core/src/format.ts';
+import { formatCount } from '../../../packages/ui-core/src/format.ts';
 import { pageHeader } from './ui/page-header.ts';
-import { serverMessage, statRow, statCard, listSkeleton,} from './ui/index.ts';
+import {
+  el, numText, hasDigit, serverMessage, statRow, statCard, listSkeleton, button,
+  statusBadge, emptyState, permissionState, deniedMessage, deniedContact, humanError,
+} from './ui/index.ts';
+import { refuseUnlessOk, isDenied } from './http-status.ts';
 
 const bn = (n: number): string => formatCount(n, 'bn');
 
@@ -71,7 +79,11 @@ export interface CapabilityShortage {
 }
 
 interface Report {
-  routine: { id: string; nameBn: string; status: string; objectiveScore: number | null };
+  routine: {
+    id: string; nameBn: string; status: string; objectiveScore: number | null;
+    /** How long the solver ran. The API has always sent it; null for a hand-made routine. */
+    solverSeconds?: number | null;
+  };
   hardViolations: number;
   soft: SoftViolation[];
   unplaced: Array<{ missing: number; reason: string }>;
@@ -85,7 +97,7 @@ export interface GenerationViewOptions {
   doc: Document;
   auth: Auth;
   routineId: string;
-  /** Re-runs the solver. §8.2's [ পুনরায় তৈরি ]. */
+  /** Re-runs the solver. 06 Routine §04's [ আবার চালান ]. */
   onRegenerate?: (routineId: string) => void;
 }
 
@@ -94,15 +106,27 @@ const SOFT_SHOWN = 8;
 
 export class GenerationView {
   private readonly o: GenerationViewOptions;
+  /**
+   * The one child this view puts in the shell. Every re-render replaces what
+   * is INSIDE it, so the shell's entrance motion (`.shell-view > *`) plays
+   * once when the screen opens — not again on every slot pick, "আরও দেখুন"
+   * or busy toggle.
+   */
+  private readonly host: HTMLElement;
   private data: Report | null = null;
   private explanation: Explanation | null = null;
   private loading = true;
   private busy = false;
   private error: string | null = null;
+  private denied = false;
+  private deniedErr: unknown = null;
   private expanded = false;
 
   constructor(options: GenerationViewOptions) {
     this.o = options;
+    this.host = el(options.doc, 'div', { className: 'gen-view' });
+    options.root.textContent = '';
+    options.root.append(this.host);
     this.render();
     void this.load();
   }
@@ -111,11 +135,22 @@ export class GenerationView {
     try {
       const res = await this.o.auth.authedFetch(
         `${ENDPOINT}?routineId=${encodeURIComponent(this.o.routineId)}`);
-      if (!res.ok) throw new Error(String(res.status));
+      // B-30: a refusal is not an outage. It must not read as "could not
+      // load" with a retry that can never succeed.
+      await refuseUnlessOk(res);
       this.data = (await res.json()) as Report;
       this.error = null;
-    } catch {
-      this.error = 'ফলাফল লোড হয়নি।';
+      this.denied = false;
+    } catch (err) {
+      if (isDenied(err)) {
+        this.denied = true;
+        this.deniedErr = err;
+        this.error = null;
+      } else {
+        this.error = typeof navigator !== 'undefined' && navigator.onLine === false
+          ? humanError('offline')
+          : 'ফলাফল লোড হয়নি।';
+      }
     } finally {
       this.loading = false;
       this.render();
@@ -172,171 +207,220 @@ export class GenerationView {
   private render(): void {
     const d = this.o.doc;
     const root = this.o.root;
-    root.textContent = '';
+    const host = this.host;
+    host.textContent = '';
     root.setAttribute('lang', 'bn');
 
-    const header = pageHeader(d, {
-      title: 'রুটিন তৈরি হয়েছে',
-      subtitle: this.loading ? 'লোড হচ্ছে…' : (this.data?.routine.nameBn ?? ''),
-    });
-    root.append(header);
+    const r = this.data;
+    const published = r?.routine.status === 'active';
+
+    // 06 Routine §04's title bar: the title on the left, the state chip on
+    // the right — the header's right-hand cluster, where the drawing puts it.
+    host.append(pageHeader(d, {
+      title: 'রুটিন ফলাফল',
+      subtitle: this.loading ? 'লোড হচ্ছে…' : (r?.routine.nameBn ?? ''),
+      actions: !this.loading && r && !this.denied && !this.error ? [this.stateChip(r)] : undefined,
+    }));
+
+    // Opened without ?routineId= — there is no result without a routine to
+    // be the result of. Say so and point at where one is made, rather than
+    // letting the request fail and calling it an error.
+    if (!this.o.routineId) {
+      host.append(emptyState(d, {
+        glyph: 'clock',
+        message: 'কোনো রুটিন বাছা হয়নি।',
+        detail: 'রুটিন তৈরি করুন পাতায় একটি রুটিন তৈরি করলে তার ফলাফল এখানে দেখা যাবে।',
+        action: {
+          label: 'রুটিন তৈরি করুন',
+          onClick: () => { location.hash = '#/routinegenerate'; },
+        },
+      }));
+      return;
+    }
+
+    if (this.denied) {
+      host.append(permissionState(d, {
+        message: deniedMessage(this.deniedErr),
+        contact: deniedContact(this.deniedErr),
+      }));
+      return;
+    }
 
     // An error is the whole answer: with no report loaded there is nothing
     // to render underneath it but a blank.
     if (this.error) {
-      root.append(errorState(d, this.error, () => void this.load()));
+      host.append(errorState(d, this.error, () => void this.load()));
       return;
     }
 
-    if (this.loading) { root.append(listSkeleton(d, 4)); return; }
-    if (!this.data) return;
+    if (this.loading) { host.append(listSkeleton(d, 4)); return; }
+    if (!r) return;
 
-    root.append(this.counters(this.data));
+    // One white panel, as the drawing frames it: stats band, content, footer.
+    const panel = el(d, 'section', { className: 'card gen-result' });
+    panel.append(this.counters(r));
     // Above the trade list: a shortage is why periods are missing, and a
     // coordinator reading "৪টি পিরিয়ড বসানো যায়নি" without it has to guess.
-    if (this.data.shortages.length > 0) root.append(this.shortageList(this.data));
-    if (this.data.soft.length > 0 || this.data.unplaced.length > 0) {
-      root.append(this.tradeList(this.data));
-    }
-    if (this.data.notEvaluated.length > 0) root.append(this.notEvaluated(this.data));
-    root.append(this.explainPanel(this.data));
-    root.append(this.actions(this.data));
+    const unplaced = this.unplacedBlock(r);
+    if (unplaced) panel.append(unplaced);
+    panel.append(r.soft.length > 0 ? this.tradeList(r) : this.cleanNote());
+    if (r.notEvaluated.length > 0) panel.append(this.notEvaluated(r));
+    panel.append(this.explainPanel(r));
+    if (!published) panel.append(this.actions());
+    host.append(panel);
   }
 
-  private counters(r: Report): HTMLElement {
+  /** The routine's state, in the words the rest of the routine screens use. */
+  private stateChip(r: Report): HTMLElement {
     const d = this.o.doc;
-    // Figures, not three sentences. These are the three numbers a
-    // coordinator decides on — whether to accept this routine, and what it
-    // cost — and a decision is made from a comparison.
-    return statRow(d,
-      statCard(d, {
-        label: 'কঠিন শর্ত লঙ্ঘন', value: bn(r.hardViolations), glyph: 'lock',
-        // Zero because the database's exclusion constraints make a hard
-        // violation unstorable — the figure states that the guarantee exists
-        // rather than that the run happened to be lucky.
-        tone: r.hardViolations === 0 ? 'success' : 'warn',
-        note: r.hardViolations === 0 ? 'ডাটাবেসেই অসম্ভব' : undefined,
-      }),
-      statCard(d, {
-        label: 'নরম শর্তে ছাড়', value: bn(r.soft.length), glyph: 'alert-triangle',
-        tone: r.soft.length > 0 ? 'warn' : 'success',
-        note: r.soft.length > 0 ? 'নিচে কোনগুলো দেখুন' : 'কিছু ছাড় দিতে হয়নি',
-      }),
-      ...(r.routine.objectiveScore !== null
-        ? [statCard(d, {
-            label: 'চাহিদা পূরণ', value: `${bn(Math.round(r.routine.objectiveScore))}%`,
-            glyph: 'trending-up', tone: 'info',
-          })]
-        : []),
-    );
+    switch (r.routine.status) {
+      case 'active':
+        return statusBadge(d, { state: 'published', label: 'প্রকাশিত' });
+      case 'superseded':
+        return statusBadge(d, { state: 'retired', tone: 'neutral', label: 'বাতিল — নতুন রুটিন চালু' });
+      case 'archived':
+        return statusBadge(d, { state: 'archived', tone: 'neutral', label: 'সংরক্ষিত' });
+      default:
+        // A draft (or one sent for review) is a finished run: 06 §04's chip.
+        return statusBadge(d, { state: 'generated', tone: 'success', label: 'তৈরি সম্পন্ন' });
+    }
   }
 
   /**
-   * F-503 / §8.2: "Infeasibility reports the binding shortage in resource
-   * terms the coordinator can act on — not 'no solution found'."
-   *
-   * This is the section somebody screenshots and takes to a budget
-   * meeting, so it leads with the resource and the two numbers.
+   * 06 Routine §04's stats band. Four figures a coordinator DECIDES on, and
+   * a decision is made from a comparison, not from four sentences. The
+   * figure is coloured by what it means, never for decoration.
    */
-  private shortageList(r: Report): HTMLElement {
+  private counters(r: Report): HTMLElement {
     const d = this.o.doc;
-    const box = d.createElement('section');
-    box.className = 'card gen-shortage';
-    const h = d.createElement('h2');
-    h.className = 'gen-head';
-    h.textContent = 'কেন বসানো যায়নি';
-    box.append(h);
+    const placed = r.slots.length;
+    const missing = r.unplaced.reduce((sum, u) => sum + u.missing, 0);
+    const seconds = r.routine.solverSeconds;
+    const row = statRow(d,
+      statCard(d, {
+        label: 'সাজানো হয়েছে', value: `${bn(placed)} / ${bn(placed + missing)}`,
+        // Green only when it is the whole demand. "১ / ৩" is not good news.
+        ...(missing === 0 ? { tone: 'success' as const } : {}),
+      }),
+      statCard(d, {
+        label: 'ফাঁকা রয়ে গেছে', value: bn(missing),
+        tone: missing > 0 ? 'warn' : 'success',
+      }),
+      statCard(d, {
+        // P9-4: a real count of teacher, room and section overlaps — a draft
+        // is not protected by the exclusion constraints, so zero is measured,
+        // not promised.
+        label: 'সংঘর্ষ', value: bn(r.hardViolations),
+        tone: r.hardViolations > 0 ? 'danger' : 'success',
+      }),
+      // A routine the solver did not make has no run time; the cell is left
+      // out rather than filled with a figure nobody measured.
+      seconds !== null && seconds !== undefined
+        ? statCard(d, { label: 'সময় লেগেছে', value: `${bn(Math.round(seconds))} সে` })
+        : null,
+    );
+    return el(d, 'div', { className: 'gen-stats' }, row);
+  }
 
-    const ul = d.createElement('ul');
-    ul.className = 'gen-trades gen-shortage-list';
-    for (const s of r.shortages) {
-      const li = d.createElement('li');
-      const what = d.createElement('span');
-      what.className = 'gen-trade-what';
-      what.textContent = s.detailBn;
-      li.append(what);
-      ul.append(li);
+  /** An eyebrow heading, with its numbers in the numeral face. */
+  private head(text: string): HTMLElement {
+    return el(this.o.doc, 'h2', { className: 'label gen-head' }, ...numText(this.o.doc, text));
+  }
+
+  /**
+   * What could not be placed, and — F-503 / §8.2 — why: "Infeasibility
+   * reports the binding shortage in resource terms the coordinator can act
+   * on — not 'no solution found'."
+   *
+   * The shortage is the block somebody screenshots and takes to a budget
+   * meeting, so it is the drawing's warn callout: one plain statement per
+   * resource, with the two numbers in it.
+   */
+  private unplacedBlock(r: Report): HTMLElement | null {
+    const d = this.o.doc;
+    const missing = r.unplaced.reduce((sum, u) => sum + u.missing, 0);
+    if (missing === 0 && r.shortages.length === 0) return null;
+
+    const box = el(d, 'section', { className: 'gen-block gen-unplaced' });
+    // Distinct from a soft trade: an unplaced period is a class that does not
+    // happen, not a preference given up — so it is stated on its own.
+    box.append(this.head(missing > 0 ? `${bn(missing)}টি পিরিয়ড বসানো যায়নি` : 'কেন বসানো যায়নি'));
+
+    if (r.shortages.length > 0) {
+      const ul = el(d, 'ul', { className: 'gen-shortage-list' });
+      for (const s of r.shortages) {
+        ul.append(el(d, 'li', {},
+          el(d, 'span', { className: 'gen-trade-what' }, ...numText(d, s.detailBn))));
+      }
+      box.append(el(d, 'div', { className: 'gen-shortage' }, ul));
     }
-    box.append(ul);
     return box;
   }
 
   private tradeList(r: Report): HTMLElement {
     const d = this.o.doc;
-    const box = d.createElement('section');
-    box.className = 'card';
+    const box = el(d, 'section', { className: 'gen-block' });
+    // The count heads the list it counts, above the accept button.
+    box.append(this.head(`যা ছাড় দিতে হয়েছে · ${bn(r.soft.length)}টি`));
 
-    const h = d.createElement('h2');
-    h.className = 'gen-head';
-    h.textContent = 'যা ছাড় দিতে হয়েছে';
-    box.append(h);
-
-    const ul = d.createElement('ul');
-    ul.className = 'gen-trades';
+    const ul = el(d, 'ul', { className: 'gen-trades' });
     const shown = this.expanded ? r.soft : r.soft.slice(0, SOFT_SHOWN);
     for (const v of shown) {
-      const li = d.createElement('li');
-      const what = d.createElement('span');
-      what.className = 'gen-trade-what';
-      what.textContent = v.detailBn;
-      li.append(what);
+      const li = el(d, 'li', {},
+        el(d, 'span', { className: 'gen-trade-what' }, ...numText(d, v.detailBn)));
       if (v.causeBn) {
         // The cause is what turns a complaint into an argument for a hire.
-        const why = d.createElement('span');
-        why.className = 'gen-trade-why';
-        why.textContent = `— ${v.causeBn}`;
-        li.append(why);
+        li.append(this.why(v.causeBn));
       }
       ul.append(li);
     }
     box.append(ul);
 
     if (!this.expanded && r.soft.length > SOFT_SHOWN) {
-      const more = d.createElement('button');
-      more.type = 'button';
-      more.className = 'btn-secondary btn-small';
       // Never a bare "···": the count is what tells a coordinator whether
       // this is a tidy routine or a bad one.
-      more.textContent = `··· আরও ${bn(r.soft.length - SOFT_SHOWN)}টি দেখুন`;
-      more.addEventListener('click', () => { this.expanded = true; this.render(); });
-      box.append(more);
-    }
-
-    if (r.unplaced.length > 0) {
-      const missing = r.unplaced.reduce((sum, u) => sum + u.missing, 0);
-      const p = d.createElement('p');
-      p.className = 'gen-counter is-warn';
-      // Distinct from a soft trade: an unplaced period is a class that
-      // does not happen, not a preference given up.
-      p.textContent = `${bn(missing)}টি পিরিয়ড বসানো যায়নি`;
-      box.append(p);
+      box.append(button(d, {
+        label: `আরও ${bn(r.soft.length - SOFT_SHOWN)}টি দেখুন`,
+        variant: 'ghost',
+        className: 'gen-more',
+        onClick: () => { this.expanded = true; this.render(); },
+      }));
     }
     return box;
   }
 
+  /**
+   * The reason column. The drawing separates fact and reason by position
+   * alone; a screen reader gets no position, so it hears the dash the eye
+   * does not need.
+   */
+  private why(text: string): HTMLElement {
+    const d = this.o.doc;
+    return el(d, 'span', { className: 'gen-trade-why' },
+      el(d, 'span', { className: 'ui-sr-only', text: '— ' }),
+      ...numText(d, text));
+  }
+
+  /** A routine that gave nothing up says so, rather than showing an empty list. */
+  private cleanNote(): HTMLElement {
+    const d = this.o.doc;
+    return el(d, 'section', { className: 'gen-block' },
+      this.head('যা ছাড় দিতে হয়েছে'),
+      el(d, 'p', { className: 'gen-none', text: 'কিছু ছাড় দিতে হয়নি' }));
+  }
+
   private notEvaluated(r: Report): HTMLElement {
     const d = this.o.doc;
-    const box = d.createElement('section');
-    box.className = 'card gen-unchecked';
-    const h = d.createElement('h2');
-    h.className = 'gen-head';
-    h.textContent = 'যা যাচাই করা হয়নি';
-    box.append(h);
-    const ul = d.createElement('ul');
-    // Its own class, not gen-trades: these are rules that did not run, not
-    // trades that were made, and a selector that cannot tell them apart
+    const box = el(d, 'section', { className: 'gen-block gen-unchecked' });
+    box.append(this.head('যা যাচাই করা হয়নি'));
+    // Its own class, not only gen-trades: these are rules that did not run,
+    // not trades that were made, and a selector that cannot tell them apart
     // would let an un-run rule be counted as a violation.
-    ul.className = 'gen-trades gen-unchecked-list';
+    const ul = el(d, 'ul', { className: 'gen-trades gen-unchecked-list' });
     for (const n of r.notEvaluated) {
-      const li = d.createElement('li');
-      const what = d.createElement('span');
-      what.className = 'gen-trade-what';
-      what.textContent = n.ruleBn;
-      const why = d.createElement('span');
-      why.className = 'gen-trade-why';
-      why.textContent = `— ${n.whyBn}`;
-      li.append(what, why);
-      ul.append(li);
+      ul.append(el(d, 'li', {},
+        el(d, 'span', { className: 'gen-trade-what' }, ...numText(d, n.ruleBn)),
+        this.why(n.whyBn)));
     }
     box.append(ul);
     return box;
@@ -344,16 +428,11 @@ export class GenerationView {
 
   private explainPanel(r: Report): HTMLElement {
     const d = this.o.doc;
-    const box = d.createElement('section');
-    box.className = 'card';
-
-    const h = d.createElement('h2');
-    h.className = 'gen-head';
-    h.textContent = 'কেন এই বরাদ্দ?';
-    box.append(h);
+    const box = el(d, 'section', { className: 'gen-block' });
+    box.append(this.head('কেন এই বরাদ্দ?'));
 
     const select = d.createElement('select');
-    select.className = 'gen-slot-select';
+    select.className = r.slots.length > 0 ? 'ui-select gen-slot-select n' : 'ui-select gen-slot-select';
     select.setAttribute('aria-label', 'স্লট বেছে নিন');
     const blank = d.createElement('option');
     blank.value = '';
@@ -362,8 +441,12 @@ export class GenerationView {
     for (const s of r.slots) {
       const opt = d.createElement('option');
       opt.value = s.id;
-      opt.textContent = `${DAY_BN[s.dayOfWeek]} · পিরিয়ড ${bn(s.periodNo)} · `
-                      + `${s.sectionLabel} · ${s.subjectBn}`;
+      const label = `${DAY_BN[s.dayOfWeek]} · পিরিয়ড ${bn(s.periodNo)} · `
+                  + `${s.sectionLabel} · ${s.subjectBn}`;
+      opt.textContent = label;
+      // An <option> holds text only, so it is the smallest element its
+      // number can be marked on.
+      if (hasDigit(label)) opt.className = 'n';
       if (this.explanation?.slotId === s.id) opt.selected = true;
       select.append(opt);
     }
@@ -375,86 +458,42 @@ export class GenerationView {
 
     if (this.explanation) {
       const e = this.explanation;
-      const card = d.createElement('div');
-      card.className = 'gen-explain';
-      card.setAttribute('role', 'status');
-
-      const head = d.createElement('p');
-      head.className = 'gen-explain-head';
-      head.textContent = `${DAY_BN[e.dayOfWeek]} · পিরিয়ড ${bn(e.periodNo)} · `
-                       + `${e.sectionLabel} · ${e.subjectBn}`;
-      card.append(head);
-
-      const who = d.createElement('p');
-      who.className = 'gen-explain-line';
-      who.textContent = e.teacherWhyBn;
-      card.append(who);
-
+      const card = el(d, 'div', { className: 'gen-explain', attrs: { role: 'status' } });
+      card.append(el(d, 'p', { className: 'gen-explain-head' },
+        ...numText(d, `${DAY_BN[e.dayOfWeek]} · পিরিয়ড ${bn(e.periodNo)} · `
+                    + `${e.sectionLabel} · ${e.subjectBn}`)));
+      card.append(el(d, 'p', { className: 'gen-explain-line' }, ...numText(d, e.teacherWhyBn)));
       if (e.roomWhyBn) {
-        const where = d.createElement('p');
-        where.className = 'gen-explain-line';
-        where.textContent = e.roomWhyBn;
-        card.append(where);
+        card.append(el(d, 'p', { className: 'gen-explain-line' }, ...numText(d, e.roomWhyBn)));
       }
       box.append(card);
     }
     return box;
   }
 
-  private actions(r: Report): HTMLElement {
+  /**
+   * 06 Routine §04's footer: the alternatives on the left, the one primary
+   * at the right end. Only rendered while the routine is not yet live — a
+   * published routine has nothing left to accept, discard or re-run, and its
+   * state is the chip in the header.
+   */
+  private actions(): HTMLElement {
     const d = this.o.doc;
-    const box = d.createElement('div');
-    box.className = 'card action-row';
-
-    const published = r.routine.status === 'active';
-    const state = d.createElement('span');
-    state.className = 'status-chip';
-    state.dataset.state = published ? 'success' : 'pending';
-    state.textContent = published ? '✓ প্রকাশিত' : '✎ খসড়া';
-    box.append(state);
-
-    if (!published) {
-      const accept = d.createElement('button');
-      accept.type = 'button';
-      accept.className = 'btn-primary';
-      accept.textContent = 'গ্রহণ করুন';
-      accept.disabled = this.busy;
-      accept.addEventListener('click', () => { void this.act('accept'); });
-      box.append(accept);
-
-      const again = d.createElement('button');
-      again.type = 'button';
-      again.className = 'btn-secondary';
-      again.textContent = 'পুনরায় তৈরি';
-      again.disabled = this.busy || !this.o.onRegenerate;
-      again.addEventListener('click', () => { this.o.onRegenerate?.(this.o.routineId); });
-      box.append(again);
-
-      const cancel = d.createElement('button');
-      cancel.type = 'button';
-      cancel.className = 'btn-secondary';
-      cancel.textContent = 'বাতিল';
-      cancel.disabled = this.busy;
-      cancel.addEventListener('click', () => { void this.act('discard'); });
-      box.append(cancel);
-    }
-    return box;
-  }
-
-  private skeleton(): HTMLElement {
-    const d = this.o.doc;
-    const box = d.createElement('div');
-    box.setAttribute('aria-busy', 'true');
-    box.setAttribute('aria-label', 'ফলাফল লোড হচ্ছে');
-    for (let i = 0; i < 3; i++) {
-      const card = d.createElement('div');
-      card.className = 'card is-skeleton';
-      const a = d.createElement('div'); a.className = 'skel skel-title';
-      const b = d.createElement('div'); b.className = 'skel skel-line';
-      card.append(a, b);
-      box.append(card);
-    }
-    return box;
+    return el(d, 'div', { className: 'gen-foot action-row' },
+      button(d, {
+        label: 'আবার চালান', variant: 'secondary',
+        disabled: this.busy || !this.o.onRegenerate,
+        onClick: () => { this.o.onRegenerate?.(this.o.routineId); },
+      }),
+      button(d, {
+        label: 'বাতিল', variant: 'secondary',
+        disabled: this.busy,
+        onClick: () => { void this.act('discard'); },
+      }),
+      button(d, {
+        label: 'গ্রহণ করুন', variant: 'primary',
+        disabled: this.busy,
+        onClick: () => { void this.act('accept'); },
+      }));
   }
 }
-

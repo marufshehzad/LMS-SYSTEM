@@ -18,6 +18,8 @@ import otpVerify from './otp-verify.ts';
 import refresh from './refresh.ts';
 import logout from './logout.ts';
 import activate from './activate.ts';
+// B-120. Where am I signed in, and how do I stop it.
+import sessions from './sessions.ts';
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 
@@ -27,6 +29,12 @@ const ROUTES: Record<string, Handler> = {
   'refresh': refresh,
   'logout': logout,
   'activate': activate,
+  // One handler, three sub-paths: it needs the same authenticated identity
+  // and the same device rule for all three, and splitting it would put that
+  // rule in three files.
+  'sessions': sessions,
+  'sessions/revoke': sessions,
+  'sessions/revoke-others': sessions,
 };
 
 // F-102. The IP dimension is charged here, before the handler runs, because
@@ -41,6 +49,10 @@ const LIMIT_CLASS: Record<string, RateLimitClass> = {
   // Redemption is code-guessing surface, so it gets the strict OTP-verify
   // buckets; the identity dimension is charged inside the handler.
   'activate': 'otp_verify',
+  // Authenticated and cheap, but a revoke loop is still a write loop.
+  'sessions': 'read',
+  'sessions/revoke': 'mutation',
+  'sessions/revoke-others': 'mutation',
 };
 
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {

@@ -1417,6 +1417,19 @@ function requireRole(claims, allowed) {
     throw new HttpError(403, `this endpoint requires one of: ${allowed.join(", ")}`, "forbidden");
   }
 }
+var CONTACT_ROLES = [
+  "principal",
+  "school_owner",
+  "academic_coordinator",
+  "it_admin",
+  "class_teacher",
+  "accountant",
+  "guardian",
+  "student"
+];
+function maySeeContact(role) {
+  return CONTACT_ROLES.includes(role);
+}
 
 // services/academics-svc/api/sections.ts
 async function handler(req, res) {
@@ -1490,6 +1503,7 @@ async function handler2(req, res) {
   try {
     const claims = await authenticate(req);
     requireStaff(claims);
+    const showContact = maySeeContact(claims.role);
     const sectionId = query(req).get("sectionId") ?? "";
     if (!UUID_RE.test(sectionId)) throw new HttpError(400, "sectionId must be a valid uuid", "invalid_section_id");
     const db = await sharedDb();
@@ -1526,7 +1540,13 @@ async function handler2(req, res) {
           rollNo: r.roll_no,
           studentId: r.student_id,
           fullName: { bn: r.full_name_bn, en: r.full_name_en },
-          phone: r.phone_e164
+          // B-56. Gated on the SHARED rule, not on "is staff". A subject
+          // teacher still gets the roster — they need the names and roll
+          // numbers to teach — and gets `null` where the number was. Nulled
+          // in the body rather than hidden in the UI: D13 forbids shipping a
+          // value and concealing it, because it is still one devtools tab
+          // away.
+          phone: showContact ? r.phone_e164 : null
         }))
       };
     });
@@ -2153,7 +2173,7 @@ async function handler5(req, res) {
             WHERE g.mark_id = m.id`,
           [examId, scaleId]
         );
-        const results = await client.query(
+        const results2 = await client.query(
           `INSERT INTO exam_results
              (tenant_id, exam_id, student_id, section_id, academic_year_id,
               total_marks, total_max, percentage, gpa, gpa_without_optional,
@@ -2239,7 +2259,7 @@ async function handler5(req, res) {
         }
         return {
           marksGraded: graded.rowCount ?? 0,
-          resultsPublished: results.rowCount ?? 0,
+          resultsPublished: results2.rowCount ?? 0,
           notified
         };
       }
@@ -3571,6 +3591,18 @@ function toCsv(headers, rows) {
   return `\uFEFF${lines.join("\r\n")}\r
 `;
 }
+var CSV_BOM = "\uFEFF";
+var FORMULA_LEAD = /^[=+\-@\t\r]/;
+var PLAIN_NUMBER = /^[+-]?\d+(?:\.\d+)?$/;
+function csvCell(value) {
+  let v = value;
+  if (FORMULA_LEAD.test(v) && !PLAIN_NUMBER.test(v)) v = `'${v}`;
+  return /[",\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
+function csvLine(values) {
+  return `${values.map(csvCell).join(",")}\r
+`;
+}
 
 // packages/server-core/src/pii-crypto.ts
 import { createCipheriv, createDecipheriv, createHmac as createHmac2, hkdfSync, randomBytes, timingSafeEqual as timingSafeEqual2 } from "node:crypto";
@@ -3988,14 +4020,14 @@ function validateTeachers(table, snap) {
   const seenCodes = /* @__PURE__ */ new Set();
   const seenPhones = /* @__PURE__ */ new Set();
   for (const row of table.rows) {
-    const cell = (f) => {
+    const cell2 = (f) => {
       const h = map[f];
       return h ? (row.cells[h] ?? "").trim() : "";
     };
     const fail = (field, messageBn) => {
-      errors.push({ lineNo: row.lineNo, rollNo: cell("employeeCode"), field, messageBn });
+      errors.push({ lineNo: row.lineNo, rollNo: cell2("employeeCode"), field, messageBn });
     };
-    const nameBn = cell("nameBn");
+    const nameBn = cell2("nameBn");
     if (!nameBn) {
       fail("name_bn", "\u09A8\u09BE\u09AE \u09A8\u09C7\u0987");
       continue;
@@ -4004,7 +4036,7 @@ function validateTeachers(table, snap) {
       fail("name_bn", "\u09A8\u09BE\u09AE \u0985\u09A8\u09C7\u0995 \u09AC\u09A1\u09BC");
       continue;
     }
-    const employeeCode = cell("employeeCode");
+    const employeeCode = cell2("employeeCode");
     if (!employeeCode) {
       fail("employee_code", "\u0995\u09B0\u09CD\u09AE\u099A\u09BE\u09B0\u09C0 \u0986\u0987\u09A1\u09BF \u09A8\u09C7\u0987");
       continue;
@@ -4018,7 +4050,7 @@ function validateTeachers(table, snap) {
       fail("employee_code", "\u098F\u0987 \u0986\u0987\u09A1\u09BF \u0986\u0997\u09C7 \u09A5\u09C7\u0995\u09C7\u0987 \u09AC\u09CD\u09AF\u09AC\u09B9\u09C3\u09A4");
       continue;
     }
-    const rawPhone = cell("phone");
+    const rawPhone = cell2("phone");
     let phone = null;
     if (rawPhone) {
       phone = normalizePhone(rawPhone);
@@ -4035,12 +4067,12 @@ function validateTeachers(table, snap) {
         continue;
       }
     }
-    const email = cell("email") || null;
+    const email = cell2("email") || null;
     if (!phone && !email) {
       fail("phone", "\u09AE\u09CB\u09AC\u09BE\u0987\u09B2 \u09AC\u09BE \u0987\u09AE\u09C7\u0987\u09B2 \u2014 \u0985\u09A8\u09CD\u09A4\u09A4 \u098F\u0995\u099F\u09BF \u09A6\u09B0\u0995\u09BE\u09B0");
       continue;
     }
-    const rawRole = cell("roleCode").trim().toLowerCase();
+    const rawRole = cell2("roleCode").trim().toLowerCase();
     const roleCode = rawRole ? ROLE_ALIASES[rawRole] ?? rawRole : "subject_teacher";
     if (!IMPORTABLE_ROLES.has(roleCode)) {
       fail("role", "\u09AD\u09C2\u09AE\u09BF\u0995\u09BE \u09B6\u09C1\u09A7\u09C1 \u09B6\u09BF\u0995\u09CD\u09B7\u0995 \u09B9\u09A4\u09C7 \u09AA\u09BE\u09B0\u09C7 \u2014 \u09AA\u09CD\u09B0\u09A7\u09BE\u09A8 \u09B6\u09BF\u0995\u09CD\u09B7\u0995/\u0986\u0987\u099F\u09BF \u0985\u09CD\u09AF\u09BE\u09A1\u09AE\u09BF\u09A8 \u0986\u09B2\u09BE\u09A6\u09BE\u09AD\u09BE\u09AC\u09C7 \u09A4\u09C8\u09B0\u09BF \u09B9\u09AF\u09BC");
@@ -4054,13 +4086,13 @@ function validateTeachers(table, snap) {
       // `users.full_name_en` is NOT NULL, so a file without an English name
       // still has to produce one. The Bangla name is a truthful fallback;
       // an empty string would fail the insert after validation passed.
-      nameEn: cell("nameEn") || nameBn,
+      nameEn: cell2("nameEn") || nameBn,
       employeeCode,
       phone,
       email,
-      designationBn: cell("designationBn") || null,
+      designationBn: cell2("designationBn") || null,
       roleCode,
-      joiningDate: cell("joiningDate") || null
+      joiningDate: cell2("joiningDate") || null
     });
   }
   errors.sort((a, b) => a.lineNo - b.lineNo);
@@ -4527,12 +4559,12 @@ async function loadHome(client, ward) {
   const attendanceOn = await stateOf("attendance");
   const financeOn = await stateOf("finance");
   const resultsOn = await stateOf("results");
-  const attendance = attendanceOn ? await loadAttendance(client, ward.studentId) : null;
+  const attendance2 = attendanceOn ? await loadAttendance(client, ward.studentId) : null;
   const fees = financeOn ? await loadFees(client, ward.studentId) : null;
   const result = resultsOn ? await loadLatestResult(client, ward.studentId) : null;
   return {
     ...ward,
-    attendance,
+    attendance: attendance2,
     fees,
     result,
     services: { attendance: attendanceOn, finance: financeOn, results: resultsOn }
@@ -5628,16 +5660,7 @@ function predicateFor(shape, text, status, yearId) {
 // services/academics-svc/api/studenthistory.ts
 var UUID_RE17 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var MAY_SEE_FEES = ["principal", "school_owner", "accountant", "guardian", "student"];
-var MAY_SEE_CONTACT = [
-  "principal",
-  "school_owner",
-  "academic_coordinator",
-  "it_admin",
-  "class_teacher",
-  "accountant",
-  "guardian",
-  "student"
-];
+var MAY_SEE_CONTACT = CONTACT_ROLES;
 var DOCUMENT_ACCESS = {
   fee_receipt: ["principal", "school_owner", "accountant", "student", "guardian"],
   report_card: [
@@ -5701,15 +5724,15 @@ async function handler21(req, res) {
         await serviceOn("finance")
       ];
       const enrolments = await loadEnrolments(c, studentId);
-      const attendance = attendanceOn ? await loadAttendance2(c, studentId) : null;
-      const results = resultsOn ? await loadResults(c, studentId) : null;
+      const attendance2 = attendanceOn ? await loadAttendance2(c, studentId) : null;
+      const results2 = resultsOn ? await loadResults(c, studentId) : null;
       const fees = MAY_SEE_FEES.includes(role) && financeOn ? await loadFees2(c, studentId) : null;
       const printable = Object.entries(DOCUMENT_ACCESS).filter(([, roles]) => roles.includes(role)).map(([type]) => type);
       return {
         student: profile,
         enrolments,
-        attendance,
-        results,
+        attendance: attendance2,
+        results: results2,
         fees,
         documents: printable.filter((t) => !CERTIFICATE_TYPES.has(t)),
         certificates: printable.filter((t) => CERTIFICATE_TYPES.has(t)),
@@ -5731,7 +5754,7 @@ async function handler21(req, res) {
     json(res, e.status, { error: e.code, message: e.message, ...e.detail ?? {} }, cors);
   }
 }
-async function loadProfile(c, studentId, maySeeContact) {
+async function loadProfile(c, studentId, maySeeContact2) {
   const { rows } = await c.query(
     `SELECT u.id, u.full_name_bn AS name_bn, u.full_name_en AS name_en,
             sp.student_code, sp.lifecycle_status,
@@ -5757,13 +5780,13 @@ async function loadProfile(c, studentId, maySeeContact) {
     // Withheld at the SERVER, not hidden in the UI. A role that may not see
     // contact details never receives them, so nothing leaks to anyone who
     // opens the network tab.
-    bloodGroup: maySeeContact ? r.blood_group : null,
-    fatherNameBn: maySeeContact ? r.father_bn : null,
-    motherNameBn: maySeeContact ? r.mother_bn : null,
-    dateOfBirth: maySeeContact ? r.dob : null,
-    phone: maySeeContact ? r.phone : null,
-    boardRegistrationNo: maySeeContact ? r.board_registration_no : null,
-    boardRollNo: maySeeContact ? r.board_roll_no : null
+    bloodGroup: maySeeContact2 ? r.blood_group : null,
+    fatherNameBn: maySeeContact2 ? r.father_bn : null,
+    motherNameBn: maySeeContact2 ? r.mother_bn : null,
+    dateOfBirth: maySeeContact2 ? r.dob : null,
+    phone: maySeeContact2 ? r.phone : null,
+    boardRegistrationNo: maySeeContact2 ? r.board_registration_no : null,
+    boardRollNo: maySeeContact2 ? r.board_roll_no : null
   };
 }
 async function loadEnrolments(c, studentId) {
@@ -5990,6 +6013,383 @@ async function handler22(req, res) {
   }
 }
 
+// packages/server-core/src/csv-response.ts
+function beginCsvDownload(res, cors, o) {
+  res.writeHead(200, {
+    ...cors,
+    "Content-Type": "text/csv; charset=utf-8",
+    // `attachment` so the browser saves it instead of rendering a wall of
+    // text, and a plain ASCII filename so no edge has to guess an encoding.
+    "Content-Disposition": `attachment; filename="${o.filename}"`,
+    // Belt and braces with the service worker's network-only rule: a proxy
+    // between the school and us must not hold this either.
+    "Cache-Control": "no-store, private, max-age=0",
+    "Pragma": "no-cache",
+    // The file is a download, never a document to be framed or sniffed.
+    "X-Content-Type-Options": "nosniff"
+  });
+  res.write(CSV_BOM);
+  res.write(csvLine(o.headers));
+}
+function writeCsvRow(res, values) {
+  res.write(csvLine(values));
+}
+function csvFilename(dataset, on = /* @__PURE__ */ new Date()) {
+  const d = on.toISOString().slice(0, 10);
+  return `${dataset}-${d}.csv`;
+}
+
+// packages/server-core/src/export-dataset.ts
+var cell = (v) => v === null || v === void 0 ? "" : String(v);
+async function handleCsvExport(req, res, o) {
+  const cors = corsHeaders();
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, cors);
+    res.end();
+    return;
+  }
+  if (req.method !== "GET") {
+    json(res, 405, { error: "method_not_allowed" }, cors);
+    return;
+  }
+  try {
+    const claims = await authenticate(req);
+    requireRole(claims, o.roles);
+    const key = (query(req).get("dataset") ?? "").trim();
+    const def = Object.prototype.hasOwnProperty.call(o.datasets, key) ? o.datasets[key] : void 0;
+    if (!def) {
+      throw new HttpError(
+        400,
+        `dataset must be one of: ${Object.keys(o.datasets).join(", ")}`,
+        "unknown_dataset"
+      );
+    }
+    const db = await sharedDb();
+    const actor = { tenantId: claims.tid, userId: claims.sub, role: claims.role };
+    await db.withTenant(actor, async (client) => {
+      const rows = await def.select(client);
+      beginCsvDownload(res, cors, {
+        filename: csvFilename(key),
+        headers: def.headers
+      });
+      for (const r of rows) writeCsvRow(res, def.row(r));
+      await writeAudit(client, actor, {
+        action: "ops.data.export",
+        entityType: "export",
+        after: { dataset: key, rows: rows.length }
+      });
+    });
+    res.end();
+  } catch (err) {
+    if (res.headersSent) {
+      res.end();
+      return;
+    }
+    if (err instanceof HttpError) {
+      json(res, err.status, { error: err.code, message: err.message }, cors);
+      return;
+    }
+    json(res, 500, { error: "internal_error" }, cors);
+  }
+}
+
+// services/academics-svc/api/export.ts
+var EXPORT_ROLES = ["principal", "school_owner", "it_admin"];
+var ENROLMENT_BN = {
+  active: "\u09B8\u0995\u09CD\u09B0\u09BF\u09AF\u09BC",
+  transferred: "\u09B8\u09CD\u09A5\u09BE\u09A8\u09BE\u09A8\u09CD\u09A4\u09B0\u09BF\u09A4",
+  left: "\u099A\u09B2\u09C7 \u0997\u09C7\u099B\u09C7",
+  promoted: "\u0989\u09A4\u09CD\u09A4\u09C0\u09B0\u09CD\u09A3",
+  detained: "\u0985\u0995\u09C3\u09A4\u0995\u09BE\u09B0\u09CD\u09AF"
+};
+var LIFECYCLE_BN = {
+  enrolled: "\u09AD\u09B0\u09CD\u09A4\u09BF",
+  promoted: "\u09AA\u09B0\u09AC\u09B0\u09CD\u09A4\u09C0 \u09B6\u09CD\u09B0\u09C7\u09A3\u09BF\u09A4\u09C7",
+  transferred_out: "\u099B\u09BE\u09A1\u09BC\u09AA\u09A4\u09CD\u09B0 \u09A8\u09BF\u09AF\u09BC\u09C7\u099B\u09C7",
+  dropped_out: "\u099D\u09B0\u09C7 \u09AA\u09A1\u09BC\u09C7\u099B\u09C7",
+  graduated: "\u0989\u09A4\u09CD\u09A4\u09C0\u09B0\u09CD\u09A3",
+  alumni: "\u09AA\u09CD\u09B0\u09BE\u0995\u09CD\u09A4\u09A8"
+};
+var GENDER_BN2 = {
+  male: "\u099B\u09C7\u09B2\u09C7",
+  female: "\u09AE\u09C7\u09AF\u09BC\u09C7",
+  other: "\u0985\u09A8\u09CD\u09AF\u09BE\u09A8\u09CD\u09AF"
+};
+var SHIFT_BN = {
+  morning: "\u09B8\u0995\u09BE\u09B2",
+  day: "\u09A6\u09BF\u09AC\u09BE",
+  evening: "\u09B8\u09A8\u09CD\u09A7\u09CD\u09AF\u09BE",
+  single: "\u098F\u0995\u0995"
+};
+var bnOf = (map, v) => v ? map[v] ?? v : "";
+var ATTENDANCE_BN = {
+  present: "\u0989\u09AA\u09B8\u09CD\u09A5\u09BF\u09A4",
+  absent: "\u0985\u09A8\u09C1\u09AA\u09B8\u09CD\u09A5\u09BF\u09A4",
+  late: "\u09A6\u09C7\u09B0\u09BF\u09A4\u09C7",
+  excused: "\u099B\u09C1\u099F\u09BF \u09AE\u099E\u09CD\u099C\u09C1\u09B0",
+  half_day: "\u0985\u09B0\u09CD\u09A7\u09A6\u09BF\u09AC\u09B8"
+};
+var EXAM_STATUS_BN = {
+  planned: "\u09AA\u09B0\u09BF\u0995\u09B2\u09CD\u09AA\u09BF\u09A4",
+  ongoing: "\u099A\u09B2\u09AE\u09BE\u09A8",
+  marking: "\u09A8\u09AE\u09CD\u09AC\u09B0 \u09A6\u09C7\u0993\u09AF\u09BC\u09BE \u09B9\u099A\u09CD\u099B\u09C7",
+  moderation: "\u09AF\u09BE\u099A\u09BE\u0987 \u099A\u09B2\u099B\u09C7",
+  published: "\u09AA\u09CD\u09B0\u0995\u09BE\u09B6\u09BF\u09A4",
+  locked: "\u099A\u09C2\u09A1\u09BC\u09BE\u09A8\u09CD\u09A4"
+};
+var STUDENT_HEADERS = [
+  "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0 \u0986\u0987\u09A1\u09BF",
+  "\u09A8\u09BE\u09AE",
+  "\u09A8\u09BE\u09AE (\u0987\u0982\u09B0\u09C7\u099C\u09BF)",
+  "\u09AA\u09BF\u09A4\u09BE\u09B0 \u09A8\u09BE\u09AE",
+  "\u09AE\u09BE\u09A4\u09BE\u09B0 \u09A8\u09BE\u09AE",
+  "\u099C\u09A8\u09CD\u09AE \u09A4\u09BE\u09B0\u09BF\u0996",
+  "\u09B2\u09BF\u0999\u09CD\u0997",
+  "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF",
+  "\u09B6\u09BE\u0996\u09BE",
+  "\u09B0\u09CB\u09B2",
+  "\u09B6\u09BF\u09AB\u099F",
+  "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09AC\u09B0\u09CD\u09B7",
+  "\u09AD\u09B0\u09CD\u09A4\u09BF\u09B0 \u09A4\u09BE\u09B0\u09BF\u0996",
+  "\u09AC\u09CB\u09B0\u09CD\u09A1 \u09B0\u09C7\u099C\u09BF\u09B8\u09CD\u099F\u09CD\u09B0\u09C7\u09B6\u09A8",
+  "\u09AC\u09CB\u09B0\u09CD\u09A1 \u09B0\u09CB\u09B2",
+  "\u09B0\u0995\u09CD\u09A4\u09C7\u09B0 \u0997\u09CD\u09B0\u09C1\u09AA",
+  "\u09AD\u09B0\u09CD\u09A4\u09BF \u0985\u09AC\u09B8\u09CD\u09A5\u09BE",
+  "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0\u09B0 \u0985\u09AC\u09B8\u09CD\u09A5\u09BE"
+];
+var students = {
+  headers: STUDENT_HEADERS,
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT sp.student_code,
+            u.full_name_bn, u.full_name_en,
+            u.father_name_bn, u.mother_name_bn,
+            u.date_of_birth::text        AS date_of_birth,
+            u.gender::text               AS gender,
+            c.name_bn                    AS class_name,
+            s.name                       AS section_name,
+            e.roll_no,
+            s.shift::text                AS shift,
+            ay.label                     AS year_label,
+            sp.admission_date::text      AS admission_date,
+            sp.board_registration_no,
+            sp.board_roll_no,
+            sp.blood_group,
+            e.status               AS enrolment_status,
+            sp.lifecycle_status
+       FROM student_profiles sp
+       JOIN users u ON u.id = sp.user_id AND u.deleted_at IS NULL
+       LEFT JOIN LATERAL (
+         SELECT en.section_id, en.roll_no, en.status, en.academic_year_id
+           FROM enrolments en
+           JOIN academic_years y ON y.id = en.academic_year_id
+          WHERE en.student_id = sp.user_id
+          ORDER BY y.is_current DESC, y.starts_on DESC, en.enrolled_on DESC
+          LIMIT 1
+       ) e ON TRUE
+       LEFT JOIN sections s   ON s.id = e.section_id
+       LEFT JOIN classes  c   ON c.id = s.class_id
+       LEFT JOIN academic_years ay ON ay.id = e.academic_year_id
+      ORDER BY c.level_no NULLS LAST, s.name NULLS LAST, e.roll_no NULLS LAST,
+               u.full_name_bn`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.student_code),
+    cell(r.full_name_bn),
+    cell(r.full_name_en),
+    cell(r.father_name_bn),
+    cell(r.mother_name_bn),
+    cell(r.date_of_birth),
+    bnOf(GENDER_BN2, r.gender),
+    cell(r.class_name),
+    cell(r.section_name),
+    cell(r.roll_no),
+    bnOf(SHIFT_BN, r.shift),
+    cell(r.year_label),
+    cell(r.admission_date),
+    cell(r.board_registration_no),
+    cell(r.board_roll_no),
+    cell(r.blood_group),
+    // An empty enrolment cell is the honest answer for a student who is not
+    // currently placed, and it is visibly different from a lifecycle word.
+    bnOf(ENROLMENT_BN, r.enrolment_status),
+    bnOf(LIFECYCLE_BN, r.lifecycle_status)
+  ]
+};
+var attendance = {
+  headers: [
+    "\u09A4\u09BE\u09B0\u09BF\u0996",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF",
+    "\u09B6\u09BE\u0996\u09BE",
+    "\u09AA\u09BF\u09B0\u09BF\u09AF\u09BC\u09A1",
+    "\u09AC\u09BF\u09B7\u09AF\u09BC",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0 \u0986\u0987\u09A1\u09BF",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0\u09B0 \u09A8\u09BE\u09AE",
+    "\u09B0\u09CB\u09B2",
+    "\u0985\u09AC\u09B8\u09CD\u09A5\u09BE",
+    "\u0995\u09A4 \u09AE\u09BF\u09A8\u09BF\u099F \u09A6\u09C7\u09B0\u09BF",
+    "\u09AE\u09A8\u09CD\u09A4\u09AC\u09CD\u09AF",
+    "\u09AF\u09BF\u09A8\u09BF \u09A8\u09BF\u09AF\u09BC\u09C7\u099B\u09C7\u09A8"
+  ],
+  /**
+   * The attendance that was actually TAKEN.  §11.
+   *
+   * Explicitly `attendance_records`, and explicitly NOT the `attendance_
+   * sheet` document. That document is the blank-grid paper fallback — its
+   * own comment in `documents.ts` says so — and it contains no attendance
+   * at all. The FINAL-OWNER audit named exactly this trap: a school handed
+   * an "attendance export" that turned out to be an empty printable grid
+   * would have been given nothing while believing they had everything.
+   *
+   * One row per student per session, which is the grain the data has. The
+   * session carries the date, period and subject; the record carries what
+   * happened to one child.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT ar.taken_on::text AS taken_on,
+              c.name_bn         AS class_name,
+              s.name            AS section_name,
+              ses.period_no,
+              sub.name_bn       AS subject_name,
+              sp.student_code,
+              u.full_name_bn    AS student_name,
+              e.roll_no,
+              ar.status::text   AS status,
+              ar.minutes_late, ar.remark,
+              m.full_name_bn    AS marked_by_name
+         FROM attendance_records ar
+         JOIN users u ON u.id = ar.student_id AND u.deleted_at IS NULL
+         LEFT JOIN student_profiles sp ON sp.user_id = ar.student_id
+         LEFT JOIN attendance_sessions ses ON ses.id = ar.session_id
+         LEFT JOIN subjects sub ON sub.id = ses.subject_id
+         LEFT JOIN sections s ON s.id = ar.section_id
+         LEFT JOIN classes  c ON c.id = s.class_id
+         LEFT JOIN enrolments e ON e.student_id = ar.student_id
+                               AND e.section_id = ar.section_id
+         LEFT JOIN users m ON m.id = ar.marked_by AND m.deleted_at IS NULL
+        ORDER BY ar.taken_on DESC, c.level_no NULLS LAST, s.name NULLS LAST,
+                 e.roll_no NULLS LAST`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.taken_on),
+    cell(r.class_name),
+    cell(r.section_name),
+    cell(r.period_no),
+    cell(r.subject_name),
+    cell(r.student_code),
+    cell(r.student_name),
+    cell(r.roll_no),
+    bnOf(ATTENDANCE_BN, r.status),
+    cell(r.minutes_late),
+    cell(r.remark),
+    cell(r.marked_by_name)
+  ]
+};
+var results = {
+  headers: [
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09AC\u09B0\u09CD\u09B7",
+    "\u09AA\u09B0\u09C0\u0995\u09CD\u09B7\u09BE",
+    "\u09AA\u09B0\u09C0\u0995\u09CD\u09B7\u09BE\u09B0 \u0985\u09AC\u09B8\u09CD\u09A5\u09BE",
+    "\u09AA\u09CD\u09B0\u0995\u09BE\u09B6\u09C7\u09B0 \u09A4\u09BE\u09B0\u09BF\u0996",
+    "\u09B6\u09CD\u09B0\u09C7\u09A3\u09BF",
+    "\u09B6\u09BE\u0996\u09BE",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0 \u0986\u0987\u09A1\u09BF",
+    "\u09B6\u09BF\u0995\u09CD\u09B7\u09BE\u09B0\u09CD\u09A5\u09C0\u09B0 \u09A8\u09BE\u09AE",
+    "\u09B0\u09CB\u09B2",
+    "\u09AC\u09BF\u09B7\u09AF\u09BC",
+    "\u09B8\u09C3\u099C\u09A8\u09B6\u09C0\u09B2",
+    "\u09A8\u09C8\u09B0\u09CD\u09AC\u09CD\u09AF\u0995\u09CD\u09A4\u09BF\u0995",
+    "\u09AC\u09CD\u09AF\u09AC\u09B9\u09BE\u09B0\u09BF\u0995",
+    "\u09A7\u09BE\u09B0\u09BE\u09AC\u09BE\u09B9\u09BF\u0995",
+    "\u09AE\u09CB\u099F \u09A8\u09AE\u09CD\u09AC\u09B0",
+    "\u0997\u09CD\u09B0\u09C7\u09A1",
+    "\u0997\u09CD\u09B0\u09C7\u09A1 \u09AA\u09AF\u09BC\u09C7\u09A8\u09CD\u099F",
+    "\u0985\u09A8\u09C1\u09AA\u09B8\u09CD\u09A5\u09BF\u09A4"
+  ],
+  /**
+   * Per-subject marks, which is the grain that can be recomputed from.
+   *
+   * `exam_results` holds the derived per-student totals — GPA, rank,
+   * pass/fail — and `exam_marks` holds what was actually entered. §12 asks
+   * for "enough structure to reconstruct the result history", and the
+   * component marks are that: a GPA can be recomputed from subjects, and
+   * subjects cannot be recovered from a GPA.
+   *
+   * UNPUBLISHED exams are included, with their status named. The marks are
+   * the school's own work whether or not a head has pressed publish, and an
+   * export that showed only published results would hand back a term with
+   * the marking still in progress silently missing.
+   */
+  async select(client) {
+    const { rows } = await client.query(
+      `SELECT ay.label            AS year_label,
+              ex.name_bn          AS exam_name,
+              ex.status::text     AS exam_status,
+              ex.published_at::text AS exam_published_at,
+              c.name_bn           AS class_name,
+              s.name              AS section_name,
+              sp.student_code,
+              u.full_name_bn      AS student_name,
+              e.roll_no,
+              sub.name_bn         AS subject_name,
+              em.cq_marks::text, em.mcq_marks::text,
+              em.practical_marks::text, em.ca_marks::text,
+              em.total_marks::text,
+              em.grade_letter, em.grade_point::text,
+              em.is_absent
+         FROM exam_marks em
+         JOIN exam_subjects es ON es.id = em.exam_subject_id
+         JOIN exams ex         ON ex.id = es.exam_id
+         JOIN users u          ON u.id = em.student_id AND u.deleted_at IS NULL
+         LEFT JOIN subjects sub ON sub.id = es.subject_id
+         LEFT JOIN student_profiles sp ON sp.user_id = em.student_id
+         LEFT JOIN academic_years ay ON ay.id = em.academic_year_id
+         LEFT JOIN enrolments e ON e.student_id = em.student_id
+                               AND e.academic_year_id = em.academic_year_id
+         LEFT JOIN sections s ON s.id = e.section_id
+         LEFT JOIN classes  c ON c.id = s.class_id
+        ORDER BY ay.label DESC, ex.name_bn, c.level_no NULLS LAST,
+                 s.name NULLS LAST, e.roll_no NULLS LAST, sub.name_bn`
+    );
+    return rows;
+  },
+  row: (r) => [
+    cell(r.year_label),
+    cell(r.exam_name),
+    bnOf(EXAM_STATUS_BN, r.exam_status),
+    cell(r.exam_published_at),
+    cell(r.class_name),
+    cell(r.section_name),
+    cell(r.student_code),
+    cell(r.student_name),
+    cell(r.roll_no),
+    cell(r.subject_name),
+    cell(r.cq_marks),
+    cell(r.mcq_marks),
+    cell(r.practical_marks),
+    cell(r.ca_marks),
+    cell(r.total_marks),
+    cell(r.grade_letter),
+    cell(r.grade_point),
+    r.is_absent === null ? "" : r.is_absent ? "\u09B9\u09CD\u09AF\u09BE\u0981" : "\u09A8\u09BE"
+  ]
+};
+async function handler23(req, res) {
+  return handleCsvExport(req, res, {
+    roles: EXPORT_ROLES,
+    datasets: {
+      students,
+      attendance,
+      results
+    }
+  });
+}
+
 // services/academics-svc/api/index.ts
 var ROUTES = {
   sections: handler,
@@ -6007,6 +6407,7 @@ var ROUTES = {
   subjects: handler13,
   attendance: handler14,
   import: handler15,
+  export: handler23,
   ward: handler16,
   subjectchoice: handler17,
   classperf: handler18,
@@ -6021,7 +6422,7 @@ var ROUTES = {
   search: handler20,
   history: handler21
 };
-async function handler23(req, res) {
+async function handler24(req, res) {
   const path = new URL(req.url ?? "/", "http://internal").pathname;
   const sub = path.split("/").filter(Boolean).pop() ?? "";
   const route = ROUTES[sub];
@@ -6036,5 +6437,5 @@ async function handler23(req, res) {
   return route(req, res);
 }
 export {
-  handler23 as default
+  handler24 as default
 };

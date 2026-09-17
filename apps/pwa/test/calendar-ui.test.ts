@@ -13,7 +13,7 @@
  *   - dates read in Bangla; no ISO string reaches a normal user
  *   - a refusal is the whole answer, never a refusal above an empty grid
  */
-import { test, describe, beforeEach } from 'node:test';
+import { test, describe, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 
@@ -46,6 +46,11 @@ const fire = (el: Element, type = 'click') => el.dispatchEvent(new dom.window.Ev
 const byLabel = (re: RegExp) =>
   [...root().querySelectorAll('button')].find((b) => re.test(b.textContent ?? ''));
 const days = () => [...root().querySelectorAll('.cal-day')] as HTMLElement[];
+/** The month arrows are icon-only; they are found by their accessible name. */
+const arrow = (dir: 'আগের' | 'পরের') =>
+  root().querySelector(`button[aria-label^="${dir} মাস"]`) as HTMLElement | null;
+/** confirmOverlay mounts on the body, outside the view root. */
+const pageText = () => doc().body.textContent ?? '';
 const dayOf = (n: string) => days().find((b) => b.getAttribute('aria-label')?.startsWith(n));
 
 function fakeAuth(body: unknown, opts: { status?: number; throws?: boolean } = {}) {
@@ -93,9 +98,9 @@ async function mountOctober(payload: CalendarPayload, canManage = true) {
   const now = new Date();
   const steps = (target.getFullYear() - now.getFullYear()) * 12
     + (target.getMonth() - now.getMonth());
-  const step = steps >= 0 ? /^পরের/ : /^← আগের/;
+  const step = steps >= 0 ? 'পরের' : 'আগের';
   for (let i = 0; i < Math.abs(steps); i++) {
-    fire(byLabel(step)!);
+    fire(arrow(step)!);
     await settle();
   }
   return auth;
@@ -107,17 +112,25 @@ describe('the weekend comes from the tenant', () => {
   test('THE ONE THAT MATTERS — Friday+Saturday for one school…', async () => {
     await mountOctober(PAYLOAD({ weekendDays: [5, 6] }));
     const heads = [...root().querySelectorAll('.cal-grid thead th')];
+    // Each header carries the full name (what a reader hears) and a
+    // one-letter phone label; the full name identifies the column. The week
+    // is drawn Saturday-first, so the tenant's {5,6} is শনি … শুক্র.
     const shaded = heads.filter((h) => h.classList.contains('cal-weekend'))
-      .map((h) => h.textContent);
-    assert.deepEqual(shaded, ['শুক্র', 'শনি']);
+      .map((h) => h.querySelector('.cal-wd-full')?.textContent);
+    assert.deepEqual(shaded, ['শনি', 'শুক্র']);
   });
 
   test('…and Friday only for a Madrasah, from the same code', async () => {
     await mountOctober(PAYLOAD({ weekendDays: [5] }));
     const shaded = [...root().querySelectorAll('.cal-grid thead th')]
-      .filter((h) => h.classList.contains('cal-weekend')).map((h) => h.textContent);
+      .filter((h) => h.classList.contains('cal-weekend'))
+      .map((h) => h.querySelector('.cal-wd-full')?.textContent);
     assert.deepEqual(shaded, ['শুক্র'],
       'a hardcoded Friday+Saturday would have shaded two columns here');
+    // The day cells carry the same answer; `data-state` is the hook the grey
+    // weekend ground is drawn from, so a Saturday here must not get it.
+    assert.equal(dayOf('১৬ অক্টোবর')!.closest('td')!.getAttribute('data-state'), 'weekend');
+    assert.equal(dayOf('১৭ অক্টোবর')!.closest('td')!.getAttribute('data-state'), 'normal');
   });
 
   test('a school with no weekend at all shades nothing rather than guessing', async () => {
@@ -226,7 +239,7 @@ describe('holidays', () => {
     await settle();
     // The consequence nobody would guess: calendar_days drives sms-svc's
     // holiday suppression, so removing the holiday un-silences that day.
-    assert.match(text(), /হাজিরার এসএমএস আবার পাঠানো হবে/);
+    assert.match(pageText(), /হাজিরার এসএমএস আবার পাঠানো হবে/);
   });
 
   test('deleting an ordinary event does not claim that', async () => {
@@ -237,7 +250,8 @@ describe('holidays', () => {
     await settle();
     fire(byLabel(/^মুছে ফেলুন$/)!);
     await settle();
-    assert.doesNotMatch(text(), /এসএমএস আবার/);
+    assert.ok(doc().querySelector('[role="alertdialog"]'), 'the confirmation is open');
+    assert.doesNotMatch(pageText(), /এসএমএস আবার/);
   });
 });
 
@@ -246,7 +260,7 @@ describe('holidays', () => {
 describe('the event form', () => {
   test('offers no start/end time, because nothing in the product reads one', async () => {
     await mountOctober(PAYLOAD());
-    fire(byLabel(/নতুন এন্ট্রি/)!);
+    fire(byLabel(/নতুন ঘটনা/)!);
     await settle();
     assert.equal(root().querySelectorAll('input[type=time]').length, 0,
       'a time the office fills in that no consumer honours is worse than none');
@@ -254,13 +268,13 @@ describe('the event form', () => {
 
   test('asks for shifts only when the school runs more than one', async () => {
     await mountOctober(PAYLOAD({ shifts: ['morning', 'day'] }));
-    fire(byLabel(/নতুন এন্ট্রি/)!);
+    fire(byLabel(/নতুন ঘটনা/)!);
     await settle();
     assert.ok(root().querySelector('fieldset'), 'two shifts is a real choice');
 
     root().textContent = '';
     await mountOctober(PAYLOAD({ shifts: ['single'] }));
-    fire(byLabel(/নতুন এন্ট্রি/)!);
+    fire(byLabel(/নতুন ঘটনা/)!);
     await settle();
     assert.equal(root().querySelectorAll('fieldset').length, 0,
       'one shift makes "which shift" a question with one answer');
@@ -268,7 +282,7 @@ describe('the event form', () => {
 
   test('refuses an empty title in place', async () => {
     await mountOctober(PAYLOAD());
-    fire(byLabel(/নতুন এন্ট্রি/)!);
+    fire(byLabel(/নতুন ঘটনা/)!);
     await settle();
     const form = root().querySelector('.ui-card-form')!;
     fire(form, 'submit');
@@ -283,7 +297,7 @@ describe('the event form', () => {
 
   test('SMS is unavailable until notify is chosen', async () => {
     await mountOctober(PAYLOAD());
-    fire(byLabel(/নতুন এন্ট্রি/)!);
+    fire(byLabel(/নতুন ঘটনা/)!);
     await settle();
     const boxes = [...root().querySelectorAll('.ui-card-form input[type=checkbox]')] as HTMLInputElement[];
     const sms = boxes[boxes.length - 1];
@@ -295,8 +309,8 @@ describe('the event form', () => {
   });
 
   test('notifying is confirmed, because a notice cannot be recalled', async () => {
-    await mountOctober(PAYLOAD());
-    fire(byLabel(/নতুন এন্ট্রি/)!);
+    const auth = await mountOctober(PAYLOAD());
+    fire(byLabel(/নতুন ঘটনা/)!);
     await settle();
     const form = root().querySelector('.ui-card-form')!;
     (form.querySelector('[name="titleBn"]') as HTMLInputElement).value = 'ছুটি';
@@ -306,13 +320,15 @@ describe('the event form', () => {
     fire(notify, 'change');
     fire(form, 'submit');
     await settle();
-    assert.match(text(), /ফিরিয়ে নেওয়া যায় না/);
+    assert.match(pageText(), /ফিরিয়ে নেওয়া যায় না/);
     assert.equal(doc().activeElement?.textContent, 'বাতিল');
+    assert.equal(auth.calls.some((c) => c.init?.method === 'POST'), false,
+      'nothing is sent until the confirmation is answered');
   });
 
   test('saving without notify goes straight through', async () => {
     const auth = await mountOctober(PAYLOAD());
-    fire(byLabel(/নতুন এন্ট্রি/)!);
+    fire(byLabel(/নতুন ঘটনা/)!);
     await settle();
     const form = root().querySelector('.ui-card-form')!;
     (form.querySelector('[name="titleBn"]') as HTMLInputElement).value = 'ছুটি';
@@ -372,7 +388,7 @@ describe('the four states', () => {
 
   test('success names what happened, including who was told', async () => {
     const auth = await mountOctober(PAYLOAD());
-    fire(byLabel(/নতুন এন্ট্রি/)!);
+    fire(byLabel(/নতুন ঘটনা/)!);
     await settle();
     const form = root().querySelector('.ui-card-form')!;
     (form.querySelector('[name="titleBn"]') as HTMLInputElement).value = 'ছুটি';
@@ -390,7 +406,7 @@ describe('roles and presentation', () => {
   test('a read-only role sees the calendar and no controls at all', async () => {
     await mountOctober(PAYLOAD(), false);
     assert.ok(days().length > 0, 'a calendar guardians cannot see is not a school calendar');
-    assert.equal(byLabel(/নতুন এন্ট্রি/), undefined);
+    assert.equal(byLabel(/নতুন ঘটনা/), undefined);
     fire(dayOf('১০ অক্টোবর')!);
     await settle();
     assert.match(text(), /বিদ্যালয় ছুটি/);
@@ -404,7 +420,8 @@ describe('roles and presentation', () => {
     await settle();
     // The <input type=date> value is legitimately ISO; the READING surface
     // is what must not be.
-    const reading = [...root().querySelectorAll('.system-title, .att-sub, .section-heading, h2')]
+    const reading = [...root().querySelectorAll(
+      '.ui-list-title, .ui-list-main, .cal-hint, .cal-nav-month, .cal-month-chip, h2')]
       .map((e) => e.textContent).join(' ');
     assert.doesNotMatch(reading, /\d{4}-\d{2}-\d{2}/);
     assert.match(text(), /১০ অক্টোবর, ২০২৬/);
@@ -419,7 +436,7 @@ describe('roles and presentation', () => {
   test('navigating months refetches for the new range', async () => {
     const auth = await mountOctober(PAYLOAD());
     const before = auth.calls.length;
-    fire(byLabel(/^পরের/)!);
+    fire(arrow('পরের')!);
     await settle();
     assert.ok(auth.calls.length > before);
     assert.match(auth.calls[auth.calls.length - 1].path, /from=2026-11-01&to=2026-11-30/);
@@ -430,6 +447,92 @@ describe('roles and presentation', () => {
     const opts = [...root().querySelectorAll('.seg-opt')];
     assert.equal(opts[0].getAttribute('aria-pressed'), 'true');
     assert.equal(opts[0].getAttribute('data-active'), 'true');
+  });
+});
+
+// ── Ata Ekta: the drawn month (04 Guardian §05, 09 Comms §03) ──────────
+
+describe('the drawn month', () => {
+  // "Upcoming" is relative to today, so these pin the clock (Date only —
+  // timers stay real) to a day before the October fixtures.
+  beforeEach(() => { mock.timers.enable({ apis: ['Date'], now: new Date(2026, 8, 17, 12) }); });
+  afterEach(() => { mock.timers.reset(); });
+
+  test('the week starts on Saturday, and the 1st falls in its own column', async () => {
+    await mountOctober(PAYLOAD({ entries: [] }));
+    const heads = [...root().querySelectorAll('.cal-grid thead th .cal-wd-full')]
+      .map((h) => h.textContent);
+    assert.deepEqual(heads, ['শনি', 'রবি', 'সোম', 'মঙ্গল', 'বুধ', 'বৃহঃ', 'শুক্র']);
+    // 1 October 2026 is a Thursday: five blanks (শনি … বুধ) before it.
+    const firstRow = root().querySelector('.cal-grid tbody tr')!;
+    const cells = [...firstRow.children];
+    assert.equal(cells.findIndex((td) => td.querySelector('.cal-day')), 5);
+    assert.match(cells[5].querySelector('.cal-day')!.getAttribute('aria-label') ?? '', /^১ অক্টোবর/);
+  });
+
+  test('each month arrow is named by the month it goes to', async () => {
+    await mountOctober(PAYLOAD());
+    assert.match(arrow('আগের')!.getAttribute('aria-label') ?? '', /সেপ্টেম্বর/);
+    assert.match(arrow('পরের')!.getAttribute('aria-label') ?? '', /নভেম্বর/);
+  });
+
+  test('one primary action at a time — the form’s save replaces the header’s', async () => {
+    await mountOctober(PAYLOAD());
+    assert.equal(root().querySelectorAll('.btn-primary').length, 1);
+    fire(byLabel(/নতুন ঘটনা/)!);
+    await settle();
+    assert.equal(root().querySelectorAll('.btn-primary').length, 1);
+    assert.ok(byLabel(/সংরক্ষণ করুন/)?.classList.contains('btn-primary'));
+  });
+
+  test('a day is filled by its kind, and a day with nothing carries no kind', async () => {
+    await mountOctober(PAYLOAD());
+    assert.equal(dayOf('১০ অক্টোবর')!.closest('td')!.getAttribute('data-kind'), 'holiday');
+    assert.equal(dayOf('১১ অক্টোবর')!.closest('td')!.hasAttribute('data-kind'), false);
+  });
+
+  test('the upcoming list shows a run of days as one row, and a reader hears the dates', async () => {
+    await mountOctober(PAYLOAD({
+      entries: ['2026-10-18', '2026-10-19', '2026-10-20'].map((day, i) =>
+        ENTRY({ id: `x${i}`, day, kind: 'exam', titleBn: 'অর্ধবার্ষিক পরীক্ষা', editable: false })),
+    }));
+    const rows = [...root().querySelectorAll('.cal-upcoming .ui-list-item')];
+    assert.equal(rows.length, 1, 'three identical rows for one exam week is noise');
+    assert.equal(rows[0].querySelector('.cal-up-date')?.textContent, '১৮–২০');
+    assert.match(rows[0].textContent ?? '', /১৮ অক্টোবর, ২০২৬ থেকে ২০ অক্টোবর, ২০২৬/);
+    assert.match(rows[0].textContent ?? '', /পরীক্ষা/);
+    // The kind is written where a sighted reader sees it, beside the coloured
+    // date — not only inside the screen-reader text.
+    const kind = rows[0].querySelector('.ui-list-sub');
+    assert.equal(kind?.textContent, 'পরীক্ষা');
+    assert.equal(kind?.closest('.ui-sr-only'), null, 'the kind word is visible, not colour alone');
+  });
+
+  test('an upcoming day from another month carries its month, never posing as this one', async () => {
+    // An exam PERIOD arrives dated on its first day, which can be last month.
+    await mountOctober(PAYLOAD({
+      entries: [ENTRY({ id: 'exam:p1', day: '2026-09-25', kind: 'exam', titleBn: 'মধ্যবর্তী পরীক্ষা', editable: false })],
+    }));
+    assert.equal(root().querySelector('.cal-upcoming .cal-up-date')?.textContent, '২৫/৯');
+  });
+
+  test('a run’s later days label "—" in the cell, but still name the entry aloud', async () => {
+    await mountOctober(PAYLOAD({
+      entries: ['2026-10-05', '2026-10-06'].map((day, i) =>
+        ENTRY({ id: `h${i}`, day, titleBn: 'শারদীয় ছুটি' })),
+    }));
+    assert.equal(dayOf('৫ অক্টোবর')!.querySelector('.cal-dot')?.textContent, 'শারদীয় ছুটি');
+    assert.equal(dayOf('৬ অক্টোবর')!.querySelector('.cal-dot')?.textContent, '—');
+    assert.match(dayOf('৬ অক্টোবর')!.getAttribute('aria-label') ?? '', /ছুটি: শারদীয় ছুটি/);
+  });
+
+  test('a refusal uses the shared denied state, with no retry', async () => {
+    const auth = fakeAuth(PAYLOAD(), { status: 403 });
+    new CalendarView({ root: root(), doc: doc(), auth: auth as never, canManage: true });
+    await settle();
+    assert.ok(root().querySelector('.ui-state-denied'));
+    assert.equal(byLabel(/আবার চেষ্টা/), undefined, 'retrying a refusal is futile');
+    assert.equal(byLabel(/নতুন ঘটনা/), undefined, 'no create control over a refusal');
   });
 });
 
@@ -487,13 +590,49 @@ describe('working weekend', () => {
     assert.equal(cell.getAttribute('data-state'), 'normal');
   });
 
-  test('the legend names the states present, and only those', async () => {
+  test('the key names every colour in words, in the drawn order', async () => {
+    // Ata Ekta: a phone cell says its kind by fill colour, so the key is what
+    // makes that colour words. It is fixed — ছুটি, অনুষ্ঠান, পরীক্ষা, খোলা —
+    // so a colour is explained whether or not this month happens to use it.
     await mountOctober(PAYLOAD({ entries: [WORKING] }));
-    const states = [...root().querySelectorAll('.cal-legend-swatch')]
-      .map((s) => s.getAttribute('data-state'));
-    assert.ok(states.includes('working_weekend'));
-    assert.ok(states.includes('weekend'));
-    assert.ok(!states.includes('holiday'), 'no holiday this month, so no key for one');
+    const items = [...root().querySelectorAll('.cal-legend-item')]
+      .filter((li) => li.querySelector('.cal-legend-swatch[data-kind]'));
+    assert.deepEqual(
+      items.map((li) => li.querySelector('.cal-legend-swatch')?.getAttribute('data-kind')),
+      ['holiday', 'event', 'exam', 'working_weekend']);
+    assert.deepEqual(items.map((li) => li.textContent), ['ছুটি', 'অনুষ্ঠান', 'পরীক্ষা', 'খোলা'],
+      'every swatch has its word beside it — colour is never the message alone');
+  });
+
+  test('the tenant’s weekend is keyed, last, when it has one — and only then', async () => {
+    // The weekend is what a "খোলা" Saturday is read against, so the key
+    // explains it whenever the school has a weekend at all.
+    await mountOctober(PAYLOAD({ weekendDays: [5, 6], entries: [WORKING] }));
+    const items = [...root().querySelectorAll('.cal-legend-item')];
+    const last = items[items.length - 1];
+    assert.equal(last.querySelector('.cal-legend-swatch')?.getAttribute('data-state'), 'weekend');
+    assert.equal(last.textContent, 'সাপ্তাহিক ছুটি');
+
+    await mountOctober(PAYLOAD({ weekendDays: [], entries: [] }));
+    assert.equal(root().querySelector('.cal-legend-swatch[data-state="weekend"]'), null,
+      'a school with no weekend has nothing to key');
+  });
+
+  test('a kind outside the four is keyed only in a month that has one', async () => {
+    await mountOctober(PAYLOAD({ entries: [WORKING] }));
+    assert.equal(root().querySelector('.cal-legend-swatch[data-kind="ramadan_schedule"]'), null);
+    await mountOctober(PAYLOAD({
+      entries: [ENTRY({ id: 'r1', day: '2026-10-05', kind: 'ramadan_schedule', titleBn: 'রমজান' })],
+    }));
+    assert.ok(root().querySelector('.cal-legend-swatch[data-kind="ramadan_schedule"]'));
+  });
+
+  test('a working Saturday with a holiday is filled as the holiday', async () => {
+    // The fill follows the same precedence as data-state and the sender.
+    await mountOctober(PAYLOAD({
+      entries: [WORKING, ENTRY({ id: 'h1', day: '2026-10-17', kind: 'holiday' })],
+    }));
+    assert.equal(dayOf('১৭ অক্টোবর')!.closest('td')!.getAttribute('data-kind'), 'holiday');
   });
 
   test('the card explains the effect, which "working weekend" alone does not', async () => {
@@ -511,8 +650,8 @@ describe('working weekend', () => {
     fire(byLabel(/^মুছে ফেলুন$/)!);
     await settle();
     // The opposite consequence to a holiday's, and just as invisible.
-    assert.match(text(), /আবার\s*\n?\s*সাপ্তাহিক ছুটি হিসেবে গণ্য হবে|সাপ্তাহিক ছুটি হিসেবে গণ্য হবে/);
-    assert.match(text(), /এসএমএস বন্ধ থাকবে/);
+    assert.match(pageText(), /আবার\s*\n?\s*সাপ্তাহিক ছুটি হিসেবে গণ্য হবে|সাপ্তাহিক ছুটি হিসেবে গণ্য হবে/);
+    assert.match(pageText(), /এসএমএস বন্ধ থাকবে/);
   });
 
   test('a read-only role sees the state and cannot change it', async () => {
@@ -530,7 +669,7 @@ describe('working weekend', () => {
     await mountOctober(PAYLOAD());
     assert.ok([...root().querySelectorAll('.seg-opt')]
       .some((o) => o.textContent === 'খোলা'), 'a school can find its make-up days');
-    fire(byLabel(/নতুন এন্ট্রি/)!);
+    fire(byLabel(/নতুন ঘটনা/)!);
     await settle();
     const kinds = [...(root().querySelector('.ui-card-form select') as HTMLSelectElement).options]
       .map((o) => o.value);

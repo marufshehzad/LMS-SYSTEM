@@ -14606,3 +14606,1951 @@ phase that would have made them tempting — the fleet list now sorts and
 filters, so "select these eleven" is one control away. The natural first bulk
 action is suspension, and a mis-selected bulk suspend is the most destructive
 thing this product can do. The trigger stays where P7 put it.
+
+
+# CI — four failures behind one (2026-09-08)
+
+`48a9176`. The `frontend` workflow had been red on **every push since
+2026-08-31** — 41 consecutive runs, last green 2026-08-23. It was not one
+bug. It was four, stacked so each hid the next, and three shared a cause.
+
+## The cause, and why it could only fail in CI
+
+Node resolves a bare import from the importing FILE's directory upward. This
+repository keeps its shared runtime dependencies at the ROOT, and every CI
+job installed only leaf workspaces. So any test reaching a file under
+`packages/server-core/` needed `pg` or `jose` resolvable *from there* — and
+only the repository root can satisfy that.
+
+A developer machine always has a root `node_modules`. That is the whole
+story: these suites passed locally for eight days and could not have passed
+in CI, and nothing about the code was wrong on either machine.
+
+| # | job | error | reached? |
+|---|---|---|---|
+| 1 | `frontend` · pwa | `Cannot find package 'pg'` from `server-core/src/db.ts` | failed here |
+| 2 | `frontend` · sms-svc | `Cannot find package 'jose'` from `server-core/test/harness.ts` | never reached |
+| 3 | `frontend` · guard | a real parameter property | never reached |
+| 4 | `sync-svc` | same `jose` | own workflow |
+
+Only the first was visible. Fixing it exposed the second, and so on — which
+is why the temptation to fix "the error in the log" and push was the wrong
+instinct here.
+
+## 1. A browser test that needed a Postgres driver
+
+`buildManifest`'s own comment reads: *"Pure, so the identity rules are
+testable without a database or a request."* True of the function and false of
+the file — `api/manifest.ts` also exports the HTTP handler, which reaches
+`resolvePublicTenant` → `db.ts` → `pg`, and an ES import loads the graph.
+
+Extracted to `services/ops-svc/src/manifest-build.ts`, which may not import a
+service, a database or a request. The API module imports and re-exports it,
+so `ops-svc`'s own test is untouched. The emitted bundle is byte-identical;
+only esbuild's source-path comment moved.
+
+## 2 & 4. Declaring the root install
+
+`sms-svc` and `sync-svc` genuinely need the harness and a database — there is
+no architectural fix, they need the dependency. Both workflows now install
+the root first.
+
+Deliberately **not** by adding a nested install to `packages/server-core`.
+That was the first attempt, and esbuild then resolved `jose` from the nested
+copy and rewrote source paths in **eight committed `api/` bundles** — which
+would have failed the "bundles match the sources" gate on any machine without
+that nested copy. One resolution model, not two.
+
+## 3. A guard that had never run
+
+`staff-attendance-view.ts` carried a real
+`constructor(private readonly o: …)`. Node REFUSES to load such a file, so
+the only symptom was that **no test could import it** — the suite stayed
+green by never touching it, and the shipped bundle was always fine because
+esbuild compiles it properly. A silent hole in coverage, not a broken screen.
+
+The guard then failed on five COMMENT lines that quote the banned syntax in
+order to explain it. Excluded narrowly — only lines whose first non-space
+characters are `//` or `*`, so a real declaration cannot hide behind it — and
+negative-tested by reintroducing a violation, which is still caught.
+
+## And one of P10's own
+
+`db/tests/platform_fleet.sql` failed the `database` workflow:
+*"a five-row page reports a total of \<NULL>, the fleet has 0."* CI's
+database is freshly migrated and holds no tenants, so `platform_fleet`
+returns no rows and `SELECT DISTINCT total_count INTO` leaves a NULL.
+
+The NULL was not the real problem. **A suite pinning a paginated list says
+nothing against zero rows** — every ordering, paging and total assertion was
+vacuously true, and it would have gone on reporting success while proving
+nothing. It now seeds seven schools through `app.create_tenant` inside a
+`BEGIN; … ROLLBACK;`, the way the rest of `db/tests` does, so assertion 2
+compares a five-row page against a fleet of seven and means something.
+
+Verified against a database built the way CI builds one — 80 migrations, zero
+tenants: the old suite fails with CI's exact error, the new one passes and
+reports *"a page of 5 still reports the whole fleet (7)"*. All 28 suites run
+twice with zero residue, which is what `database.yml` checks.
+
+## How each fix was verified
+
+Not by reading the workflow and reasoning about it. Each failure was
+reproduced locally under CI's actual condition and re-run after the fix:
+
+- root `node_modules` **removed entirely** → `apps/pwa` 852/852,
+  `packages/ui-core` 199/199
+- root `pg` and `jose` hidden → `sync-svc` 23/23
+- a fresh 80-migration database with 0 tenants → 28 SQL suites, twice, zero
+  residue
+- the parameter-property guard, with a violation reintroduced → still caught
+
+2,174 tests · typecheck 0/0/0 · build clean · bundles current · D11 brand
+boundary in both directions · 162,511 / 184,320 bytes gzipped.
+`index.html` untouched at `496199bd`.
+
+## One flake, recorded rather than waved away
+
+One full-suite run during this work reported **12 workspaces instead of 13**
+— a workspace that did not report at all rather than a test that failed. Four
+consecutive runs before and after were clean at 2,174. The shape matches
+**B-36**: the fixture advisory lock has no timeout, so one wedged suite stops
+others with no diagnosis. Not reproduced, not fixed, and noted here because a
+green run after an unexplained red one is not evidence that the red one did
+not happen.
+
+
+# P11 readiness audit — four documents disagreeing with the code (2026-09-08)
+
+No implementation. The audit read the seven source-of-truth documents, then
+checked every claim against the repository, and found the documents wrong in
+four places. Corrected here rather than silently reconciled; nothing erased.
+
+## The approved P11 scope is one sentence
+
+`11-MASTER-PLAN.md:1906` — **"P11 — portability. Data export, which does not
+exist in any form today and is the clearest customer-trust gap."** That is the
+whole of it. The substantive derivation is
+`FINAL-OWNER-SAAS-OPERATIONS-AUDIT.md` §10.
+
+Re-verified against the code, and the audit's claims still hold exactly:
+
+- **Zero export routes.** All 26 platform routes and all 9 tenant dispatchers
+  enumerated; nothing matching export/csv/download/dump/backup/archive.
+- **`toCsv()` still has exactly one production caller** —
+  `academics-svc/src/import-run.ts:80`, the error list for a *failed* import.
+  The only file the product ever hands a school is a list of its own mistakes.
+- **`attendance_sheet` still contains no attendance.** `documents.ts:50` says
+  so in its own words: "the blank-grid paper fallback".
+
+## Four contradictions
+
+**1. The phase status board had two P6 rows with opposite answers.** Line 1360
+said COMPLETE with evidence; line 1362 said NOT STARTED. In the file D17 names
+as *"the single place that answers what state is every phase in, today"*, and
+it had said both since 2026-09-02. The COMPLETE row is correct; the other is
+marked SUPERSEDED rather than deleted.
+
+**2. The board stopped at P8.** No P9 or P10 rows, though both are complete
+and accepted. Added.
+
+**3. `00-START-HERE.md` said "last reconciled at the end of P6"** — through
+P7, P8, P9 and P10. That file exists specifically for a reader with no chat
+history, which is where a stale date costs most.
+
+**4. `B-11` was half false when it was written.** It reads "Export and
+human-readable actor names do not [exist]". Actor names have resolved since
+`9ada3e0` (2026-08-29): `ops-svc/api/audit.ts` LEFT JOINs `users` and returns
+`actor_name`, and `audit-view.ts` renders it with a facet filter. This backlog
+was created 2026-09-01 — three days later — and carried the claim forward
+unchecked. Only the EXPORT half was ever open, and that half is P11.
+
+## And one of my own
+
+**`B-117` duplicates `B-32`.** I opened it during P10 for "no `apps/pwa` test
+file is type-checked" without finding B-32, which has covered exactly that —
+wider — since P5-0. That is the duplication *"One row, one ID"* exists to
+prevent. B-117 is marked SUPERSEDED; the ID stays, because IDs are permanent.
+
+Re-measuring to merge them corrected B-32 in the harder direction: it claimed
+**46** unchecked test files and **73** errors; today it is **66** files (53
+`apps/pwa/test`, 8 `ui-core`, 3 `sync-svc`, 2 `offline`) and P10 measured
+**113** errors in the `apps/pwa` share alone. The cost of closing it has grown
+as P6, P9 and P10 added suites.
+
+## The flake, now characterised
+
+Two full-suite runs during this session reported **12 workspaces instead of
+13** — a workspace that did not report at all rather than a test that failed.
+The arithmetic names it each time: the first lost 144 tests (`ops-svc`), the
+second 261 (`rms-svc`). **Different workspaces**, which points away from one
+broken suite and at the shared fixture lock — **B-36**, whose advisory lock
+has no timeout, so one wedged suite stops others with no diagnosis. Still not
+reproduced on demand. Recorded rather than re-run until green.
+
+## B-119 is still growing
+
+`p7-gate` fixtures in the development database: **241 → 255** since P10 closed.
+Two per suite run, and the teardown cannot delete them because it runs on the
+platform connection, where `tenant_self` hides the rows. P10's own new
+fixtures — seeded inside a rolled-back transaction — leak **zero**, which is
+the shape B-119's fix needs.
+
+
+# P11 — portability: the first files this product ever gave a school back (2026-09-08)
+
+`7299b48` … and the commits after it. The Master Plan's whole statement of
+P11 is one sentence — *"portability. Data export, which does not exist in any
+form today and is the clearest customer-trust gap."* Until this phase the only
+file the product ever handed a school was the error list from a FAILED import:
+a list of their own mistakes. Everything they typed in stayed in.
+
+Ten datasets, plus an offboarding manifest.
+
+## The contract, decided before any code (§0)
+
+**A streamed CSV per dataset, not one archive.** Three reasons, all from the
+repository rather than from preference:
+
+1. **Object storage is stubbed** (B-17) and returns 503. An archive has to be
+   assembled somewhere, and the only honest somewhere today is memory. Adding
+   a storage provider to make export *look* complete is what the brief forbids.
+2. **Nothing in the Master Plan asks for an archive.** It asks for export.
+3. **A CSV opens in the software a Bangladeshi school office runs.** A zip of
+   nine CSVs is one more step between a head teacher and their data.
+
+**Streaming is honest on Vercel and NOT on Netlify.** `netlify/adapter.mjs`
+shims Node's `ServerResponse` onto a Web `Response`, and its `write()` pushes
+into an array joined at `end()` — so the whole file is resident before the
+first byte leaves. Same bytes, same headers, different memory profile. Written
+into `csv-response.ts` so nobody reads "streaming" in the code and believes it
+on both edges.
+
+## What shipped
+
+| dataset | grain | service |
+|---|---|---|
+| students | one row per student | academics |
+| teachers | one row per staff member | ops |
+| guardians | one row per LINK | ops |
+| structure | one row per section | ops |
+| attendance | one row per student per session | academics |
+| results | one row per subject mark | academics |
+| fees | one row per invoice | finance |
+| notices | one row per notice | ops |
+| audit | one row per activity entry | ops |
+| offboarding | one row per dataset — a manifest | ops |
+
+## Five bugs, and how each was found
+
+**1. A duplicated student — found by reading a constraint.** The students
+query began as `LEFT JOIN enrolments ON status = 'active'`. `enrolments` is
+unique on `(tenant, academic_year, student)` — one row per YEAR — so a student
+active in 2025 and 2026 is TWO rows in an export whose entire purpose is a
+faithful copy. The fixture had exactly one active enrolment each, so nothing
+failed. Replaced with a LATERAL that takes the current year, else the most
+recent. The test was written after the fix and then verified by restoring the
+bug.
+
+**2. A probe that could not fail — found by mutating the handler.** The first
+version of security-probe area 9b reused `mentions()`, which looks for the
+other tenant's uuid and name. §6 keeps BOTH out of an export *by design*, so it
+was searching a CSV for identifiers that are absent on purpose. It passed
+against a handler deliberately mutated to trust `?tenantId=` — a mutation that
+turned a 1-row file into **2,000 rows of another school's students**. Rewritten
+to compare CONTENT: no row of B's file may appear in A's, and a forged tenant
+must return the **byte-identical** file. Re-run against the same mutation it
+fails and names the damage.
+
+**3. A uuid in the notices export — found by reading a column type.**
+`notices.audience` is jsonb shaped `{"ids": [...], "type": "section"}`. The
+column name gives no hint that it contains primary keys. Now rendered as a
+phrase and a count.
+
+**4. A uuid in the audit export — found by fetching a real file in a browser.**
+The audit viewer's redactor masks by KEY NAME (`phone`, `nid`, `email`), which
+cannot catch `teacherId`, whose name looks as innocuous as `reason` and whose
+value is a primary key. The suite's seeded rows had no such field, so every
+assertion passed **against a file that was clean only because the fixture
+was**. Fixed by masking uuid-shaped VALUES; the school still sees THAT a
+teacher was involved.
+
+**5. An export the service worker cached.** `/api/v1/academics/export` matched
+the reference-data rule on its prefix and landed in `CACHE_DATA` — a school's
+whole roster persisting in an office machine's browser cache. B-104's
+tenant-keying would have kept it from the NEXT school; it would not have
+stopped it being there. Now network-only, with a test proving the carve-out is
+the export and not the whole prefix.
+
+## Decisions worth keeping
+
+**Money is a number, not a formatted string.** Every screen shows
+`১,৫০০ টাকা` through `formatBdt`. The first thing a school does with a fees
+export is sum a column, and Bangla digits with a unit sum to zero. The amounts
+are plain decimals and the currency is its own column — the one place the
+display contract is deliberately not followed, because the file is not a
+display.
+
+**The formula guard exempts numbers and phones.** `csvCell` prefixes a
+leading `=`, `+`, `-`, `@`, tab or CR — except when the value is purely
+numeric. `-500` is a legitimate amount and `'-500` stops being a number in the
+sheet the school is about to sum; every phone here is E.164, and this is a
+PORTABILITY feature, so `'+8801711000111` would hand back a number that no
+longer dials. Round-trip through the product's own `parseCsv` is asserted.
+
+**One flow, not ten.** `handleCsvExport` owns authorization, tenant
+resolution, the response head, and the audit row. A dataset is a declaration
+and is never handed the chance to read a tenant from the request or to forget
+the audit entry. §27 holds by ORDERING rather than by a check: the head is
+written only after the query succeeds, so no path produces a successful empty
+file from a failed query.
+
+**Roles narrowed, not widened.** Principal, school owner and IT admin
+everywhere; the accountant is added for fees alone, because the ledger is
+their surface and they already read those rows. A class teacher reads their
+own section's roster all day and cannot export the school. **Nobody gained
+data because export exists.**
+
+**Offboarding is a manifest, not a second mechanism.** One row per dataset
+with its live row count and the exact authorized address to fetch it from — a
+checklist a departing school can tick off. It exports and does **not**
+deactivate: §16 keeps those separate, and a head teacher asking for a copy of
+their own roster must not lose their login. Asserted directly.
+
+## Verified
+
+- **2,232 tests** across 13 workspaces (+58 for P11)
+- **Security probe 38/38** over 13 areas, including six export-file checks
+- Browser acceptance: all ten datasets fetched in a real session and the
+  delivered BYTES inspected — BOM present (`ef bb bf`), `no-store`,
+  `attachment`, no uuid, no secret, in every one
+- Widths 360 · 375 · 390 · 1024 · 1280 · 1440 · 1600, no horizontal scroll
+- a11y: h1:1, 0 unnamed buttons, labelled control, keyboard reachable, no uuid
+  on screen, glyphs `aria-hidden`
+- Scale on the CLEAN fixture (2,000 students / 8,000 enrolments): 2,000 rows,
+  549 KB, **104 ms median of 7** end-to-end on localhost
+- Zero fixture leak — the `p11-*` tenants are 0 of 282 (B-119 discipline)
+- `index.html` byte-identical at `496199bd`
+
+## One measurement NOT reported
+
+A clean DB-versus-handler split. Every database-side instrument returned MORE
+than the total request time — `EXPLAIN ANALYZE` reported 177 ms against a
+104 ms round trip — which means the instrument dominated, not the query. The
+end-to-end number is the one that was measured reliably, and the split is
+simply absent rather than guessed at.
+
+## Limitations, stated
+
+- **Streaming is real on Vercel only** (see the contract above).
+- **No stored artifact.** By design, and B-17 stays open and untouched.
+- **The platform-operator fleet export is not built.** §22 lists it; the
+  school-side offboarding path is what shipped, because the school owns its
+  data and the operator's job is not to block them. A platform-svc export
+  would need new SECURITY DEFINER functions per dataset — new attack surface
+  for a case the tenant path already serves. Recorded rather than half-built.
+
+
+# P12 readiness audit — there is no P12 to be ready for (2026-09-08)
+
+No implementation. The audit read the source-of-truth documents and then
+checked every claim against the schema, the routes and the running code.
+
+## The finding that decides the phase
+
+**`docs/11-MASTER-PLAN.md` contains no P12.** The only occurrence of the
+string anywhere in `docs/` is one line in
+`FINAL-FULL-PROJECT-AUDIT-REPORT.md` §29:
+
+> **P12 — Post-pilot feature wave** from §27, ordered by pilot feedback.
+
+Its candidate pool is §27 and its ORDERING INPUT is pilot feedback. **B-5, "a
+pilot institution", is OPEN.** Production holds zero tenants; B-4
+(cross-tenant probe on production) is BLOCKED on B-5, and B-1 (the SMS
+aggregator) is BLOCKED on a contract. So the one input that would tell anyone
+what P12 contains does not exist yet.
+
+## And the roadmap numbering has drifted
+
+§29's proposed roadmap and the phases that actually shipped are not the same
+sequence, which is why "P12" reads as further along than it is:
+
+| §29 proposed | what actually shipped |
+|---|---|
+| P9 — Smart Routine Generator | **P9**, as proposed |
+| **P10 — Identity & Guardian polish** (§31 + §32) | **never shipped, under any name** |
+| P11 — Scale pass (overview query, pagination, operator directory) | shipped as **P10** |
+| — | **P11** — portability, from the Master Plan's own line |
+| P12 — Post-pilot wave | not started |
+
+A whole proposed phase disappeared in the renumbering. Verified in code rather
+than assumed:
+
+- **§31's deliverable, a session/device list with revoke, does not exist.**
+  `identity-svc` routes are `otp/request`, `otp/verify`, `refresh`, `logout`,
+  `activate`. `user_sessions` is written and never listed; there is no
+  "sign out everywhere" surface.
+- **§32's deliverables partly exist and were mis-classified as complete in the
+  P11 audit.** `GET /ops/guardians?studentId=` does return a student's
+  guardians, `GuardianPanel` IS mounted on the academic drill-down drawer
+  (`academic-view.ts:1080`), and it does render `tel:` links. What does NOT
+  exist is the per-tenant class-teacher-phone setting, the guardian
+  name/relation on the roster, or the student's view of their own primary
+  guardian.
+
+## §27, three of fourteen already consumed
+
+`P9 Smart Routine` ✓ (P9), `overview scaling + console pagination` ✓ (P10),
+`CSV/audit export B-11/B-12` ✓ (P11). Of the rest, **stipend report, form
+fill-up, online admission and hifz tracking have zero code** — 0 files match
+each; the "admission" matches in the tree are `admission_date` and
+`admit_card`. Support mode (B-38) appears only as the thing three files say
+they deliberately did NOT build.
+
+## The contact policy disagrees with itself, in code
+
+Not a new bug — B-56 records part of it — but the audit pinned the exact
+shape across three endpoints in two services:
+
+| endpoint | gate | what it hands over |
+|---|---|---|
+| `/academics/students/history` | `MAY_SEE_CONTACT` — excludes `subject_teacher`, `dept_head` | the student's phone |
+| `/academics/roster` | `requireStaff` — blocklist is only `{student, guardian}` | the student's phone |
+| `/ops/guardians?studentId=` | `requireStaff` | every guardian's phone |
+
+So a subject teacher is refused a child's number on one screen and handed it,
+plus the family's, on two others. It is a within-school privacy
+inconsistency rather than a tenant breach — severity unchanged — but the
+rule is stated in one place and contradicted in two.
+
+## B-118's numbers were wrong, and this audit made them wrong twice
+
+Re-measured with plain `\timing` instead of `EXPLAIN ANALYZE`:
+**292 → 16 ms, 500 → 20, 1000 → 38, 2000 → 71** — against the recorded
+260 → 45, 500 → 81, 1000 → 155, 2000 → 307. About **4× overstated**, because
+per-node instrumentation dominates a query with this many LATERAL and
+subquery nodes. P11 hit the same trap and caught it there (its DB-side
+instrument reported 177 ms against a 104 ms round trip) without going back to
+correct P10's figures.
+
+The consequence is a trigger revised twice on measurement rather than on code:
+the P11 audit moved it DOWN to 300–500 real institutions on the inflated
+numbers; with the instrument removed it lands nearer **1,000–1,500**.
+
+## The flake now has three more instances
+
+Full-suite runs that report 12 workspaces instead of 13, losing a whole
+workspace with no assertion named. This session: **ops-svc (144 tests),
+rms-svc (261), sync-svc (23)** — a different workspace every time, which is
+**B-66's** signature exactly and is why it points at the shared fixture lock
+rather than at one broken suite. Two of five full-suite runs today were
+affected. The five CI workflows are green because none of them runs the
+whole suite in one process the way `test-all.mjs` does.
+
+## Verified for this audit
+
+typecheck 0/0/0 · build clean · 80/80 migrations · **security probe 38/38**
+over 13 areas · app.js **164,590 / 184,320** gzipped (89%) · 2,232 tests when
+the suite completes · `index.html` byte-identical at `496199bd` · HEAD ==
+`marufshehzad/LMS-SYSTEM` main, tree clean.
+
+
+# Pre-pilot hardening pass (2026-09-08)
+
+Not a phase and not P12. The objective was to make what exists pilot-ready
+rather than to expand it, and every status below separates CODE from TEST
+from PRODUCTION from EXTERNAL, because several of them have different answers
+in different columns.
+
+## B-50 - the row's premise was stale; the remainder is external
+
+**CODE: complete.** `deploy/` holds six units -
+`shikhon-{sms,maintenance,monitor}.{service,timer}` - plus `shikhon-cron.md`
+with the four install commands. B-50 was written when only the web unit
+existed; the units landed on 2026-09-03 and the row never caught up. The
+timers are written in UTC deliberately (a host moved to Asia/Dhaka would
+otherwise shift both daily jobs six hours with nobody editing a file),
+`Persistent=true` on the dailies and not on the monitor. All three endpoints
+exist and accept `CRON_SECRET`.
+
+**TEST: the monitor was exercised, not just read.** Run against the
+development database it reports exactly the state B-50 describes:
+
+    [critical] The sms_dispatch job has never run
+    [critical] The maintenance job has never run
+    [critical] The monitor job has never run
+    [critical] SMS queue is not draining - 38 queued; oldest waited 239h
+
+Each alert names B-50 and points at `deploy/`. The deadman works:
+`minutesSinceSuccess: null` is the "never ran" state, and the heartbeat is
+recorded only on POST, so an operator LOOKING at the monitor cannot be
+mistaken for the monitor running.
+
+**PRODUCTION: nothing claimed.** A deploy key exists on this machine and
+outbound SSH is blocked in this environment, so the timers were not installed
+and no evidence was recorded. Four commands, in `deploy/shikhon-cron.md`, are
+the operator action.
+
+## B-56 - both halves, and the second one was real
+
+**Contact.** Three routes answered the same question three ways: a local
+8-role list on `students/history`, NOTHING on `roster` (just `requireStaff`,
+whose blocklist is `{student, guardian}`), and a stricter 3-role gate on
+`ops/guardians`. A subject teacher was refused a child's number on one screen
+and handed it on another. `CONTACT_ROLES`/`maySeeContact()` is now the one
+rule. The roster gates the VALUE, not the route - a subject teacher still
+reads it, because they need names and roll numbers to teach, and gets `null`
+where the number was. **Nothing was widened**; `ops/guardians` keeps its
+stricter gate.
+
+**Revocation - reproduced before it was fixed.**
+`app.set_guardian_permissions` upserts with `ON CONFLICT ... WHERE revoked_at
+IS NULL`. That target is a PARTIAL index, so a pair whose only row is revoked
+does not conflict and the statement INSERTS A NEW LIVE ROW. Through the
+endpoint, against PostgreSQL:
+
+    after revoke   links: [false]
+    PATCH -> 200   links: [false, true]      <- different linkId
+
+A person's access to a child came back with no restore decision and no
+distinct audit action. The likely trigger is a stale drawer rather than
+malice: an admin may SEE revoked links - that is how they are audited - so
+saving an SMS toggle on one was enough. PATCH now refuses with `link_revoked`
+(409); re-linking stays a deliberate POST, which also makes it an
+`ops.guardian.link` audit row. Mutation-checked.
+
+Two properties were already right and are now pinned so they stay right:
+`guardianship_hide_revoked` hides revoked links from everyone except the three
+roles that administer them, and SMS dispatch runs as `system_ingest`, so a
+revoked guardian cannot be texted.
+
+**Three fixture bugs on the way, each the schema being right.**
+`guardianship_delete_scope` is `USING (false)` - nothing may DELETE a
+guardianship; `guardianship_revocation_complete` refuses a revocation that
+does not say who and why; `uq_guardianship_active` allows one live row per
+pair. The test fought the database three times and lost each time.
+
+## B-119 - cause found, fixed, and proven
+
+The teardown ran `DELETE FROM tenants` on the PLATFORM pool, where
+`tenant_self` (`USING id = app.current_tenant()`) matched no rows, because a
+bare platform query sets no current tenant. It deleted nothing and raised
+nothing, and had done so since P7.
+
+The same policy is what makes the fix work: under a tenant's own context
+`app.current_tenant()` IS that tenant, so the row is visible and deletable -
+the shape every other suite already used via `asBootstrap`.
+
+Proven rather than asserted: three consecutive runs of `tenant-gate.test.ts`
+left the count unchanged at 273 where it had been +2 per run; the 273
+accumulated fixtures were then cleared, and a FULL suite run went **21 -> 21
+tenants, zero residue**. The development database is **21 real tenants, down
+from 294** - which also means every performance number taken on it from here
+is a measurement of the product rather than of 93% dead weight.
+
+## B-66 - the runner now fails loudly; the cause was acted on, not proven
+
+**The runner.** `test-all.mjs` tracks every workspace it STARTS and every one
+that reports a count, prints `13/13`, and exits non-zero naming any that
+started and never reported. Negative-tested by making a workspace die
+silently: it printed `12/13` and named `services/sync-svc`. Before this, the
+only way to learn WHICH workspace vanished was to subtract two runs' totals by
+hand - which is what B-58, B-66 and three separate P12-audit observations all
+had to do.
+
+**The suspect.** B-66 narrowed to `lockFixtures` leaving its socket unref'd,
+with the comment "unref'ing costs nothing while a suite is running". That is
+the assumption, and it is not safe: if at any instant the unref'd lock socket
+is the only remaining handle, Node's loop is empty and the process exits
+mid-file - a fast, silent, whole-file failure, which is the signature exactly.
+The socket is now REF'd while a suite runs, and an UNREF'D five-minute
+watchdog releases the lock if a suite wedges, preserving what the unref was
+protecting.
+
+**Not claimed as fixed.** This never reproduced on demand. Four consecutive
+clean 13/13 runs against a prior 2-in-5 failure rate is suggestive, not proof.
+B-66 and B-58 stay open.
+
+## B-36 - closed alongside it
+
+`SET lock_timeout = 90s` before `pg_advisory_lock`, and the failure says what
+happened: "fixture lock not acquired within 90s - another test process is
+holding it." The watchdog bounds the other direction, a suite that takes the
+lock and dies.
+
+## B-120 - opened, deliberately not built
+
+There is no session/device list and no way to revoke one. `user_sessions` is
+written on every login and never read back to a person; `logout` ends only the
+current session. A head teacher whose phone is stolen cannot end that phone's
+access.
+
+This is `FINAL-FULL-PROJECT-AUDIT-REPORT` section 31's deliverable, proposed
+as "P10a" and skipped when the roadmap renumbered. **The Master Plan does not
+authorize it, so it is recorded and not built** - inventing a phase for it is
+precisely what this pass was told not to do.
+
+## Verification
+
+2,246 tests across **13/13** workspaces, four consecutive clean runs *
+typecheck 0/0/0 * build clean * 80/80 migrations * security probe **38/38**
+over 13 areas * zero fixture residue * `index.html` byte-identical at
+`496199bd`.
+
+
+# B-120 - session and device management (2026-09-08)
+
+`user_sessions` has recorded every sign-in since migration 002 and nothing
+ever read it back to a person. `logout` ended the session making the request;
+somebody whose phone was stolen had no way to end that phone, and the
+practical answer was to wait out the refresh token.
+
+## Not a second authentication system
+
+Nothing added here mints, verifies or stores a credential. Revocation is the
+same `revoked_at` UPDATE that `logout` already performed on one row, and the
+refusal on the next refresh is the check `refresh.ts` has always done. The
+only new thing is that a person can now aim it.
+
+Three sub-paths on the existing identity dispatcher, following its own
+`otp/request`-style naming: `sessions`, `sessions/revoke`,
+`sessions/revoke-others`.
+
+## The design decision: a DEVICE is the unit, not a row
+
+`refresh.ts` rotates. Every refresh inserts a new `user_sessions` row and
+revokes the old one with `superseded_by`, so one signed-in phone is a CHAIN
+whose live head moves every few minutes.
+
+Revoking by row id races that chain: the id a screen listed is already
+superseded by the time somebody presses the button, the UPDATE matches
+nothing, and the phone that was supposed to lose access keeps refreshing -
+while the screen says it worked. That is the worst possible failure for this
+feature, because the person stops worrying.
+
+`device_id` is stable across the whole chain (required at login, re-sent on
+every refresh), so revoking by device ends the chain wherever its head has
+moved. It is also what a person means: they revoke a PHONE, not a token.
+
+The test rotates on purpose before revoking. Mutation-checked by pinning the
+UPDATE to the oldest row - a row-id implementation - which fails exactly the
+two revoke tests and nothing else.
+
+## Authorization: self-service only, deliberately
+
+Every role manages exactly their own devices. There is no user parameter to
+pass, which is the strongest form of the check - not a role test that could
+be widened later, but an endpoint with nowhere to put somebody else's id.
+
+That answers all of the brief's prohibitions at once (a student, a guardian
+and a teacher can each reach only themselves) and adds no privilege. An
+administrator ending another person's session is a genuinely new power over
+an account; it is not in the Master Plan, and inventing it here is what this
+work was told not to do.
+
+## Device privacy
+
+No fingerprinting was added. `ip_address` is on the row and is never
+returned - it identifies a place rather than a device, and in a Bangladeshi
+school it is frequently one shared NAT. The `user_agent` is reduced
+server-side to a browser family and an OS family; the raw string never
+reaches the client. A device that cannot be named reads as
+"অজানা ডিভাইস" rather than as a blank, because an unnamed device is still one
+somebody may want to end.
+
+## What was already right, and is now pinned
+
+**A deactivated account cannot refresh.** M1 built this and it holds:
+carrying the ROTATED token forward, `active` → 200, `suspended` → 403
+`account_not_active`, `left` → 403, reactivated → 200. Asserted now rather
+than assumed, because "a session is not a standing permission" is the other
+half of this feature.
+
+## Two defects found by the repository's own guards
+
+**The Bangla numerals test caught my counts.** `${count}টি ডিভাইস` and
+`${body.revoked}টি সেশন` interpolated LATIN digits into Bangla sentences.
+`bangla-numerals.test.ts` exists for exactly that and named both lines.
+
+**The security probe caught my own probe.** The first version of area 9c
+asserted "no uuid in the session list" and failed - correctly - against a
+body that was fine. A device id IS uuid-shaped: the PWA generates one per
+browser, and it is the handle a revoke is aimed with, so it has to
+round-trip. The check now names the SERVER identifiers that must never
+appear - the account, the school, the session row - which is a stronger
+statement than the shape test it replaced. Scoped rather than weakened.
+
+## Verified
+
+- **13 API tests** (list, current detection, revoke, revoke-others, the
+  rotation race, idempotency, deactivation, authorization, tenant isolation,
+  audit) + **2 service-worker tests**
+- **Security probe 38 → 44**, six new checks that ask the API rather than
+  the screen
+- **Browser, end to end**: two live sessions, clicked revoke, confirmed -
+  revoked device refresh **200 → 401**, remaining session still **200**, list
+  updated. Deactivation verified separately carrying the rotated token.
+- Widths 360 · 375 · 390 · 1024 · 1280 · 1440 · 1600, no horizontal scroll
+- a11y: h1:1, two h2 sections, 0 unnamed buttons, keyboard reachable, badge
+  carries a WORD, no uuid and no token on screen
+- **2,261 tests**, 13/13 workspaces, zero fixture residue (21 → 21 tenants)
+- `index.html` byte-identical at `496199bd`
+
+## Honest note on B-66
+
+The flake recurred during today's runs - `test-failure-*.log` artifacts for
+`identity-svc` and `platform-svc` were written while this work was under way.
+The pre-pilot pass acted on its narrowed cause and explicitly did not claim
+it fixed; that remains the position.
+
+
+# B-121 - a dead session is not a network error (2026-09-08)
+
+The owner's screenshot of the হাজিরা tab: "কিছু সমস্যা হয়েছে। আবার চেষ্টা
+করুন।" above a retry button. The screen was not broken. The session was: an
+access token past its expiry, and a refresh token that had already been
+rotated. Both legs returned 401, `authedFetch` threw, every view caught it
+with its generic handler, and the person was offered a retry that could never
+succeed - because the credential, not the network, was finished.
+
+## The dangerous half
+
+The obvious repair is "clear the session when refresh fails", and it is a
+worse bug than the one it fixes. `ensureFreshToken` runs on a timer, ahead of
+expiry, on every device. One bad minute on the server - a 500, a 502, a
+deploy - would sign out every device that happened to refresh during it, and
+each one would need a fresh OTP to come back. In a school on a shared SMS
+budget that is a real cost, and it would arrive as a mystery.
+
+So the change is a DISTINCTION, not a clear:
+
+- **401 or 403** - the server is refusing the credential. Dead, rotated,
+  revoked (B-120), or the account is no longer active. The session ends.
+- **Anything else, or a thrown `fetch`** - the server did not answer, or
+  answered badly. The stale token is returned unchanged and the caller's
+  request fails as a REQUEST. Nobody is signed out.
+
+The negative tests are therefore the load-bearing ones: a 500, a 503 and an
+offline `fetch` that throws must each leave the session exactly where it was.
+Mutation-checked - deleting the `res.status !== 401 && res.status !== 403`
+guard fails exactly those two transient-failure tests and nothing else, which
+is what makes it a guard rather than a comment.
+
+## Two endings, and the third one that could never happen
+
+`showSessionEnded(reason)` replaces the generic error with `role="alert"`, a
+heading, one sentence and one focused action:
+
+| reason | from | heading | action |
+|---|---|---|---|
+| `expired` | 401 `invalid_refresh_token` | আপনার সেশন শেষ হয়েছে | আবার লগইন করুন |
+| `account_inactive` | 403 `account_not_active` / `no_active_role` | অ্যাকাউন্টটি সক্রিয় নেই | লগইন স্ক্রিনে ফিরে যান |
+
+The second row is the one worth arguing about. Telling somebody whose account
+was suspended that their "session ended", and offering them a login, sends
+them round a loop only the office can break - they will press the button
+until a person explains. It gets its own heading and a button that promises
+only what it does. The way back still exists, because a shared device may
+hold somebody else's account.
+
+### The branch nothing could reach
+
+The first version of this had THREE reasons, with `revoked` mapped from a
+403 `session_revoked` - and it was wrong twice over.
+
+`refresh.ts` finds the session with
+`… AND revoked_at IS NULL AND expires_at > now()`. A device revoked from the
+নিরাপত্তা screen therefore misses the row in exactly the way a dead or
+already-rotated token does, and gets **401 `invalid_refresh_token`**. There
+is no `session_revoked` response anywhere in this system. The branch was
+unreachable, and the unit test that "proved" it asserted a reply the server
+cannot produce - the same defect class as B-120's security probe that could
+not fail, committed again, three days later, by the same hand.
+
+Worse than dead: 403 is `account_not_active` **or** `no_active_role`. Mapping
+403 to "revoked" would have told somebody whose ROLE was removed that their
+device had been signed out, and sent them to log in again instead of to the
+office.
+
+So the reasons are two, and they split on what the person can DO - 401 means
+sign in again, 403 means only the office can fix this. **The contract is now
+pinned on the server side too**: `sessions.test.ts` asserts that a revoked
+device's refresh returns exactly `401 invalid_refresh_token`, because the PWA
+now decides from that status whether to end a session. Before this it
+asserted only `status === 200 ? true : false`, which is precisely the level
+of detail that let the wrong assumption through.
+
+## Once, however many views were in flight
+
+A screen loads several sections at boot, so a dead credential refuses several
+requests within a few milliseconds and `onSessionEnded` fires once per
+request - three times, in the browser check. Re-rendering each time would
+clear the `role="alert"` out from under a screen reader and snatch focus back
+to the button while somebody was already reading it, and would re-run the
+purge for nothing.
+
+The screen is therefore drawn once, guarded by a marker on the node itself
+(`[data-session-ended]`) rather than by a variable, so it cannot go stale:
+`showLogin` replaces the node, which resets it. Verified in the browser -
+3 refusals, 1 screen.
+
+## What is cleared, and what is NOT
+
+The same `purgeLocalData('logout')` a real logout runs: the session key and
+every read-through screen cache, so the next person's first paint is not this
+person's roster.
+
+The IndexedDB **outbox is deliberately untouched**, exactly as in `doLogout`.
+A teacher's unsent attendance exists nowhere else, and a revoked session is
+not a reason to lose a morning's register. The sync engine only ever sends
+ops matching the signed-in identity, so it cannot be posted by whoever signs
+in next. The **device id survives** for the same reason it survives a logout:
+it identifies the machine, not the person - and B-120's revoke is aimed with
+it.
+
+## Verified
+
+- **9 unit tests** (`apps/pwa/test/session-ended.test.ts`), four of them
+  negative, plus one added server-side assertion in `sessions.test.ts`
+- **Both guards mutation-checked.** Deleting the transient-failure guard
+  fails exactly the 500 and 503 tests and nothing else; collapsing the 403
+  mapping to `expired` fails exactly the two 403 tests and nothing else.
+- **Browser, through the app's own boot.** The screen was driven by booting
+  the real bundle in a same-origin iframe with a fault installed ahead of the
+  deferred module, so the app's own `Auth` and `showSessionEnded` ran
+  untouched. The **401 case is the harness's positive control** - it
+  reproduces the owner's screen - and the transient cases run through the
+  identical harness:
+
+  | injected | screen | session |
+  |---|---|---|
+  | 401 `invalid_refresh_token` (expired, rotated, **or revoked**) | আপনার সেশন শেষ হয়েছে | cleared |
+  | 403 `account_not_active` | its own heading and button | cleared |
+  | 403 `no_active_role` | the same office sentence, not a login prompt | cleared |
+  | 500 | dashboard, retry offered | **kept** |
+  | offline (thrown `fetch`) | dashboard, offline banner | **kept** |
+
+- **Outbox survival, in the browser**: an unsent op written to IndexedDB,
+  then a 401 session-end - outbox 1 → 1, payload intact, device id intact,
+  auth cleared.
+- Focus lands on the single action; the retry button that could never succeed
+  is gone from this path.
+
+The first browser attempt proved nothing and is worth recording: patching
+`fetch` after boot gave `refreshCalls: 0`, because `Auth` reads localStorage
+in its constructor and the app was already past it. A check that cannot
+observe the thing it is checking passes for the wrong reason - the same class
+of defect as the security probe that could not fail (B-120).
+
+
+# B-66 - the flake was never ours (2026-09-10)
+
+For three phases this repository carried a fault it could not name. A whole
+test FILE would fail, at line 1:1, with the bare string `'test failed'`, no
+assertion, and an empty stderr. A different file each time. Never reproducible
+alone. B-58 opened it, B-66 inherited it with three instances, and the P12
+audit added three more observations. The pre-pilot pass narrowed it to an
+unref'd socket in `lockFixtures`, acted on that, and honestly declined to call
+it fixed. It was right to decline: that was not the cause.
+
+## What it actually is
+
+**A TCP socket opened inside a `node --test` PER-FILE CHILD PROCESS
+intermittently aborts that child, on Node 24 before 24.21.0, on Windows.**
+
+The child dies with Windows status `0xC0000409` - which on Windows is what a
+Release-mode process reports when it calls `abort()`. It dies during startup,
+around 220-450 ms in, before it can write a single byte. So the runner sees a
+child that exited non-zero having reported nothing, and prints the only thing
+it can: the whole file failed. No assertion, because none ran. No stderr,
+because the process was gone.
+
+Nothing in this product is involved.
+
+## How it was proven
+
+A ladder, one variable at a time, every rung under `node --test` at the same
+11-wide fan-out. Rungs that never open a socket:
+
+| rung | adds | runs | children | crashes |
+|---|---|---|---|---|
+| synthetic `.ts` | no project code at all | 400 | 4,400 | 0 |
+| synthetic `.js` | no type-stripping | 400 | 4,400 | 0 |
+| syn-big | 8 large generated TS modules per child | 200 | 2,200 | 0 |
+| v3 | the project module graph, nothing called | 300 | 3,300 | 0 |
+| v4 | + `installTestKeys()` (Ed25519 via jose) | 300 | 3,300 | 0 |
+| v5 | + `createDb()` pool constructed, never connected | 300 | 3,300 | 0 |
+
+**20,900 child processes, zero crashes.** Then one component:
+
+| rung | adds | runs | crashes | rate |
+|---|---|---|---|---|
+| v6 | + `lockFixtures()` - connection AND advisory lock | 500 | 5 | 1.0% |
+| **v6a** | **+ a connection, advisory lock REMOVED** | 300 | **9** | 3.0% |
+
+Removing the advisory lock did not remove the failure, which is what finally
+killed the `lockFixtures` theory the pre-pilot pass had acted on.
+
+Then the component was narrowed until nothing of ours was left:
+
+| rung | what it is | runs | crashes |
+|---|---|---|---|
+| v7 | raw `net.connect()` to a port. No `pg`, no project imports | 300 | 8 |
+| v8 | `net.connect()` to a throwaway server **inside the child** - no database anywhere | 300 | 3 |
+| v10 | a **UDP** socket instead | 300 | **0** |
+| v7 + `--test-isolation=none` | same sockets, no per-file child | 300 | **0** |
+| v9 | the identical socket work as a plain `node file.mjs` | 300 | **0** (3,300 children) |
+
+So it needs a TCP socket, and it needs the per-file child process. It is not
+`pg`, not PostgreSQL, not the fixture lock, not project code.
+
+## Two of my own hypotheses died here, and one of them I had argued for
+
+**Memory pressure and spawn storm: falsified.** `apps/pwa` runs 54 files
+31-wide with no database and crashed 0 times in 25 runs - more fan-out than
+academics-svc, no failures.
+
+**Concurrency: falsified.** It still happens at `--test-concurrency=1`, where
+exactly one file runs at a time. Normalised per child the rate is flat:
+
+| fan-out | per-child rate |
+|---|---|
+| 11-wide | 0.242% |
+| 4-wide | 0.182% |
+| serial (1) | 0.273% |
+
+An earlier reading of "0 failures at concurrency <= 8" over 60 runs looked
+significant and was a small-sample artifact: 60 runs at a 2% rate expects about
+one failure, so observing none means nothing. **A concurrency cap would have
+turned the suite green and fixed nothing** - the exact shape of fix this
+project has repeatedly caught elsewhere: a control that appears to work because
+the thing it targets was never the cause.
+
+## The proof: one variable, the runtime
+
+Same machine, same session, same fixture, same fan-out:
+
+| Node | runs | children | crashes |
+|---|---|---|---|
+| **v24.15.0** | 500 | 5,500 | **11** (2.2%) |
+| **v24.21.0** | 500 | 5,500 | **0** |
+
+Fisher exact one-tailed **p ~ 0.0005**. Node 22.23.2 - the version CI pins -
+is also clean at **0 / 500**, which is why the guard below allows it rather
+than assuming.
+
+## Why it only ever hit the DB suites, and never CI
+
+Only DB-backed test files open TCP sockets, so only they were exposed. And
+every workflow pins `node-version: '22'`, which does not carry the defect -
+which is why CI has been green throughout and the flake looked local and
+unreproducible.
+
+## The fix
+
+`scripts/test-all.mjs` refuses to start on a Node 24 build below 24.21.0 and
+prints the diagnosis with its measured evidence, rather than letting the suite
+produce a misleading `'test failed'`. `engines` stays at `>=22` deliberately:
+Node 22 is what CI runs and is unaffected, so a global `>=24.21.0` would
+invalidate a green CI to fix a Windows-only defect CI does not have. Off
+Windows the guard warns instead of refusing, because it was never measured
+there.
+
+The runner also names a crashed child for what it is: whole file, line 1:1,
+`'test failed'`, empty stderr - and says so, with the workspace and the file.
+The diagnosis is conditional on the runtime: on a patched Node it explicitly
+says B-66 is NOT the explanation, so the next person is not sent chasing a
+cause that has been excluded. Verified against a deliberately aborted child.
+
+No retries. No concurrency cap. No test weakened. No application code touched.
+
+## Validated
+
+- **Minimal reproducer on 24.21.0: 1,000 runs, 11,000 children, 0 crashes**
+- **Full 13-workspace suite x10 on 24.21.0: 10/10 green, 2,270 tests, 13/13
+  workspaces, total stable at 2,270 every run**
+- Real `academics-svc` suite on 24.21.0: 0 failures / 40 runs (1/40 on 24.15.0)
+- Guard: refuses 24.15.0 (exit 1), allows 22.23.2 and 24.21.0
+- Detector: names a deliberately crashed child, and declines to blame B-66 on
+  a patched runtime
+
+## Two interruptions recorded as interruptions, not as evidence
+
+**The PostgreSQL container exited** (status 255) when the machine restarted
+mid-investigation. A v6 rung recorded 181/200 "failures" that were all
+`exit=1` with `ECONNREFUSED 127.0.0.1:55432` - deterministic, legible, and
+nothing to do with B-66. Classified VOID; the rung was re-run against a live
+database. Every experiment after that runs a preflight that refuses to start
+unless the container is up and the port answers.
+
+**A previous session's teardown** killed a control mid-run, producing
+`0x40010004` (DBG_TERMINATE_PROCESS) and `0xC000026B`
+(STATUS_DLL_INIT_FAILED_LOGOFF) across nine iterations. Also VOID. Only the
+six clean iterations before it were kept.
+
+## CLOSED - verified on the real system runtime (2026-09-10)
+
+The upgrade happened. `node --version` from inside the repository now reports
+**v24.21.0** (`C:\Program Files\nodejs\node.exe`), installed from the MSI whose
+SHA-256 was checked against the release `SHASUMS256.txt` before it was run.
+
+Every earlier number in this entry was measured against a *portable* 24.21.0.
+These were re-measured against the installed one, because a fix validated only
+on a binary nobody actually runs is not a validated fix:
+
+| check | result |
+|---|---|
+| minimal TCP + `node --test` reproducer | **0 crashes / 500 runs (5,500 children)** |
+| real `academics-svc` suite | **185 tests, 0 fail** |
+| runtime guard | allows 24.21.0, no refusal |
+| crashed-child detector | still names a deliberately aborted child, and says B-66 is NOT the explanation on this runtime |
+
+Before the upgrade, the same reproducer on the same machine crashed **11 times
+in 500 runs**. After it, zero in 500 - and zero in the 1,000-run portable
+stress, and zero across 10 consecutive full 13-workspace suites.
+
+**B-58 closes with this.** It was the same mechanism, first seen in
+`ops-svc/branding.test.ts` at P0 checkpoint 3, and it was never a test.
+
+## What this cost, and what it is worth remembering for
+
+Three phases of investigation chased a defect in someone else's code, because
+the symptom - a whole file failing with no assertion and no stderr - is
+indistinguishable from a test that failed, and the runner had no way to say
+otherwise. Four separate hypotheses were held with some confidence and all
+four were wrong: an unref'd socket, memory pressure, process fan-out, and
+concurrency. The last one had a p-value attached to it and was still wrong;
+the sample was simply too small, and a concurrency cap would have turned the
+suite green while fixing nothing.
+
+What broke it open was refusing to accept a green run as proof, and building a
+ladder where each rung differed from the last by exactly one thing. The moment
+the failing fixture contained nothing but `node:net` and `node:test`, the
+product was exonerated and the only remaining variable was the runtime.
+
+
+# P12 - final full-system production audit (2026-09-10)
+
+The whole product, tested as a customer uses it, on the running system. Full
+report: `docs/P12-FINAL-AUDIT-REPORT.md`.
+
+## Verdict: CONDITIONAL GO
+
+No CRITICAL and no MAJOR defect. Five MINOR. The condition is not the defects -
+it is four things outside this repository: wildcard DNS, TLS, subdomain routing
+and an SMS aggregator contract. Without them a real school cannot be put on its
+own address or send a guardian a message.
+
+## What was driven live, and what was not
+
+The audit states its own coverage first, because an audit that implies more than
+it did is worse than a short one.
+
+**Driven by hand against the live handlers:** the platform console end to end (an
+institution created, provisioned, branded, given an admin, a plan, a cap, a
+payment and a grace extension - 13 checks); the guardian relationship on real
+data with two families (6); the student portal (3); tenant isolation and role
+boundaries (5); the suspend/reactivate lifecycle with row counts either side (7);
+all 24 principal routes rendered and scanned; mobile at 375px; light-theme
+contrast; accessibility landmarks.
+
+**Left to the automated suite** (2,270 tests, 13/13 workspaces, 28 SQL suites,
+green on Node 24.21.0): exam/marks/result and fee/invoice/ledger lifecycles,
+routine generation, import/export round-trips, sync idempotency.
+
+**Tested by nobody, and said so:** A4 landscape print on paper, and real SMS
+delivery. Those need a printer and a contract.
+
+## The two answers that mattered
+
+**Suspension does not destroy a school's records.** Rows before and after a
+suspend → reactivate cycle were identical, and enforced access moved
+`full → none → full`. This is the promise a school in arrears is really buying.
+
+**No cross-tenant read.** A token minted for another school returned 404 for this
+school's student - with the positive control proving the same route serves the
+right school 200. Fourteen isolation checks, each denial paired with the proof
+that the route works.
+
+## Findings
+
+| id | finding | severity |
+|---|---|---|
+| M1 | the academic year renders in LATIN digits inside Bangla sentences ("শিক্ষাবর্ষ 2026") on 4 surfaces | MINOR |
+| M2 | `#/students` renders no `h1`; the outline starts at `h2`, unlike all 23 other routes | MINOR |
+| M3 | 16px horizontal overflow on `#/academic` at 375px - the tab bar measures 391px | MINOR |
+| M4 | 5 of 80 migrations have no rollback script (038, 076-079) | MINOR |
+| M5 | 5 stale tenants in the development database from earlier audits | MINOR |
+
+M1 is the interesting one. The year is a DATABASE value interpolated raw into a
+Bangla sentence, and `import-view.ts:305` passes the step number through `bn()`
+on the same line while leaving the year alone. `bangla-numerals.test.ts` scans
+source literals, so it cannot see digits that arrive from PostgreSQL - the guard
+was never able to catch this class.
+
+## Two strengths worth recording as design, not as passes
+
+**Read-only is enforced by PostgreSQL**, not by a flag every endpoint has to
+remember: `SET LOCAL transaction_read_only = on`, so a write on a path nobody
+thought about still fails.
+
+**Every commercial mutation requires a stated reason** - 400 `reason_required`
+otherwise - and the audit row records the transition itself:
+`set_tenant_status trial → suspended`, `plan pilot/500 → standard/500`. Ten such
+rows were written during this audit and read back.
+
+## Audit hygiene
+
+This audit created three tenants and removed all three: 21 before, 21 after, zero
+`p12-*` remaining. Three of my own intermediate findings were retracted before
+they reached the report - a duplicate-role count that had grouped by NAME across
+a 2,000-user fixture, a missing-rollback count of 32 that was really 5, and an
+audit-trail FAIL that was my querying the wrong table. A finding that survives
+only because nobody checked it is worse than no finding.
+
+
+# P12 remediation - all five findings closed (2026-09-10)
+
+The audit's five MINOR findings, fixed at the cause. Two of them turned out to
+be larger than the audit had measured, and one turned out to be smaller.
+
+## P12-1 - the academic year, in Bangla
+
+The audit found `শিক্ষাবর্ষ 2026` on four surfaces. Fixing the shared path
+rather than the four screens found **fifteen render sites across eleven files** -
+home, academic structure, import, exams, fee structures, rollover, the routine
+editor, the routine publisher, the students list, the timetable and the
+structure forms.
+
+The fix is one formatter, `formatAcademicYear()` in `packages/ui-core/src/format.ts`,
+placed deliberately beside `formatIdentifier()` - the rule it is the other half
+of. Identifiers and money stay Latin because they are cross-checked against
+paper; a year is read aloud in a Bangla sentence beside a Bangla date.
+
+It is **idempotent on purpose**: `academic_years.label` is free text and the
+database already holds both `2026` and `২০২৬`, so a label that is already Bangla
+passes through untouched, and `2026-27` keeps its separator.
+
+**Why the existing guard could never have caught it.** `bangla-numerals.test.ts`
+reads source LITERALS and is good at it. These digits never appear in source -
+they arrive from PostgreSQL. `import-view.ts` was the proof: it passed the STEP
+number through a numeral helper and left the year raw, a few characters apart on
+the same line. So `academic-year-numerals.test.ts` checks the two things the
+other guard structurally cannot - the formatter's behaviour on values the
+database really holds, and that no view interpolates a year label without it. It
+carries a negative control, because a check that cannot fail proves nothing.
+
+**Verified on live data, not only in source:** home, academic and import all read
+`শিক্ষাবর্ষ ২০২৬`, the exams picker reads `২০২৬ (চলতি)`, and a scan of the rendered
+text on five routes found **0 Latin-digit nodes** where there had been one each.
+
+## P12-2 - the students screen names itself
+
+`students-view.ts` built its own `<h2 class="page-header">` instead of calling
+the shared `pageHeader()`, which is why it was the only one of 24 routes with no
+`<h1>`. It looked identical - same class, same position - so nothing about the
+screen gave it away. What gave it away was counting.
+
+Now `h1: 1` on `#/students`, and `heading-hierarchy.test.ts` checks that no view
+hand-rolls a page-level heading again, with a negative control written from the
+shape that actually shipped.
+
+## P12-3 - the mobile overflow, and what was really causing it
+
+The audit reported the bottom tab bar rendering 391px against a 375px viewport.
+The tab bar was the **symptom**. It is `position: fixed; inset: auto 0 0 0`, so
+it can only ever be as wide as the document - and the document had grown.
+
+Measuring every element whose right edge passed the viewport found three header
+buttons - শিক্ষাবর্ষ তৈরি, নতুন শ্রেণি, নতুন সেকশন - each 375px wide starting at
+x=16, so ending at 391. Walking the matched CSS rules gave the cause exactly:
+
+    .btn-secondary { margin: 0 var(--s-4); }        /* a COLOUR variant */
+    .ui-button-row > * { width: 100%; }             /* below 1024px */
+
+A 100%-wide element with 16px side margins is wider than its container by
+exactly those margins - the hazard already written down a few hundred lines
+away on `.ui-card`, in this same file.
+
+The margin was never wanted in most places either: **four** separate rules
+(`.empty-state`, `.prac-actions`, `.choice-footer`, `.editor-holding`) existed
+only to undo it. So the fix removes it from the variant rather than adding a
+fifth patch, and no `overflow-x: hidden` was used - that hides a defect, it does
+not fix one.
+
+**Verified at 320, 375, 390 and 430px across the routes: overflow 0 everywhere.**
+
+## P12-4 - the rollback finding was wrong, and the real one was worse
+
+The audit said five migrations had no rollback and implied that was a gap. It
+is not. `080_platform_operators.down.sql` already explains in its own header why
+076-079 do not need one: the chain drops the **base tables** in 001-037 and
+`CASCADE` takes everything later migrations hung off them. Those four add only
+`CREATE OR REPLACE FUNCTION` over existing tables, and 038 adds columns and
+constraints to a table that is itself dropped. 080 is the exception because
+`platform_operators` is the first table in this schema that references nothing,
+so nothing cascades to it.
+
+Creating five rollback files would have been inventing work. They are documented
+instead, in `db/rollback/README.md`, with the reason for each.
+
+**But looking properly found something real.** There are 75 rollback files: 48
+end `.down.sql` and 27 end plain `.sql`. The README documented the loop as
+
+    for f in $(ls -r db/rollback/*.down.sql)
+
+which matches only the first 48. An operator following the runbook during an
+incident would have silently skipped **27 rollbacks** and stopped with a
+half-dropped schema. CI was never affected - `database.yml` globs `*.sql` and
+passes - so nothing here was ever red. The runbook and the thing that is
+actually tested now agree.
+
+The names are left alone deliberately: renaming 27 files to fix a glob is the
+riskier of the two changes, and the glob is what was wrong.
+
+## P12-5 - development database hygiene
+
+Five stale tenants from earlier audits removed by explicit id rather than by
+pattern: three empty `p7-probe-*`, and two `audit-onb-*` carrying 11 users each.
+**21 → 16 tenants**, with a before/after slug diff proving exactly those five
+went and nothing else moved. Zero `audit-`, `probe` or `p12-` tenants remain.
+
+No customer data was touched: every removed row was an audit artifact created by
+this project's own tooling.
+
+## Regression
+
+2,279 tests (up from 2,270 - nine new guard tests), 13/13 workspaces, 28 SQL
+suites; typecheck 0/0/0; build clean; security probe 44/44 over 14 areas;
+tenant isolation 14/14; `index.html` byte-identical at `496199bd`.
+
+
+# P13 - production infrastructure and first pilot readiness (2026-09-10)
+
+Verdict **NO-GO for production**, and the blockers are not code. Full report:
+`docs/P13-PRODUCTION-READINESS-REPORT.md`.
+
+Every repository-side requirement is implemented and evidenced. What stands
+between this and a live pilot is five external dependencies and one real
+school. This report does not say GO, because two of the gates the brief itself
+sets - infrastructure available, and one complete real pilot journey - cannot
+be evidenced from here.
+
+## The subdomain model, verified rather than assumed
+
+`school-slug.<platform-domain>` resolves a slug to a tenant and paints that
+school's branding BEFORE anyone signs in. What it must never do is decide who
+you are: authenticated tenancy comes from the JWT's `tid`.
+
+Sixteen hostname shapes were checked and every one is correct - reserved labels
+(`www`, `app`, `platform`, `api`, `staging`), the apex domain, a bare hostname,
+a hyphen-leading slug, an underscore, a too-short label, `../etc`, `%2e%2e`,
+`x'or'1=1` and `<script>` all resolve to nothing.
+
+Across the commercial lifecycle:
+
+| state | identity resolves | API |
+|---|---|---|
+| active | yes | open |
+| **suspended** | **yes - the school still exists** | closed (`access=none`) |
+| archived | no - neutral branding, `tenantId: null` | closed |
+| unknown | no | n/a |
+| malformed | no, and a 200 rather than a 500 | n/a |
+
+Suspended still resolving is deliberate: a parent typing their school's address
+should see THEIR school, not a stranger's error page.
+
+**A forged `Host` / `X-Forwarded-Host` changed nothing** - the authenticated
+response was byte-identical to the honest one. No handler in `services/` or
+`packages/` reads the Host header for tenant identity at all; the only
+host-adjacent route is `GET /ops/brand`, pre-auth by design, seven public
+fields.
+
+## The restore drill was run, not read
+
+Against the development database: 5.1 MB backup, restore into an isolated
+database, **7 schema counts and 27 table counts identical, 16 tenants identical
+per entity**, RTO 5.9s. PASSED.
+
+It is a comparison rather than a ceremony - `pg_restore` exits 0 having skipped
+objects it could not create, so the script counts what went in, counts what came
+out, and fails on any difference. It also refuses to overstate itself: the
+evidence block records `environment: local-docker` and says plainly that this
+rehearses the production restore rather than closing it. RPO is untouched,
+because RPO is a property of the backup SCHEDULE and this drill would be
+measuring nothing.
+
+## A real gap closed: the production env template
+
+Diffing every `process.env.*` in `services/` and `packages/` against
+`deploy/env.example` found **five production-runtime variables the template
+never documented**. None of them fails loudly - the deployment starts and
+behaves however the fallback behaves.
+
+The worst is `SMS_WORKER_TENANT_IDS`: the SMS worker is a cron with no tenant
+context of its own, and **empty means no school's queue is drained at all**,
+which from the outside is indistinguishable from a broken aggregator. Also
+missing: `SERVICE_KEY_TENANT_SWITCH`, `ANS_SIGNING_SECRET`, `AI_MODEL_SIKHOK`,
+`AI_MODEL_SHIKHO`.
+
+All five are now documented with the consequence spelled out, and
+`env-template.test.ts` fails the build if the template drifts from what the code
+reads again - with a negative control, because a guard that cannot fail proves
+nothing.
+
+## What the SMS and push layers already get right
+
+Worth recording, because these are the two places a pilot can be damaged
+irreversibly.
+
+**Unconfigured SMS is the stub, not a failure** - messages land in the log. A
+provider **named without credentials THROWS** rather than falling back, because
+a school that believes its messages are going out is worse off than one that
+knows they are not. **HTTP 200 with a failure body is treated as a failure**,
+which is the case aggregators actually produce. And `SMS_TEST_RECIPIENTS` is an
+allowlist whose tests pin the trap: *empty means unrestricted, not "send to
+nobody"*, a withheld row is **recorded rather than hidden**, and withholding
+does not consume an attempt. That allowlist is what makes a first pilot
+survivable - a real aggregator can run against real school data without one
+message reaching a real parent.
+
+**Push** is 48 tests across the whole lifecycle, and reports itself unavailable
+without VAPID keys rather than pretending.
+
+Neither has ever delivered anything to a real device or a real phone, and
+nothing in this phase claims otherwise.
+
+## Two false alarms, checked before they became findings
+
+`shikhon-monitor.timer` has no `OnCalendar` - it uses `OnBootSec=5min` +
+`OnUnitActiveSec=15min`, a valid every-fifteen-minutes schedule. And
+`OTP_SENDING_ENABLED`, `VAPID_SUBJECT` and `WILDCARD_DNS_READY` looked
+undocumented to a first pass of the env detector because they are read through
+`enabled('NAME', env)` with the name as a string rather than as
+`env.NAME`. Both would have been wrong to report.
+
+## Not run: the pilot journey
+
+The brief asks for one complete journey using a real pilot institution, not
+fixtures. It has not been run and was not simulated. No real pilot institution
+exists (B-5 is open), and the infrastructure it would run on does not exist yet.
+What has been driven end to end, on real data, is the whole of that journey's
+mechanism - platform admin through guardian/student/teacher visibility,
+suspension and reactivation, and now the subdomain model. The distance between
+that and a pilot is a school and a domain, not code.
+
+
+# P13 setup pass - the deployment was already live (2026-09-10)
+
+The P13 audit implied production did not exist. It does, and probing it rather
+than assuming corrected three items and found a defect only a live deployment
+could show.
+
+## What is actually running
+
+`https://sikhon.systems` resolves to 200.234.43.179, serves the landing page
+and the application over valid TLS behind **Caddy**, and answers the API.
+`/app.html` is 200, `/api/v1/ops/brand` returns JSON, an unknown slug gets
+neutral branding and a null tenant id exactly as it does locally, and
+`otpLogin` is `false` - correct, because there is no aggregator.
+
+The authorization boundaries hold from the open internet: the platform console
+answers **403 `platform credentials required`** to an anonymous caller and the
+ops monitor **401**, with the same sentence whichever credential is wrong.
+
+**Wildcard DNS is absent, and that was verified rather than assumed:**
+`app.sikhon.systems` and `test-school.sikhon.systems` do not resolve, while the
+apex and `www` do.
+
+## The defect a live deployment revealed
+
+`netlify.toml` has set `X-Content-Type-Options`, `Referrer-Policy` and
+`X-Frame-Options` for `/*` since P-ops. Production is not Netlify - it is Caddy
+in front of `deploy/server.mjs`, which set only the first. Reading the headers
+back off the live site returned exactly one.
+
+Three protections had been "configured" for two phases in a file the product is
+not served from. No test could have caught it, because both files were
+individually correct; what caught it was asking the running site what it
+actually sends.
+
+`deploy/server.mjs` now sets all four including **HSTS**, on every response
+including the API's, applied with `setHeader` so a route that deliberately
+differs still wins - `document.ts` uses `SAMEORIGIN` so a school can preview a
+printable in a frame, and that still works (verified against Node's merge
+semantics rather than assumed).
+
+`deploy-headers.test.ts` now fails the build if the VPS path becomes weaker
+than the Netlify one. Its first version failed on my own explanatory comment,
+which is a mistake this repository has made before in a CI guard; it now
+matches the header VALUE rather than the file.
+
+Two omissions, both deliberate and both written down at the code:
+
+**HSTS without `includeSubDomains`.** That is where it ends up, but a browser
+that has seen the directive refuses a subdomain served without TLS and
+remembers for a year. It goes in with `WILDCARD_DNS_READY`, after a subdomain
+has actually been served over HTTPS.
+
+**No Content-Security-Policy.** It is the one header here that can break a
+working application, and it must be derived from what the app loads and
+verified in a browser. Guessing one onto a live deployment would be the
+opposite of what this phase is for.
+
+## What was NOT done, and why
+
+Items 3-5, 7-13 of the setup brief all need access I do not have: the DNS
+provider, the host, the database credentials, an aggregator contract, and a
+webhook that reaches a person. Nothing was simulated. The VAPID generator was
+verified with a **throwaway** keypair whose values were never printed and which
+was deleted - the production pair must be generated ON the host so the private
+key never travels.
+
+
+# Ata Ekta redesign - foundation (2026-09-16)
+
+The owner handed off a full redesign from Claude Design: `11 Handoff` is the
+index, `IMPLEMENTATION.md` the spec, `tokens/ata-ekta.css` "the one
+stylesheet". It covers every screen except the landing page - 52 routes, 11
+component modules, 7 roles - plus one behaviour change (attendance, path খ)
+and the removal of dark mode.
+
+This entry is the FOUNDATION: build-order steps 1, 2 and 4 of §8, and the
+component CSS of step 5. Every screen stands on it. The per-screen work is
+recorded as open below, not claimed.
+
+Source files used: `Ata Ekta LMS Design System.zip` (standalone export). Its
+`IMPLEMENTATION.md` and `tokens/ata-ekta.css` were compared byte for byte with
+the earlier `-handoff.zip` and are identical.
+
+## The stylesheet could not simply be replaced
+
+§8 says "replace the token block in app.css with tokens/ata-ekta.css". Measured
+first: **404 classes the app emits are styled in the old sheet and absent from
+the new one** - routine (34), branding (27), attendance (25), generation,
+calendar, login, marks, notices and more. Those rules make ~2,000 `var()`
+references to token names the new sheet does not define (`--s-*`, `--c-*`,
+`--text-2xs`, `--radius-*`). A straight replace would have left every one
+unresolved: collapsed spacing and lost colour on every screen not yet
+restyled.
+
+So `app.css` is built, not pasted, by a brace-aware splitter:
+
+1. `tokens/ata-ekta.css`, verbatim.
+2. An **alias layer** - 75 old token names, each mapped by MEANING onto the new
+   palette and scale. The retired second accent maps to neutral ink, not to a
+   colour, because §3 allows one accent.
+3. The old rules the new sheet does NOT own: **668 kept, 383 superseded shared
+   rules dropped, 3 dark rules dropped**, 9 selector lists trimmed so a shared
+   selector inside a mixed list does not override the new design.
+
+It parses cleanly (esbuild: 0 warnings), and `design-tokens.test.ts` proves no
+token of any family is used but never defined.
+
+## Four things the spec did not say, found by measuring
+
+**1. White-labelling would have broken.** The new components read `--accent`;
+`brandingCssVars` wrote only the old names. Every school's primary button and
+active nav row - the only two places the accent appears - would have shown the
+PLATFORM's red on the school's own screen, which R-1 forbids. Branding now
+emits `--accent`, `--accent-ink`, `--accent-tint`, `--accent-600/700` and
+`--on-accent`. Verified in the browser: the demo school's green `#156a3f`
+reached `--accent` and its primary button. `--accent-400` is deliberately NOT
+emitted - it is the error toast, and a school chooses its brand, not what an
+error looks like.
+
+**2. The new primary button hard-codes a white label.** A pale school colour
+needs dark type. `.btn-primary { color: var(--on-accent, #fff) }` - identical
+to the design whenever no school sets it.
+
+**3. The design silently reintroduced B-108.** Its `--font-bn` is plain Hind
+Siliguri, whose ১ reads as ৮ at UI sizes ("১০টি" as "৮০টি"). The per-character
+`ShikhonBnNum` face was still in the sheet and referenced nowhere - the exact
+failure B-108 was filed for. `.n` puts figures on Anek Bangla as designed, but
+cannot reach a digit inside a sentence. The face is named first again: the one
+deliberate deviation from the design's tokens, taken for correctness.
+
+**4. The design's exact palette does not fully meet WCAG AA.** Measured:
+
+| where | ratio | needs |
+|---|---|---|
+| white on `--accent #ec3013` (the primary button) | **4.20** | 4.5 |
+| `--ink-3` (labels, meta, placeholders) | 3.55-4.30 | 4.5 |
+| উপস্থিত chip - `--ok` on `--ok-tint` | 4.30 | 4.5 |
+| দেরি chip - `--warn` on `--warn-tint` | 4.35 | 4.5 |
+
+The owner asked for the design "100% same", so the exact colours shipped. They
+were NOT hidden: `design-tokens.test.ts` pins each by name and ratio, fails on
+any NEW shortfall, and fails if a pinned one gets worse. The primary-button
+number is the one to read twice - this product's previous palette recorded its
+old red at 4.23:1 and was changed specifically to clear AA. **Owner decided
+2026-09-16: keep `#ec3013` exactly** (BACKLOG AE-1).
+
+## Dark mode removed (§5)
+
+`ui/theme.ts` is now light only: it pins `data-theme="light"` and clears the
+retired `shikhon_theme` key so a phone that once chose dark does not carry a
+dead preference. Removed: the pre-paint theme script and dark `theme-color` in
+`app.html`, the picker in the shell's profile menu and on the More screen, the
+platform console's toggle and its dark media listener, `THEME_OPTIONS`, the
+dark branding block, and every dark CSS rule including the design sheet's own
+interim `.shell-theme` / `.theme-option` rules (which it says exist "only so a
+not-yet-removed picker is not unstyled mid-migration").
+
+## A conflict inside the spec, resolved in favour of §5
+
+§9 says `shell-desktop.test.ts` "should still pass unchanged". One of its tests
+asserted the theme picker that §5 orders deleted. They cannot both hold. The
+test was replaced with two that guard the new contract: the menu offers no
+theme choice, and a device that once chose dark is returned to light and
+forgets the key. The other five tests §9 names are byte-unchanged.
+
+## Verified
+
+- Full suite **2,293 tests**, 13/13 workspaces, 28 SQL suites; typecheck
+  0/0/0; build clean; security probe 44/44; `index.html` byte-identical at
+  `496199bd`.
+- Browser: ground `#f3f2f2`, ink `#201e1d`, Hind Siliguri, light only, no
+  picker; desktop sidebar exactly **256px**, tab bar hidden, one topbar, 2px
+  rule under the page header, no horizontal overflow; school brand on the
+  primary button.
+
+## Not yet done - the rest of §8
+
+- **Step 3** - `.n` on every numeric element. Until then figures in carried
+  screens render in the text face, not Anek Bangla.
+- **Step 5 (markup)** - the component CSS is in; any markup changes 14
+  Components calls for are not.
+- **Step 6** - the 52 routes, role by role, against their design pages. The
+  668 carried rules currently render in the NEW palette through the alias
+  layer, which is a coherent interim, not the finished screens.
+- **Step 7** - the five states per screen.
+- **Step 8** - practice, structure forms, offline page.
+- **Attendance, path খ** - the one behaviour change: `markAllPresent()` as the
+  primary action, no `grid.cycle()`, start unset, show names, and the three
+  guards. Not started.
+
+---
+
+# Ata Ekta — wave 1: the shared components (2026-09-16)
+
+The twelve modules every screen is built from — `ui/page-header`, `button`,
+`card`, `badge`, `field`, `upload`, `filter`, `table`, `overlay`, `feedback`,
+`child-selector`, and `view-states.ts` — rebuilt against 14 Components and
+00 Foundations. Done before any screen, so the 53 views that call them change
+once, the same way.
+
+## How
+
+A spec phase first (86 agents: one spec per unit, 14 completeness critics),
+then one implementer per component, a skeptical reviewer per component who
+read the actual diff, and a repair pass where the reviewer found a blocker or
+major issue (3 of 12: page header, button, card). The 1,136 ambiguities the
+spec phase raised were settled once, as thirteen written rules, before any
+code was touched; every agent applied the same ones. Implementers edited only
+their own file and returned CSS, icons and test changes as data, merged
+centrally.
+
+The CSS merge is a script, not trust. It refused 7 declarations that
+restated a value the design sheet already sets for the same selector (the
+sheet wins over a specimen drawing), and would have refused any raw hex or
+undefined token (none). Two of the refusals were 44px tap targets, and those
+were put back by hand: accessibility outranks the specimen. 136 rules added,
+26 carried rules the components no longer need removed.
+
+## What changed on screen
+
+- Numbers inside component text are in the numeral face (`.n` on the
+  smallest element holding the digits, never on the whole sentence).
+- State cards (empty, error, success, inline confirm) use the design's card
+  anatomy and glyphs; a destructive inline confirm is now the danger button —
+  both branches of the old ternary said primary.
+- Cards and avatars are neutral: the six hand-picked avatar tints and the
+  unscoped `[data-tone]` rules that bled onto toasts and stat cells are gone.
+- Tables: one shell, table from 1024px and list below it; pagination reads
+  position first with words, not icons.
+- Overlays are bottom sheets with a grab handle below 1024px.
+- Seven Feather glyphs added: inbox, alert-circle, check-circle, info, check,
+  file-text, trash-2.
+- `color-scheme: light` declared. With no dark mode, a phone in system dark
+  mode was drawing native selects and date pickers dark on the light page.
+- iOS form controls keep a 16px floor, because iOS zooms the page when a
+  smaller input takes focus. Everywhere else the design's 15px stands.
+
+## Defects found on the way, fixed with tests that fail on the old code
+
+1. **Platform console: an empty reason vanished the dialog.** `confirmDialog`
+   removed itself before `onConfirm` ran, so the required-reason error in the
+   tenant state, service and portal changes was set on a detached node — the
+   operator saw the dialog disappear and nothing happen. `confirmDialog` gained
+   `validate`, checked while the dialog is still on screen.
+2. A field whose caller listened only to `change` kept its error while the
+   person typed.
+3. A table with no title column promoted column 0 on the phone whatever its
+   role — a subtitle rendered twice, a hidden column showed.
+4. `blocked` (routine setup and generate) was not a status, so that trouble
+   state was red with no glyph.
+
+`component-defects.test.ts`: 5 tests; against the pre-wave code 4 fail.
+
+5. **Guardians saw no results.** The guardian screen passes the child's id to
+   `onOpenResults`; `app.ts` dropped it, the results screen fetched with no
+   `studentId`, and the API read the caller's own id — a guardian has no
+   results, so every parent was told nothing was published. The id now rides
+   the route (`#/results?studentId=…`), and the cache is per child so one
+   child's marks never paint under another while offline.
+   `guardian-results.test.ts`: 4 tests; against the old code 3 fail.
+
+## Two shared pieces added for the screens that follow
+
+- **`ui/irreversible.ts`** — the §7 pattern once, for the four actions that
+  cannot be undone (ফলাফল প্রকাশ, বার্ষিক উন্নয়ন, ইনভয়েস তৈরি, নোটিশ পাঠান
+  ২০০+): a `--danger-tint` statement, a checklist with the caller's real
+  counts, "আমি বুঝেছি এটি ফেরানো যাবে না", and the primary disabled until
+  ticked. Drawn from 05 publishScreen and 08 rolloverScreen; 07 and 09 do not
+  draw it, but §7 requires it on all four. One trap found while building it:
+  `setBusy(btn, false)` always re-enables a button, so a screen resetting the
+  panel inside a busy action would leave a live button over an unticked box.
+  The panel re-disables and ignores clicks while unticked. 19 tests.
+- **`numText` / `numClass` in `ui/dom.ts`** — the one digit splitter for R6.
+  The components had grown eight private copies; 59 screens were about to add
+  59 more.
+
+Icons `arrow-up`, `rotate-ccw`, `archive` added for the rollover checklist.
+
+## Verified
+
+- Full suite **2,349 tests**, 13/13 workspaces, 28 SQL suites (was 2,293);
+  typecheck 0/0/0; build clean; security probe 44/44; `index.html`
+  byte-identical at `496199bd`.
+Browser, component gallery at 1280 and 375: Hind Siliguri and Anek Bangla
+loaded, primary 44px `#ec3013`, stat figures in Anek Bangla, no horizontal
+overflow at 375, `color-scheme` light.
+
+---
+
+# Ata Ekta — wave 2, batch A: the shell and the screens every role reaches (2026-09-17)
+
+Eleven units: `shell`, `login`, `security`, `more`, `notifications`, `inbox`,
+`compose`, the offline page, `system`, `export`, `audit`. One implementer and
+one skeptical reviewer each, reading the real diff against the design page; the
+four with a blocker or major finding went through a repair pass (shell, inbox,
+system, audit).
+
+## What changed on screen
+
+- **Shell.** The crumb separator is `/` as drawn; the offline banner carries
+  the design's sentence and now the QUEUED COUNT — and `app.ts` reports it from
+  the outbox, on boot and on every change, so the figure has a source rather
+  than a slot. The sidebar নোটিশ row carries the unread count; the account row
+  gets the log-out glyph; on a phone the account menu is a bottom sheet.
+- **Login** is one bordered card in the drawn order: mark, school name, step,
+  fields through `field()` with real labels.
+- **Security** became the single drawn panel of device rows, with a device
+  glyph and the design's time vocabulary ('আজ ০৮:১২', 'গতকাল ১৪:৩০').
+- **আরও** is one flush row list, not a card grid, and uses no accent at all.
+- **Inbox, compose, notifications** follow 09 Comms: one bar, one surface, the
+  draft chip in the header slot, the audience chips as a labelled group.
+- **System** is the tile grid of 08 Admin & IT §05 — and does NOT draw the
+  design's "সব স্বাভাবিক" all-clear, because 8 of the 12 rows are never
+  probed; the chip now counts only what was measured.
+- **Audit** rows read as Bangla for all 46 action codes and 17 entity types
+  (they were 12 and 7, so real entries showed dotted codes), and the diff is
+  the shared table.
+- **The offline page** moved onto the design's ground and glyph.
+
+## Merged centrally
+
+187 CSS rules added, 31 carried rules retired, 0 raw hex, 0 undefined tokens,
+0 cross-unit conflicts. Two declarations the merge refused were restored by
+hand: `.shell-role` (the demo role SELECT) back to the 44px floor, and a
+z-index on `.shell-topbar` — not a look at all, but a stacking fix, because
+the phone account sheet was painting under the fixed tab bar.
+
+Three device glyphs added (smartphone, tablet, monitor). Four More-list
+subtitles aligned with the drawn copy.
+
+## Shared tests (R13)
+
+Fourteen changes applied centrally, all selector or copy updates that keep the
+guarantee: `.notice-head` → `.audit-head`, `.card-form` → `.audit-filters`
+addressed by name, `.data-table` → the shared table, the system table → the
+tile grid (the replacement test asserts every tile still carries name, state
+AS A WORD, what it does and where it lives — what the four columns carried),
+and `'3 দিন আগে'` → `'৩ দিন আগে'`. One test was added, not changed: an action
+code the fixture never used still reads as Bangla.
+
+## Defects found and recorded, not fixed inside a design change (R4)
+
+- `login-view.ts`: a server error from the OTP request is painted and then
+  wiped by the re-render in `finally` — the person sees nothing.
+- `security-view.ts`: a failed device revoke sets its message, then `load()`
+  clears it before it can be read.
+- `inbox-view.ts`: 'আজ/গতকাল' counts 24-hour windows, not calendar days.
+- `system-view.ts`: two rows are hard-coded 'চালু আছে' and never probed; any
+  503 is reported as a deliberate switch-off even without the kill-switch code.
+- `notice-compose-view.ts`: after a successful big send the acknowledgement is
+  not reset, and local audience errors print in English.
+- `audit-view.ts`: assignment and slot entries still print raw uuids for
+  teacher/subject/room.
+
+## Verified
+
+PWA suite **952 tests**, all passing; typecheck 0 errors; build clean;
+`index.html` byte-identical at `496199bd`.
+
+---
+
+# Ata Ekta — wave 2, batch B: teacher, student and shared academic screens (2026-09-17)
+
+Thirteen units: teacher home, roster, marks, assignments, scripts, substitute,
+class performance, calendar, documents, learn, my attendance, results,
+routine. Eight needed a repair pass after review (marks, scripts, substitute,
+classperf, calendar, documents, learn, routine).
+
+The first two launches of this batch did no work: both ended inside two
+minutes on the account's usage limits, with every agent failing before its
+first edit. The tree was checked clean before relaunching.
+
+## What changed on screen (highlights)
+
+- **Teacher home** is the three drawn blocks: the "এখন চলছে" card with the
+  page's single primary (হাজিরা নিন), a three-figure strip in one row, and the
+  task list. The day list and the quick tiles are gone, as drawn.
+- **Marks** accepts a mark typed in Bangla digits (it was `type=number`), shows
+  a live total that never counts a rejected mark, and keeps its save button in
+  step in both places it is drawn.
+- **Calendar** is Saturday-first as a Bangladeshi school reads a month, with
+  icon arrows named by their target month, and a fixed four-colour key in
+  words.
+- **Results** paints the GPA hero in Bangla digits.
+- **Learn** opens on the subject the student tapped (F-802): `app.ts` dropped
+  the id between আমার বিষয় and the learn route — the same shape as the guardian
+  results defect in wave 1 — and now carries it in the route.
+- Class performance, my attendance, routine, substitute, documents, scripts
+  and roster follow their design pages; rolls stay Latin identifiers.
+
+## Merged centrally
+
+405 CSS rules added, 142 carried rules retired, no raw hex, no undefined
+token, no conflict. Two new guards ran before the merge, because a batch of
+thirteen screens is where one screen's cleanup starts to cost another:
+
+- a **removal guard**: a carried rule is retired only if no OTHER screen's
+  file still emits its classes. It refused three (`.seg-bar`, used by
+  assignments and the exam routine; `.progress-fill[data-low]`, used by
+  subjects; `.data-table sup`, used by four admin screens).
+- a **cross-wave guard**: a new rule may not silently change a property an
+  earlier wave already set for the same selector. None did.
+
+Six icons added: chevron-left, save, credit-card, receipt, printer,
+trending-down.
+
+## Tests (R13)
+
+Owned test files were extended rather than rewritten — 660 lines added, 37
+removed. The removed lines are old visual details: the Friday-first weekend
+order (now Saturday-first), `৪ ·` roll prefixes (rolls are Latin identifiers),
+the button copy `নতুন এন্ট্রি` (drawn as `নতুন ঘটনা`), and consequence text now
+read from the overlay in `document.body`. The calendar key moved from "only
+the states this month uses" to the drawn fixed key of four, and gained a test
+that the school's weekend is keyed only when there is one.
+
+One shared change: the permission test's results secret became
+`[5৫][.][0০][0০]`. With the GPA painted in Bangla digits, a pattern that knew
+only `5.00` would have passed a leak of the figure a refused reader must not
+see.
+
+## Defects found, recorded not fixed (R4) — BACKLOG AE-11
+
+The heaviest: **answer-script photos would never reach storage.** The client
+posts only the metadata row; the server's contract expects the image on a
+presigned PUT that neither side implements. Latent today, because
+`SCRIPT_STORAGE_ENABLED` is hard-coded false and every upload is refused with
+503 — but switching storage on would record pages whose images do not exist.
+
+## Verified
+
+PWA suite **993 tests**, all passing; typecheck 0 errors; build clean;
+`index.html` byte-identical at `496199bd`.
+
+---
+
+# Ata Ekta — wave 2, batch C: principal, admin and routine screens (2026-09-17)
+
+Twenty-four units: principal home, academic structure, students, users,
+roles, subjects, rooms, teaching assignments, timetable, the routine editor,
+generate, publish and setup, the exam routine, exams, result publishing,
+rollover, import, admin settings, branding, the structure forms, staff
+attendance, generation, and subject choice. Twelve needed a repair pass.
+
+## What changed on screen (highlights)
+
+- **Principal home** is the drawn board: a four-figure band (students, present
+  %, absent, dues) and two panels — what needs attention now, and today's
+  absent students. The review caught the first draft counting attendance
+  SESSIONS against SECTIONS (the dashboard endpoint mixes the two), so that
+  row was removed rather than shown wrong, and the all-clear sentence no
+  longer mentions attendance.
+- **Academic structure** is the 05 Principal §02 tree: শ্রেণি → বিভাগ → সেকশন
+  opens in place, counts at every level, and a section with no class teacher
+  carries a status on its own row.
+- **Result publishing and rollover use the irreversible panel** (§7): the
+  consequence and its real counts are on screen before anything is pressed,
+  and the primary stays disabled until "আমি বুঝেছি এটি ফেরানো যাবে না" is
+  ticked. Rollover keeps its extra guard: while any student is blocked, the
+  checkbox itself is disabled.
+- **Roles** is one matrix of ten roles by five acts — built from what the
+  server enforces, not from the drawing. The drawing showed the academic
+  coordinator without settings access; the server grants it, so the matrix
+  says so. The page also keeps the sentence the drawing dropped: another
+  school's rows are never visible, and that is not a setting.
+- **Users** shows the মোবাইল column only to roles that may manage accounts.
+- **Exams** reads a weight typed in Bangla digits. It used to become NaN,
+  travel as null, and be saved as 0 with no error.
+- **Teaching assignments** is one matrix, sections down and subjects across;
+  the phone card stack that rendered every cell twice is gone, and switching
+  class with unsaved edits asks through the app's own dialog, not
+  `window.confirm()`.
+- The routine screens (setup, generate, publish, editor, timetable, exam
+  routine, generation) follow 06 Routine band by band.
+
+## Merged centrally
+
+699 CSS rules added, 163 carried rules retired, no raw hex, no undefined
+token, no conflict. The removal guard refused four more (`.tab` and its
+states, still used by other screens; `.brand-card`). One keyframes block,
+`rgen-sweep`, was added by hand with a reduced-motion stop, because a
+keyframes rule does not fit the merge script's selector shape. Four icons:
+plus, minus, git-branch, more-vertical.
+
+## Shared tests (R13)
+
+Applied centrally, then each new check was mutation-tested: the screen code
+was broken one change at a time in a throwaway copy, and the new tests caught
+every real break. Notable:
+
+- **Publish** replaced "the confirmation's focus defaults to cancel" with a
+  stronger one: the publish button is disabled before the tick, pressing it
+  anyway sends nothing, and after the tick exactly one POST goes out with the
+  right exam.
+- **Rollover** proves the commit stays blocked while students are blocked even
+  if the checkbox is forced and ticked.
+- **Users** proves a read-only caller sees no phone number anywhere.
+- One old assertion was DELETED on purpose: the generation screen used to say
+  zero conflicts were "ডাটাবেসেই অসম্ভব". That is false for a draft — the
+  exclusion constraints only protect ACTIVE routines, and the service counts
+  real draft conflicts.
+- The test that the roles page promises tenant isolation was left failing
+  rather than rewritten; the sentence was put back on the screen instead.
+
+## Defects found, recorded not fixed (R4) — BACKLOG AE-12
+
+The one to read first: **the users API sends every account's phone number to
+the academic coordinator**, a read-only role. The screen now hides the column
+from that role, but the data still arrives.
+
+## Verified
+
+PWA suite **1,048 tests**, all passing; typecheck 0 errors; build clean;
+`index.html` byte-identical at `496199bd`.
+
+---
+
+# Ata Ekta — wave 2, batch D, and attendance path খ (2026-09-17)
+
+## Batch D: finance, student, guardian, AI helpers, platform console
+
+Eleven units: fees, fee structures, invoices, ledger, student home, guardian
+home, the guardian view and panel, শিখো, শিক্ষক সহায়ক, practice, and the
+platform console. Nine needed a repair pass.
+
+- **Fees** has two drawn layouts on one route — the family sheet (a
+  `--danger-tint` due hero over the invoice rows) for students and guardians,
+  and the office list with সব / বকেয়া / পরিশোধিত / আংশিক chips for finance
+  staff. Review caught the first draft choosing the family layout for "anyone
+  not finance staff", which would have put a family's "এখন বকেয়া" hero over a
+  coordinator's view of other families' rows; it is now chosen FOR students
+  and guardians only. A failed load with nothing cached is now the error
+  state — it used to show the empty-state sentence, which falsely said there
+  were no invoices.
+- **Invoice generation** sits behind the irreversible panel (§7), with the
+  same test strength as result publishing.
+- **Ledger** keeps every MFS channel's posted and reconciled amounts visible.
+- **Student home** dropped a "জমা বাকি" figure that was really a count of
+  suggestions, not of homework due.
+- **The platform console** is the drawn operator shell; the repair also fixed a
+  refusal that survived signing out and back in.
+
+## Attendance path খ — the one behaviour change
+
+Built contract-first: before any code, one investigation traced what the
+screen enqueues, what the sync applier accepts, and exactly when a guardian
+gets an SMS. Then one implementation, then three independent skeptics
+(design, data correctness, accessibility), three rounds of repair and
+re-verification.
+
+What the teacher sees now:
+
+- Every row shows the roll AND the name, and starts **unset —
+  "চিহ্নিত হয়নি"**. Nobody is present until the teacher says so.
+- "{T} জনকে উপস্থিত ধরুন" (`markAllPresent()`) is the prominent action; a
+  tap opens a row's three choices; `grid.cycle()` is gone.
+- **Guard 1:** "দেখে জমা দিন" with anyone unmarked raises a `--warn-tint`
+  footer naming the count, with "বাকি {U} জনে যান" and the quiet
+  "তবুও জমা".
+- **Guard 2:** every change gets a 5-second undo naming the student and the new
+  state (Ctrl/Cmd+Z too), including undo of the bulk mark.
+- **Guard 3:** a sheet lists absentees and late arrivals by roll and name, each
+  with "বদলান", and says how many guardians will get an SMS. Screen-reader
+  users Tabbing through it hear roll, name and state on every change button,
+  and the SMS count when focus reaches "জমা দিন" — this last part was the one
+  accessibility finding still open after three rounds, and the lead fixed it.
+
+The data contract, held by tests:
+
+- "Unset" is derived from the grid's existing `touched` flag. No new status was
+  added — an `unset` value would fail the server's enum cast and park the
+  whole register as a non-retryable failure.
+- A save sends ONLY the students the teacher marked, with the status the
+  teacher gave. "তবুও জমা" omits the unmarked: no row, no default. The server
+  accepts a partial register, and every reader counts only existing records,
+  so omitted really is "not counted".
+- A save with nobody marked is refused before anything is queued; the server
+  would otherwise accept an empty register and count the section as taken.
+- The outbox op, its id, idempotency and offline durability are unchanged.
+
+The investigation found that **a correction cannot recall an SMS**
+(BACKLOG AE-13): the 20-minute grace window sends from the event and never
+re-reads the record, so absent → present within the window still texts the
+guardian, and absent → late texts twice. The three guards exist to catch the
+mistake before the register leaves the phone.
+
+## Also fixed centrally in this step
+
+- **Every checkbox had lost its keyboard focus ring** — including "আমি বুঝেছি
+  এটি ফেরানো যাবে না" on all four irreversible screens. A carried
+  `input:focus { outline: none }` rule (for text fields, which draw focus on
+  the border) beat the sheet's ring on equal specificity. Restored for
+  checkboxes and radios, keyboard focus only.
+- **Invoice generation always reported "nothing new".** The screen read
+  `invoiceCount`; finance-svc returns `invoicesCreated`. The demo fixture had
+  the same wrong name, which is why it never showed. A test now fails on the
+  old read.
+- The numeral-face test was restated over the stacks rules actually read: the
+  carried `--font-heading` / `--font-body` are no longer read by anything.
+
+## Merged centrally
+
+Batch D: 352 CSS rules added, 59 retired (12 more refused by the removal
+guard). Attendance: 83 added, 30 retired — the old tile grid. No raw hex, no
+undefined token, no cross-wave override. Icons: list, layout-dashboard,
+building-2.
+
+Shared tests for batch D were applied and mutation-tested: 44 deliberate
+breakages of the screens, every one caught by the intended assertion.
+
+## Verified
+
+PWA suite **1,110 tests**, all passing; typecheck 0 errors; build clean;
+`index.html` byte-identical at `496199bd`.

@@ -37,6 +37,81 @@ const GROUPS = ['packages', 'services', 'apps'];
 // on that host sits behind, and its tests must not be invisible either.
 const EXTRA = ['netlify'];
 
+/**
+ * B-66. Refuse a Node build that cannot run this suite honestly.
+ *
+ * A TCP socket opened inside a `node --test` PER-FILE CHILD PROCESS
+ * intermittently aborts that child on Node 24 before 24.21.0, on Windows.
+ * The child dies with Windows status 0xC0000409 (an abort()) having written
+ * nothing at all, so the runner reports the whole file as
+ *
+ *   test at test/<file>.test.ts:1:1
+ *   'test failed'
+ *
+ * with no assertion named and an EMPTY stderr. That is not a test failure,
+ * and no amount of reading the file will explain it. It cost this project
+ * B-58, B-66 and three separate audit observations.
+ *
+ * Measured on this repository, same machine, same session, one variable:
+ *
+ *   node v24.15.0 -> 11 crashes / 500 runs (5,500 child processes)
+ *   node v24.21.0 ->  0 crashes / 500 runs (5,500 child processes)
+ *
+ * It needs a TCP socket (a UDP socket does not do it: 0/300) and it needs the
+ * per-file child (`--test-isolation=none`: 0/300; the identical socket work
+ * as a plain `node file.mjs`: 0/3,300). It is NOT concurrency: it still
+ * happens at `--test-concurrency=1`, and the per-child rate is flat at
+ * 0.18-0.27% however wide the fan-out. Capping concurrency would have looked
+ * like a fix and fixed nothing.
+ *
+ * Only the DB-backed suites open TCP sockets, which is why only they were
+ * ever hit, and CI has never seen it because every workflow pins Node 22.
+ *
+ * -- Why this is a floor, not an `engines` bump ---------------------------
+ * `engines` stays at >=22 deliberately. Node 22 is what CI runs and it is
+ * unaffected; a global >=24.21.0 would invalidate a green CI to fix a
+ * Windows-only defect that CI does not have. So the floor applies to the
+ * Node 24 line only, where the defect was actually proven.
+ */
+const NODE_B66_FIRST_GOOD = [24, 21, 0];
+
+/** True only on a Node build measured to carry the B-66 defect. */
+function nodeHasB66Defect() {
+  const [maj, min, pat] = process.versions.node.split('.').map(Number);
+  // Node 22 (CI's version) and Node 25+ are outside the proven-bad line.
+  if (maj !== 24) return false;
+  const [, goodMin, goodPat] = NODE_B66_FIRST_GOOD;
+  return !(min > goodMin || (min === goodMin && pat >= goodPat));
+}
+
+function checkNodeForB66() {
+  if (!nodeHasB66Defect()) return;
+
+  const msg =
+    `Node v${process.versions.node} carries the B-66 defect.\n\n`
+    + 'On this Node 24 build a TCP socket opened inside a `node --test` child\n'
+    + 'process intermittently aborts that child (Windows 0xC0000409) with no\n'
+    + 'output at all. The suite then reports a whole test file as failing at\n'
+    + "line 1:1 with 'test failed', no assertion and empty stderr - a failure\n"
+    + 'that cannot be diagnosed and does not reproduce. Every DB-backed suite\n'
+    + 'is exposed, because those are the ones that open sockets.\n\n'
+    + `Fix: install Node >= ${NODE_B66_FIRST_GOOD.join('.')} (24.21.0 measured clean over 5,500\n`
+    + 'child processes; 24.15.0 crashed 11 times over the same sample).\n\n'
+    + 'See docs/BACKLOG.md B-66 and docs/PHASE_LOG.md for the full evidence.\n';
+
+  if (process.platform === 'win32') {
+    // Proven here. A run on this build cannot be trusted, so do not start one.
+    console.error(`\nERROR: ${msg}`);
+    process.exit(1);
+  }
+  // Never measured off Windows. Say so, and let the run proceed rather than
+  // block a platform on evidence that was never gathered for it.
+  console.error(`\nWARNING: ${msg}Proven on Windows; on ${process.platform} it is `
+    + 'untested, so this is a warning rather than a refusal.\n');
+}
+
+checkNodeForB66();
+
 // Preflight. packages/server-core's assertRlsEnforced already refuses to
 // start the app on a privileged role, but the DB suites call createDb
 // directly and never reach it — which is why a superuser connection surfaces
@@ -87,9 +162,41 @@ if (process.env.DATABASE_URL) {
 const npmTest = (cwd) =>
   execSync('npm test --silent', { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 
+/**
+ * Files the runner reported as failing WHOLE, at line 1:1, carrying only the
+ * bare string 'test failed'. That is what `node --test` prints when a child
+ * exits non-zero without reporting - a crash - as opposed to an assertion
+ * failing inside the file, which always carries a line number and a message.
+ * (B-66)
+ */
+function wholeFileCrashes(out) {
+  const hits = [];
+  const re = /test at (.+?):1:1\r?\n[^\n]*\r?\n\s*'test failed'/g;
+  let m;
+  while ((m = re.exec(out)) !== null) hits.push(m[1]);
+  return [...new Set(hits)];
+}
+
 let failed = 0;
 let orphaned = [];
 const results = [];
+
+/**
+ * Every workspace this run STARTED, and every one that came back with a
+ * count.  (B-66)
+ *
+ * The runner already exited non-zero when a workspace failed, and it already
+ * said "1 workspace(s) FAILED" — but the summary line reported
+ * `results.length`, which counts only the ones that REPORTED. So a run that
+ * lost a whole workspace printed "2209 tests across 12 workspaces" beside a
+ * previous run's "2232 across 13", and the only way to learn WHICH workspace
+ * had gone was to subtract the two totals by hand. That is what B-58, B-66
+ * and three separate P12-audit observations all had to do.
+ *
+ * `attempted` minus `reported` is the answer, by name, printed at the end.
+ */
+const attempted = [];
+const reported = new Set();
 
 for (const group of [...GROUPS, ...EXTRA]) {
   const dir = join(ROOT, group);
@@ -111,7 +218,9 @@ for (const group of [...GROUPS, ...EXTRA]) {
     if (hasTests && !script) { orphaned.push(`${group}/${name}`); continue; }
     if (!hasTests || !script) continue;
 
-    process.stdout.write(`${(isLeaf ? group : group + '/' + name).padEnd(28)} `);
+    const label = isLeaf ? group : `${group}/${name}`;
+    attempted.push(label);
+    process.stdout.write(`${label.padEnd(28)} `);
     try {
       const out = npmTest(ws);
       const pass = /^. tests (\d+)/m.exec(out)?.[1] ?? '?';
@@ -125,6 +234,7 @@ for (const group of [...GROUPS, ...EXTRA]) {
         console.log(`ok  ${pass} tests${skip !== '0' ? `, ${skip} skipped` : ''}`);
       }
       results.push(Number(pass) || 0);
+      reported.add(label);
     } catch (err) {
       failed++;
       const out = String(err.stdout ?? '');
@@ -146,6 +256,37 @@ for (const group of [...GROUPS, ...EXTRA]) {
       } catch {
         console.log('FAIL');
       }
+
+      // B-66. Name a CRASHED CHILD for what it is.
+      //
+      // A child that dies before running anything is reported by the test
+      // runner in the same words as a test that failed an assertion, which is
+      // how this went undiagnosed for three phases. The signature is precise:
+      // a whole FILE failing at line 1:1, the bare string 'test failed' with
+      // no assertion, and nothing on stderr - because the process was aborted
+      // before it could write a byte.
+      const crashed = wholeFileCrashes(out);
+      if (crashed.length && !errOut.trim()) {
+        console.log(`      ^ ${crashed.length} file(s) did not fail a test - the CHILD PROCESS CRASHED:`);
+        for (const f of crashed) console.log(`          ${label}  ${f}`);
+        // Which diagnosis is honest depends on the runtime underneath.
+        // Claiming B-66 on a patched Node would send the next person chasing
+        // a cause that has been excluded.
+        const onDefectiveNode = nodeHasB66Defect();
+        console.log(
+          '        No assertion, no stderr: the process was aborted before it\n'
+          + '        could report. A test that fails an assertion never looks like this.\n'
+          + (onDefectiveNode
+            ? `        This is B-66: you are on Node v${process.versions.node}, where a TCP socket\n`
+              + '        in a node --test child aborts it (0xC0000409). Install Node\n'
+              + `        >= ${NODE_B66_FIRST_GOOD.join('.')} and it stops. Re-running that ONE file alone\n`
+              + '        will usually pass - that is the tell.'
+            : `        This is the B-66 SIGNATURE, but Node v${process.versions.node} is past that\n`
+              + '        defect, so B-66 is NOT the explanation here. Something else killed\n'
+              + '        the child: look for process.exit/abort in the file, a native module,\n'
+              + '        or an OOM. Do not file this as B-66 without new evidence.'));
+      }
+
       process.stdout.write(out.split('\n').slice(-40).join('\n'));
     }
   }
@@ -261,6 +402,28 @@ if (orphaned.length) {
   console.error('Add: "test": "node --test \'test/*.test.ts\'"');
 }
 
+/**
+ * The invariant B-66 asked for: everything started must report.
+ *
+ * Expected count is not a constant in a file — it is discovered, because the
+ * whole point of this script is that a new workspace cannot go unnoticed.
+ * So the expectation is `attempted`, and anything in it that never produced
+ * a count is named here rather than left to arithmetic.
+ */
+const silent = attempted.filter((w) => !reported.has(w));
+
 const total = results.reduce((a, b) => a + b, 0);
-console.log(`\n${total} tests across ${results.length} workspaces` + (failed ? `, ${failed} workspace(s) FAILED` : ', all passing'));
-process.exit(failed || orphaned.length ? 1 : 0);
+console.log(`\n${total} tests across ${reported.size}/${attempted.length} workspaces`
+  + (failed ? `, ${failed} workspace(s) FAILED` : silent.length ? '' : ', all passing'));
+
+if (silent.length) {
+  console.error(`\nERROR: ${silent.length} workspace(s) started and never reported a count:`);
+  for (const w of silent) console.error(`  ${w}`);
+  console.error(
+    '\nA workspace that does not report is not a workspace that passed. If this\n'
+    + 'is the B-66 signature — a whole file failing with empty stderr, a different\n'
+    + 'workspace each run — the full output of the failing run is in the log file\n'
+    + 'named above, and re-running that ONE workspace alone will usually pass.');
+}
+
+process.exit(failed || orphaned.length || silent.length ? 1 : 0);

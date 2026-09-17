@@ -399,6 +399,160 @@ record(wrongKey.status === noCreds.status && wrongKey.text === noCreds.text,
   'a wrong key and no credentials give the same answer',
   `→ ${wrongKey.status} vs ${noCreds.status}`);
 
+/* ═══ 9b. Data export — the FILE, not the status code ═══════════ */
+setArea('9b. Data export (P11) — what is inside the file');
+
+/**
+ * Every other check in this file can be satisfied by a status code. These
+ * cannot, and that is the entire reason they exist.
+ *
+ * P11 is the first feature whose output leaves as an artifact. A request
+ * that returns 403 is a refusal anybody can see; a request that returns 200
+ * carrying another school's roster is ALSO a 200, and it looks exactly like
+ * success until something opens the bytes.
+ *
+ * ── The first version of this block was useless, and the way it failed is
+ * worth keeping ──
+ * It reused `mentions()`, which looks for the other tenant's uuid, section
+ * id, principal id and name. None of those can appear in an export: §6 of
+ * the P11 brief forbids uuids in the file, and the school's own name is not
+ * a column. So it was searching a CSV for identifiers that are absent BY
+ * DESIGN, and it passed against a handler deliberately mutated to trust
+ * `?tenantId=` — a mutation that turned a 1-row file into 2,000 rows of
+ * another school's students. A control that cannot fail is not a control.
+ *
+ * What replaces it compares CONTENT: the forged request must return the
+ * byte-identical file to the honest one, and no data line of B's file may
+ * appear in A's.
+ */
+const EXPORT_URL = '/api/v1/academics/export?dataset=students';
+
+/** The data lines of a CSV — everything after the header, blanks dropped. */
+const dataLines = (text) => text.split('\r\n').slice(1).filter((l) => l.trim() !== '');
+
+const expA = await call(EXPORT_URL, auth(tokenA));
+const expB = await call(EXPORT_URL, auth(tokenB));
+
+if (expA.status === 200 && expB.status === 200) {
+  // 1. THE ONE THAT MATTERS. No row of B's file may be in A's.
+  //    Row-level rather than substring: a shared column value like a class
+  //    name is not a leak, and a whole student record is.
+  const linesB = new Set(dataLines(expB.text));
+  const overlap = dataLines(expA.text).filter((l) => linesB.has(l));
+  record(overlap.length === 0,
+    "no row of one school's export appears in another school's file",
+    overlap.length
+      ? `${overlap.length} shared row(s), e.g. ${overlap[0].slice(0, 80)}`
+      : `A ${dataLines(expA.text).length} row(s), B ${dataLines(expB.text).length} row(s), 0 shared`);
+
+  // 2. A forged tenant must change NOTHING. Byte-identical, not merely
+  //    "still 200" — this is the check the mutation would have failed.
+  const forged = await call(
+    `${EXPORT_URL}&tenantId=${B.id}&tenant_id=${B.id}`,
+    auth(tokenA, { 'x-tenant-id': B.id, 'x-user-id': B.principal, 'x-role': 'principal' }));
+  record(forged.status === 200 && forged.text === expA.text,
+    'a forged tenant in query params and headers returns the byte-identical file',
+    forged.text === expA.text
+      ? 'identical to the honest request'
+      : `DIFFERENT: honest ${expA.text.length}b / forged ${forged.text.length}b `
+        + `(${dataLines(forged.text).length} rows vs ${dataLines(expA.text).length})`);
+
+  // 3. No credential material, and no internal identifier, in a file that
+  //    will be mailed between offices.
+  const leaked = /password|hash|secret|token|ciphertext|blind_index|mfa_/i.test(expA.text);
+  record(!leaked, 'an export file carries no credential or PII-key material',
+    leaked ? 'a secret-shaped name is in the file' : 'none of the guarded names appear');
+
+  const uuid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(expA.text);
+  record(!uuid, 'an export file exposes no raw uuid',
+    uuid ? 'a uuid is in the file' : 'no uuid in the body');
+
+  // 4. Spreadsheet safety. A name is free text somebody typed, and Excel
+  //    executes a leading `=`.
+  const rawFormula = /(^|,|")=[A-Z]+\(/.test(expA.text);
+  record(!rawFormula, 'no cell in an export begins with an un-neutralised formula',
+    rawFormula ? 'a live formula survived into the file' : 'no live formula');
+
+  // 5. Nothing between us and the school may keep a copy.
+  const cc = expA.headers.get('cache-control') ?? '';
+  record(/no-store/.test(cc), 'an export is never stored by a cache',
+    `cache-control: ${cc || '(absent)'}`);
+} else {
+  // Reported rather than passed. A deployment where the probe's fixture role
+  // cannot export is a deployment this area did not test.
+  skip('export file content checks',
+    `A → ${expA.status}, B → ${expB.status}; both principals must be able to `
+    + 'export for the content comparison to mean anything');
+}
+
+/* ═══ 9c. Session management — B-120 ═════════════════════ */
+setArea('9c. Session and device management (B-120)');
+
+/**
+ * A revoke that only hides a row is worse than none, because the person who
+ * used it believes the stolen phone is out. So these ask the API, never a
+ * screen.
+ */
+const SESSIONS = '/api/v1/auth/sessions';
+
+// 1. It is authenticated at all.
+const sessAnon = await call(SESSIONS);
+record(sessAnon.status === 401, 'the session list requires a token',
+  `\u2192 ${sessAnon.status}`);
+
+// 2. A list is your OWN devices. There is no user parameter to widen it, and
+//    that is the check: a forged one must change nothing.
+const sessA = await call(`${SESSIONS}?deviceId=probe`, auth(tokenA));
+const sessForged = await call(
+  `${SESSIONS}?deviceId=probe&userId=${B.principal}&user_id=${B.principal}`,
+  auth(tokenA, { 'x-user-id': B.principal, 'x-tenant-id': B.id }));
+record(sessA.status === sessForged.status && sessA.text === sessForged.text,
+  'a forged user or tenant cannot widen a session list',
+  sessA.text === sessForged.text
+    ? 'identical to the honest request'
+    : `DIFFERENT: ${sessA.text.length}b vs ${sessForged.text.length}b`);
+
+// 3. Nothing in the list is a credential. The row holds a refresh token
+//    HASH and an IP; neither may leave.
+if (sessA.status === 200) {
+  const leaked = /refresh_token|token_hash|hash|secret|ip_address|"ip"/i.test(sessA.text);
+  record(!leaked, 'a session list carries no token, hash or IP address',
+    leaked ? 'a credential-shaped field is in the body' : 'none present');
+
+  // Deliberately NOT "no uuid anywhere", which is the check this started as
+  // and which failed correctly against a body that was fine. A device id IS
+  // uuid-shaped — the PWA generates one per browser and stores it in
+  // localStorage — and it is the handle a revoke is aimed with, so it has to
+  // round-trip. What must never appear is a SERVER identifier: the account,
+  // the school, or the session row. Those are named exactly, which is a
+  // stronger statement than the shape test it replaces.
+  const serverIds = [A.id, A.principal, A.section, A.student].filter(Boolean);
+  const leakedId = serverIds.find((id) => sessA.text.includes(id));
+  record(!leakedId, 'a session list exposes no user, tenant or row identifier',
+    leakedId ? `a server identifier is in the body: ${leakedId}` : 'only the client’s own device handle');
+} else {
+  skip('session list content checks', `the list answered ${sessA.status} for this fixture`);
+}
+
+// 4. Revoking somebody else's device does nothing. The device id is not a
+//    secret — knowing it must not be enough.
+const revokeOther = await call(`${SESSIONS}/revoke`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: `Bearer ${tokenA}` },
+  body: JSON.stringify({ deviceId: 'a-device-belonging-to-somebody-else' }),
+});
+let revokedCount = null;
+try { revokedCount = JSON.parse(revokeOther.text).revoked; } catch { /* not json */ }
+record(revokeOther.status === 200 && revokedCount === 0,
+  'revoking a device that is not yours ends nothing',
+  `\u2192 ${revokeOther.status}, revoked=${revokedCount}`);
+
+// 5. Never cached. A stale session list still shows a device already ended.
+const cc = sessA.headers.get('cache-control') ?? '';
+record(!/max-age=[1-9]/.test(cc) && !/public/.test(cc),
+  'a session list is not publicly cacheable',
+  `cache-control: ${cc || '(absent)'}`);
+
 /* ═══ 10. Secret exposure ════════════════════════════════════════════════ */
 setArea('10. Secret exposure');
 

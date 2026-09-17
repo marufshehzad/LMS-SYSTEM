@@ -42,10 +42,13 @@ import monitor from './monitor.ts';
 // M6 — the staff register the substitute finder had been filtering on
 // since 006, with nothing able to write it.
 import staffAttendance from './staff-attendance.ts';
+// P11. Data portability — the ops-owned datasets.
+import exportData from './export.ts';
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 
 const ROUTES: Record<string, Handler> = {
+  export: exportData,
   maintenance, events, branding, brand, manifest, notices, inbox,
   dashboard, assign, enrol, rollover, settings, users,
   structure, guardians, audit, calendar, document, push, monitor,
