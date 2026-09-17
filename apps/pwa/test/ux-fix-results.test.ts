@@ -89,6 +89,9 @@ const cacheGuardian = (homeId: string | null, wards = WARDS) =>
 
 beforeEach(() => {
   localStorage.clear();
+  // The child last on screen is shared with আমার সন্তান through sessionStorage
+  // (R4); one test's choice must not become the next test's remembered child.
+  dom.window.sessionStorage.clear();
   dom.window.history.replaceState(null, '', '#/results');
   root = doc.createElement('main');
   doc.body.append(root);

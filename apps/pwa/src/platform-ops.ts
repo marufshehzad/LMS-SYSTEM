@@ -417,18 +417,44 @@ export function refusalState(doc: Document): HTMLElement {
 }
 
 /**
+ * A failure card that has already been heard, drawn again without its alert.
+ *
+ * An alert is announced every time it is put on the page, and the console
+ * redraws for reasons that are not a new failure. The words, the retry and
+ * the look stay; only the announcement goes. The refusal goes back to the
+ * shared card's `note` (permissionState); the error's words to plain text.
+ * Works on a card or on anything holding cards.
+ */
+export function quietState(scope: HTMLElement): HTMLElement {
+  const alerts = [...scope.querySelectorAll<HTMLElement>('.ui-state [role="alert"], .ui-state[role="alert"]')];
+  if (scope.matches('.ui-state[role="alert"]')) alerts.push(scope);
+  for (const a of alerts) {
+    if (a.classList.contains('ui-state-denied')) a.setAttribute('role', 'note');
+    else a.removeAttribute('role');
+  }
+  return scope;
+}
+
+/**
  * Make a page's name the place focus goes when the page changes.
  *
  * `tabindex="-1"` so it can take focus without becoming a Tab stop, and a
  * stable `data-focus-key` so the console's focus keeper finds the name again
  * when a load redraws the page — the words change ("প্রতিষ্ঠান" while a school
  * loads, then its name), the place does not.
+ *
+ * `plat-title` is the hook for the ring's size. The name is a block as wide
+ * as the bar, so the sheet's focus ring (`[tabindex]:focus-visible`) drew a
+ * 2px box round the whole title row — about 970px at 1280 — after every
+ * keyboard page change. app.css (`.plat-title`) sizes the name to its words,
+ * and the same ring then marks the words; the focus move itself is unchanged.
  */
 export function titleTarget(scope: ParentNode): HTMLElement | null {
   const h = scope.querySelector<HTMLElement>('h1');
   if (!h) return null;
   h.setAttribute('tabindex', '-1');
   h.setAttribute('data-focus-key', 'plat-title');
+  h.classList.add('plat-title');
   return h;
 }
 
@@ -552,11 +578,79 @@ export class PlatformOpsView {
    * button to make one.
    */
   private loaded = false;
+  /**
+   * Failures, numbered, and the last one whose card has been on the page.
+   *
+   * A failure is announced once, when its card is first shown. The card used
+   * to be built afresh, as an alert, on every redraw — so every sidebar press
+   * while a load error stood said "তালিকা আনা যায়নি। …" again, though nothing
+   * new had failed. A retry or a হালনাগাদ that fails is a new failure, and is
+   * said again.
+   *
+   * "Shown" means a reader could be handed it: on the page, and not under an
+   * open drawer. openDrawer (ui/overlay.ts) sets `aria-hidden` on the rest of
+   * the page while it is open, and a failure drawn then — an operator save
+   * that fails keeps its drawer open — is heard by nobody. It stays unsaid
+   * until the drawer closes, and is said then (see `onOverlayClosed`).
+   */
+  private failure = 0;
+  private saidFailure = 0;
+
+  /** Any overlay closing may uncover a failure card nobody has heard. */
+  private readonly onOverlayClosed = (): void => { this.sayUnheard(); };
 
   constructor(options: OpsViewOptions) {
     this.o = options;
+    options.doc.addEventListener('ui:overlay-closed', this.onOverlayClosed);
     this.render();
     void this.load();
+  }
+
+  /** The view is being thrown away (the console signed out). */
+  public destroy(): void {
+    this.o.doc.removeEventListener('ui:overlay-closed', this.onOverlayClosed);
+  }
+
+  /** Record a failure: its words, its code, and that it is a new one. */
+  private fail(err: unknown, fallback: string): void {
+    this.error = plainError(err, fallback);
+    this.errorCode = errorCodeOf(err);
+    this.failure++;
+  }
+
+  /**
+   * Could a card on this view's page be heard now? Not while the view is off
+   * the page, and not while an overlay hides the page with `aria-hidden`.
+   */
+  private hearable(): boolean {
+    const r = this.o.root;
+    return r.isConnected && !r.closest('[aria-hidden="true"]');
+  }
+
+  /** The failure card is on the page: count it as said, if it could be heard. */
+  private noteHeard(): void {
+    if (this.error && this.failure !== this.saidFailure && this.hearable()) {
+      this.saidFailure = this.failure;
+    }
+  }
+
+  /**
+   * An overlay has closed. A failure drawn while it was open went on the page
+   * under its `aria-hidden` and was never said: put the card on the page again
+   * now that it can be heard, which says it. Only the card moves — the page
+   * and whatever has focus stay as they are.
+   */
+  private sayUnheard(): void {
+    if (!this.error || this.failure === this.saidFailure || !this.hearable()) return;
+    const card = this.o.root.querySelector<HTMLElement>('.plat-flash .ui-state');
+    const band = card?.parentNode;
+    if (!card || !band) return;
+    const focused = this.o.doc.activeElement as HTMLElement | null;
+    const next = card.nextSibling;
+    card.remove();
+    band.insertBefore(card, next);
+    if (focused && card.contains(focused)) focused.focus();
+    this.saidFailure = this.failure;
   }
 
   // ── the shell's handles ──────────────────────────────────────────────
@@ -564,6 +658,25 @@ export class PlatformOpsView {
   /** The section the sidebar should mark. A school's page is under প্রতিষ্ঠান. */
   public section(): Tab {
     return this.openId ? 'institutions' : this.tab;
+  }
+
+  /**
+   * The console is about to put this view's DOM back on the page (platform.ts
+   * keeps it across shell redraws). A failure card already heard is put back
+   * quiet: re-inserting an alert announces it again. One drawn while the view
+   * was off the page has never been heard, and goes back as an alert.
+   */
+  public attaching(): void {
+    if (this.error && this.failure === this.saidFailure) quietState(this.o.root);
+  }
+
+  /**
+   * The console has put this view's DOM back on the page. A failure that went
+   * back as an alert has been said now — unless an open drawer hides the
+   * page, in which case it is said when that closes.
+   */
+  public attached(): void {
+    this.noteHeard();
   }
 
   /** A nav press in the sidebar. Leaves any open school and shows the section. */
@@ -636,8 +749,7 @@ export class PlatformOpsView {
       this.loaded = true;
     } catch (err) {
       if (seq !== this.loadSeq) return;
-      this.error = plainError(err, 'তালিকা আনা যায়নি।');
-      this.errorCode = errorCodeOf(err);
+      this.fail(err, 'তালিকা আনা যায়নি।');
     }
     this.loading = false;
     this.tableHost?.removeAttribute('aria-busy');
@@ -716,8 +828,7 @@ export class PlatformOpsView {
       this.audit = a.entries;
     } catch (err) {
       if (this.openId !== id) return;
-      this.error = plainError(err, 'তথ্য আনা যায়নি।');
-      this.errorCode = errorCodeOf(err);
+      this.fail(err, 'তথ্য আনা যায়নি।');
     }
     this.render();
     // The re-render replaced the name that had focus; put it back, unless the
@@ -758,8 +869,7 @@ export class PlatformOpsView {
       await Promise.all([this.load(), this.openDetail(String(body.tenantId), false)]);
     } catch (err) {
       this.busy = false;
-      this.error = plainError(err, 'কাজটি সম্পন্ন হয়নি।');
-      this.errorCode = errorCodeOf(err);
+      this.fail(err, 'কাজটি সম্পন্ন হয়নি।');
       this.render();
     }
   }
@@ -847,13 +957,18 @@ export class PlatformOpsView {
     const d = this.o.doc;
     if (this.notice) root.append(platBand(d, 'plat-flash', successNote(d, this.notice)));
     if (!this.error) return false;
-    if (isDenied(this.errorCode)) {
-      // B-30's canonical refusal, no retry, and what to do about it.
-      root.append(platBand(d, 'plat-flash', refusalState(d)));
-      return true;
-    }
-    root.append(platBand(d, 'plat-flash', errorState(d, this.error, retry)));
-    return false;
+    const denied = isDenied(this.errorCode);
+    // B-30's canonical refusal, no retry, and what to do about it; or the
+    // failure with its retry.
+    const card = denied ? refusalState(d) : errorState(d, this.error, retry);
+    // Announced when first shown; a redraw of the same failure (a sidebar
+    // press, a tab, a drawer closing) shows it without saying it again.
+    // Off the page, or behind an open drawer, it cannot be heard, so it is not
+    // counted as said.
+    if (this.failure === this.saidFailure) quietState(card);
+    root.append(platBand(d, 'plat-flash', card));
+    this.noteHeard();
+    return denied;
   }
 
   // ── 3. the plan catalogue (§16) ──────────────────────────────────────
@@ -957,8 +1072,7 @@ export class PlatformOpsView {
         this.closeDrawer();
         await this.load();
       } catch (err) {
-        this.error = plainError(err, 'অপারেটর সংরক্ষণ করা যায়নি।');
-        this.errorCode = errorCodeOf(err);
+        this.fail(err, 'অপারেটর সংরক্ষণ করা যায়নি।');
         this.render();
       }
     };
@@ -1195,8 +1309,7 @@ export class PlatformOpsView {
       await this.load();
     } catch (err) {
       this.busy = false;
-      this.error = plainError(err, 'প্ল্যান সংরক্ষণ করা যায়নি।');
-      this.errorCode = errorCodeOf(err);
+      this.fail(err, 'প্ল্যান সংরক্ষণ করা যায়নি।');
       this.render();
     }
   }

@@ -54,6 +54,26 @@ export interface SubjectsViewOptions {
 
 const CACHE_KEY = 'shikhon_my_subjects';
 
+/**
+ * A subject's Bangla name from the last list this screen saved, or null.
+ *
+ * For পড়াশোনা, which is opened with only a subject id: when that subject has
+ * no chapters it must say WHICH subject, and the name the student just tapped
+ * is already on the device. Reads the cache only — never a request.
+ */
+export function cachedSubjectName(subjectId: string): string | null {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    const rows = raw ? (JSON.parse(raw) as unknown) : null;
+    if (!Array.isArray(rows)) return null;
+    const hit = rows.find((r): r is SubjectRow =>
+      !!r && typeof r === 'object' && (r as SubjectRow).subjectId === subjectId);
+    return hit && typeof hit.nameBn === 'string' && hit.nameBn.trim() ? hit.nameBn : null;
+  } catch {
+    return null;
+  }
+}
+
 export class SubjectsView {
   private readonly o: SubjectsViewOptions;
   private subjects: SubjectRow[] = [];
@@ -203,15 +223,20 @@ export class SubjectsView {
     const optional = s.requirementType === 'optional';
     // A real <button> when the row opens something (listItem renders one for
     // onClick): no tabIndex, no role, no hand-rolled Enter/Space.
-    const openable = Boolean(this.o.onOpenSubject);
+    // Only a subject that HAS chapters opens (finding 15). The count is of
+    // published chapters for the student's class, the same set পড়াশোনা
+    // lists, so a ০/০ row led nowhere: পড়াশোনা had nothing to select and
+    // showed a different subject. It stays a plain row that says why.
+    const openable = Boolean(this.o.onOpenSubject) && total > 0;
 
     const li = listItem(d, {
       title: s.nameBn,
       // The drawing's second line is the subject teacher, which the subjects
       // API does not return. The chapter count is the quiet fact this row
       // already carried, in the same slot. Bangla numerals; listItem puts the
-      // figure in the numeral face (R6).
-      subtitle: `${bn(done)}/${bn(total)} অধ্যায়`,
+      // figure in the numeral face (R6). With no chapters, "০/০ অধ্যায়" said
+      // nothing a student could act on; the sentence says what is missing.
+      subtitle: total > 0 ? `${bn(done)}/${bn(total)} অধ্যায়` : 'এখনো কোনো অধ্যায় যুক্ত হয়নি',
       glyph: optional ? 'star' : 'book-open',
       // The chip only on the optional subject (03 Student §02). It carries the
       // server's words, so the fourth subject is never marked by glyph alone

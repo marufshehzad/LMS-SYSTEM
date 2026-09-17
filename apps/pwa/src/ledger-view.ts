@@ -33,6 +33,7 @@ import {
   pageHeader, sectionHeading, dataTable, statRow, statCard, statusBadge, listSkeleton,
   permissionState, permissionMessage, el, numText, uid,
 } from './ui/index.ts';
+import type { Child } from './ui/index.ts';
 import { errorState } from './view-states.ts';
 import { isDenied } from './http-status.ts';
 
@@ -284,14 +285,29 @@ export class LedgerView {
     // The design's promise: not only how many, but how much and through which
     // channel. One sentence per channel. The server sends no settlement date
     // or receipt count, so the sentence does not invent one.
+    //
+    // Each amount is one unbreakable span (`.ledger-mismatch-fig`, nowrap in
+    // app.css) holding the whole "৳ 3,100.00". Built as one string through
+    // numText, the ৳ was a loose text node beside the digits' `.n` span, and
+    // from 375 to 414px the line ended "পোস্ট হয়েছে ৳" with "3,100.00" on the
+    // next — a clerk reconciling against a statement read a sign with no
+    // figure. The words wrap as before; only an amount is never cut. The
+    // sentence's text is unchanged, so a screen reader hears the same thing.
     if (unmatched.length) {
+      const fig = (value: string): HTMLElement =>
+        el(d, 'span', { className: 'ledger-mismatch-fig' }, ...numText(d, value));
+      const words = (text: string): Child[] => numText(d, text);
       panel.append(el(d, 'div', { className: 'ledger-mismatch', attrs: { role: 'note' } },
         ...unmatched.map((r) => {
           const diff = paisa(r.posted) - paisa(r.reconciled);
-          const sentence = diff > 0
-            ? `${r.provider}-এ ${takaOf(diff)} এখনো মেলেনি — পোস্ট হয়েছে ${taka(r.posted)}, মিলেছে ${taka(r.reconciled)}। মিলিয়ে দেখুন।`
-            : `${r.provider}-এ পোস্ট হওয়া অঙ্কের চেয়ে ${takaOf(-diff)} বেশি মিলেছে — পোস্ট হয়েছে ${taka(r.posted)}, মিলেছে ${taka(r.reconciled)}। মিলিয়ে দেখুন।`;
-          return el(d, 'p', { className: 'ledger-mismatch-text' }, ...numText(d, sentence));
+          const head: Child[] = diff > 0
+            ? [...words(`${r.provider}-এ `), fig(takaOf(diff)), ' এখনো মেলেনি']
+            : [...words(`${r.provider}-এ পোস্ট হওয়া অঙ্কের চেয়ে `), fig(takaOf(-diff)), ' বেশি মিলেছে'];
+          return el(d, 'p', { className: 'ledger-mismatch-text' },
+            ...head,
+            ' — পোস্ট হয়েছে ', fig(taka(r.posted)),
+            ', মিলেছে ', fig(taka(r.reconciled)),
+            '। মিলিয়ে দেখুন।');
         })));
     }
 

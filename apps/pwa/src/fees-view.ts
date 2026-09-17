@@ -36,13 +36,13 @@
  * rows (month · amount, no invoice number) would all look alike. Every other
  * reader gets the office layout: no hero, each row named by its number.
  */
-import { formatBdt, formatCount } from '../../../packages/ui-core/src/format.ts';
+import { formatBdt, formatCount, todayLocalIso } from '../../../packages/ui-core/src/format.ts';
 import type { Auth } from './auth.ts';
 import { refuseUnlessOk, isDenied } from './http-status.ts';
 import {
   permissionState, deniedMessage, deniedContact, pageHeader, dataTable, statusBadge,
   openDrawer, setOverlayBody, listSkeleton, errorState, announce, el, append, icon, uid,
-  numText, list, listItem, type OverlayHandle, type Column,
+  numText, list, listItem, focusIsLost, type OverlayHandle, type Column,
 } from './ui/index.ts';
 import type { EmptyOptions } from './view-states.ts';
 import { bnDate, bnMonth } from './view-states.ts';
@@ -139,6 +139,31 @@ const CLOSED = new Set(['paid', 'waived', 'cancelled']);
 /** Still owes money: a balance on an invoice that is not closed. */
 function owes(inv: Invoice): boolean {
   return Number(inv.balanceAmount) > 0 && !CLOSED.has(inv.status);
+}
+
+/**
+ * Owes money and its due date has passed — the rule the guardian's panel
+ * counts by (academics-svc ward.ts loadFees: `balance_amount > 0 AND due_on <
+ * app.today_dhaka()`).
+ *
+ * Nothing on the server ever writes the `overdue` status: a bill past its date
+ * stays `issued` or `partly_paid`. Showing the stored status alone, the panel
+ * said "১টি বিল সময় পেরিয়েছে" and the fee screen, a tap later, called the
+ * same bill বকেয়া. The date decides, on the reader's own calendar
+ * (`todayLocalIso`, as the demo's panel does).
+ *
+ * `today` is a parameter so one render asks the clock once.
+ */
+function isOverdue(inv: Invoice, today: string): boolean {
+  if (!owes(inv)) return false;
+  if (inv.status === 'overdue') return true;
+  const due = (inv.dueOn ?? '').slice(0, 10);
+  return due !== '' && due < today;
+}
+
+/** "১টি বিল সময় পেরিয়েছে" — the guardian panel's own sentence. */
+function overdueSentence(count: number): string {
+  return `${formatCount(count, 'bn')}টি বিল সময় পেরিয়েছে`;
 }
 
 /**
@@ -419,6 +444,35 @@ export class FeesView {
     });
   }
 
+  /**
+   * The figure in the মোট column, and in the family phone row's amount slot.
+   *
+   * On the desk it is always the bill's total: the জমা and বকেয়া columns sit
+   * beside it. The family's phone row has only this one figure, next to the
+   * status word, under a hero that sums what is OWED. A bill still owing less
+   * than its total (part of it paid) showed its total there: a ৳ 1,250.00 bill
+   * with ৳ 1,000.00 paid read "৳ 1,250.00 · মেয়াদোত্তীর্ণ", the rows added up
+   * to more than the hero's এখন বকেয়া, and the payment the family made showed
+   * nowhere outside the drawer. On the phone that row now reads
+   * "বাকি ৳ 250.00": the figure that is actually owed (and late), with the
+   * word that says part was paid. Every owing row's figure is then what it
+   * owes, so the rows add up to the hero. The total is in the drawer.
+   *
+   * Both renderings are built from one cell, so the phone's figure is
+   * `fees-list-only` and the desk's `fees-table-only` (existing sheet rules).
+   * The office layout hides this column on a phone and gets the plain total.
+   */
+  private familyAmount(office: boolean, inv: Invoice): HTMLElement {
+    const total = this.figure(inv.totalAmount);
+    if (office || !owes(inv) || paisa(inv.balanceAmount) === paisa(inv.totalAmount)) return total;
+    const d = this.o.doc;
+    return el(d, 'span', {},
+      el(d, 'span', { className: 'fees-table-only' }, total),
+      el(d, 'span', { className: 'fees-list-only fees-left' },
+        el(d, 'span', { className: 'fees-left-word', text: 'বাকি ' }),
+        this.figure(inv.balanceAmount)));
+  }
+
   /** One invoice's lines, due date and receipts. Drawer body. */
   private detail(inv: Invoice): HTMLElement {
     const d = this.o.doc;
@@ -459,9 +513,13 @@ export class FeesView {
       el(d, 'dd', { className: 'ui-facts-val n', text: money(inv.paidAmount) }),
       el(d, 'dt', { className: 'ui-facts-key', text: 'বকেয়া' }),
       el(d, 'dd', { className: 'ui-facts-val n', text: money(inv.balanceAmount) }),
-      // Was `শেষ তারিখ: 2026-08-10` — an ISO date on a Bangla screen.
+      // Was `শেষ তারিখ: 2026-08-10` — an ISO date on a Bangla screen. A date
+      // already gone says so in words, as the row's badge does.
       el(d, 'dt', { className: 'ui-facts-key', text: 'শেষ তারিখ' }),
-      el(d, 'dd', { className: 'ui-facts-val' }, ...numText(d, bnDate(inv.dueOn))));
+      el(d, 'dd', { className: 'ui-facts-val' },
+        ...numText(d, isOverdue(inv, todayLocalIso())
+          ? `${bnDate(inv.dueOn)} · সময় পেরিয়েছে`
+          : bnDate(inv.dueOn))));
     append(host, dl);
 
     const receipts = this.receipts.get(inv.id);
@@ -511,6 +569,13 @@ export class FeesView {
     const earliest = open.map((i) => i.dueOn).filter(Boolean)
       .sort((a, b) => Date.parse(a) - Date.parse(b))[0];
     const label = multi ? `মোট বকেয়া · ${formatCount(children, 'bn')} সন্তান` : 'এখন বকেয়া';
+    const today = todayLocalIso();
+    const late = open.filter((i) => isOverdue(i, today)).length;
+    // The drawn late-fee sentence is fee policy the invoice does not carry;
+    // the due date is the fact that exists, in the drawer's own words. Once a
+    // date has gone, the sentence the guardian's panel used instead: a
+    // "শেষ তারিখ" in the past reads as a deadline still ahead.
+    const note = late > 0 ? overdueSentence(late) : earliest ? `শেষ তারিখ ${bnDate(earliest)}` : '';
     const labelId = uid('fees-due');
     return el(d, 'section', {
       className: multi ? 'fees-due is-multi' : 'fees-due',
@@ -518,11 +583,7 @@ export class FeesView {
     },
       el(d, 'p', { className: 'fees-due-label', attrs: { id: labelId } }, ...numText(d, label)),
       el(d, 'p', { className: 'fees-due-amount n', text: money(owedPaisa / 100) }),
-      // The drawn late-fee sentence is fee policy the invoice does not carry;
-      // the due date is the fact that exists, in the drawer's own words.
-      earliest
-        ? el(d, 'p', { className: 'fees-due-note' }, ...numText(d, `শেষ তারিখ ${bnDate(earliest)}`))
-        : null);
+      note ? el(d, 'p', { className: 'fees-due-note' }, ...numText(d, note)) : null);
   }
 
   /**
@@ -582,11 +643,16 @@ export class FeesView {
   private kidDues(kids: Kid[] | null): HTMLElement | null {
     if (!kids || !this.invoices.some(owes)) return null;
     const d = this.o.doc;
+    const today = todayLocalIso();
     const rows = kids.filter((k) => k.rows.length).map((k) => {
       const owed = k.rows.filter(owes).reduce((s, i) => s + paisa(i.balanceAmount), 0);
+      // The child's panel on আমার সন্তান says "১টি বিল সময় পেরিয়েছে" under
+      // this same figure; this row says it too.
+      const late = k.rows.filter((i) => isOverdue(i, today)).length;
+      const sub = [k.sectionLabel, late > 0 ? overdueSentence(late) : ''].filter(Boolean).join(' · ');
       return listItem(d, {
         title: k.nameBn,
-        subtitle: k.sectionLabel || undefined,
+        subtitle: sub || undefined,
         // A figure in --danger beside the word বকেয়া in the hero above; a
         // child who owes nothing is told so in words, not by a missing row.
         status: owed > 0
@@ -608,7 +674,8 @@ export class FeesView {
    * a family reads month · amount · ✓ (03 Student §05), the office reads
    * invoice · month · what is still owed. Nothing is dropped: every hidden
    * column is in the row's drawer (মোট / পরিশোধিত / বকেয়া), and all of it is
-   * in the desktop table.
+   * in the desktop table. The family's "amount" is the bill's total, except
+   * on a bill part of which is paid — see familyAmount.
    *
    * `office` is the LAYOUT (every reader who is not family), not "finance
    * staff" — a teacher reading many families' rows needs the invoice number
@@ -616,6 +683,7 @@ export class FeesView {
    */
   private table(office: boolean, rows: Invoice[], empty: EmptyOptions, kid?: Kid): HTMLElement {
     const d = this.o.doc;
+    const today = todayLocalIso();
     // Under a child's heading, a phone row's spoken name carries the child
     // too: a screen reader moving row to row does not re-read the heading,
     // and "আগস্ট ২০২৬, ৳ 1,250.00" is the same for both children. The table
@@ -641,7 +709,7 @@ export class FeesView {
           return whose ? el(d, 'span', {}, month, whose.cloneNode(true)) : month;
         } },
       { key: 'total', header: 'মোট', numeric: true, mobile: office ? 'hidden' : 'status',
-        cell: (inv) => this.figure(inv.totalAmount), width: 'minmax(0, 1fr)' },
+        cell: (inv) => this.familyAmount(office, inv), width: 'minmax(0, 1fr)' },
       { key: 'paid', header: 'জমা', numeric: true, mobile: 'hidden',
         cell: (inv) => this.figure(inv.paidAmount), width: 'minmax(0, 1fr)' },
       { key: 'balance', header: 'বকেয়া', numeric: true, mobile: office ? 'meta' : 'hidden',
@@ -659,10 +727,17 @@ export class FeesView {
       { key: 'status', header: 'অবস্থা', mobile: 'status', width: '150px',
         cell: (inv) => {
           const paid = inv.status === 'paid';
+          // Past its due date and still owing: মেয়াদোত্তীর্ণ, in the shared
+          // overdue badge (danger, with its glyph), whatever the stored status
+          // says — see isOverdue. A part-paid bill too: the panel counts it.
+          // Its payment is not lost with the word আংশিক: the family row's
+          // figure beside this badge is "বাকি ৳ …" (familyAmount), the office
+          // row's is its বকেয়া, and the desk has the জমা column.
+          const late = isOverdue(inv, today);
           return el(d, 'span', { className: 'fees-status' },
             statusBadge(d, {
-              state: BADGE_STATE[inv.status] ?? 'pending',
-              label: STATUS_BN[inv.status] ?? inv.status,
+              state: late ? 'overdue' : BADGE_STATE[inv.status] ?? 'pending',
+              label: late ? STATUS_BN.overdue : STATUS_BN[inv.status] ?? inv.status,
               className: paid ? 'fees-paid-word' : undefined,
             }),
             // 03 Student §05 marks a paid month with a green check. The
@@ -768,14 +843,30 @@ export class FeesView {
   /**
    * Swap the rows in place. A repaint of the screen would take focus off the
    * chip the person just pressed; this keeps it there and says what changed.
+   *
+   * Focus ends on the chosen chip. From a chip it is already there (or on
+   * <body>, where a click does not focus a button). From the empty state's
+   * "সব ইনভয়েস দেখুন" it was on a button inside the rows this swap removes:
+   * focus fell to <body>, the shell's keeper parked it on main#shell-view,
+   * and nothing on screen had a ring. The chip now pressed is the control
+   * that did what the button asked, so focus goes there — before the
+   * keeper's observer runs, so it has nothing to repair.
+   *
+   * Only when focus was in this sheet or already lost: a call while the
+   * person is somewhere else must not pull them back.
    */
   private setFilter(id: FeesFilter): void {
     if (id === this.filter && this.rowsEl) return;
+    const d = this.o.doc;
+    const active = d.activeElement;
+    const sheet = this.rowsEl?.parentElement ?? null;
+    const follow = focusIsLost(d) || (!!active && !!sheet && sheet.contains(active));
     this.filter = id;
     for (const c of this.chips) c.setAttribute('aria-pressed', String(c.dataset.filter === id));
     const next = this.officeRows();
     if (this.rowsEl?.isConnected) this.rowsEl.replaceWith(next);
     this.rowsEl = next;
+    if (follow) this.chips.find((c) => c.dataset.filter === id)?.focus();
     const f = FILTERS.find((x) => x.id === id) ?? FILTERS[0];
     const count = this.invoices.filter(f.match).length;
     announce(this.o.doc, `${formatCount(count, 'bn')}টি ইনভয়েস দেখানো হচ্ছে`);

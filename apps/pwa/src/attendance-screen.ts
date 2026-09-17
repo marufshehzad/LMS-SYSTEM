@@ -119,6 +119,20 @@ export class AttendanceScreen {
   private busy = false;
   private onConnectivity?: () => void;
   /**
+   * The shell's automatic flush reports every attempt as `shikhon:outbox` on
+   * the document. The sync line used to read the queue only when this screen
+   * painted, so a register sent by that flush — at boot, on reconnect, after
+   * a visit to another tab — left "১টি অপেক্ষমাণ … পাঠানো হচ্ছে" standing
+   * over an empty queue for as long as the screen stayed open.
+   */
+  private onOutbox?: () => void;
+  /** The sync line on screen, and the state it was drawn from. */
+  private syncLine: HTMLElement | null = null;
+  private syncKey = '';
+  /** Sync-line paints run one after another; see paintSync. */
+  private syncRunning: Promise<void> = Promise.resolve();
+  private syncQueued: Promise<void> | null = null;
+  /**
    * The page header and the picker strip outlive a render. The section select
    * used to be rebuilt by every render — twice per section change (loading,
    * then ready) — so the control a person was using vanished under them: one
@@ -143,6 +157,14 @@ export class AttendanceScreen {
     this.onConnectivity = () => this.paintStatus();
     addEventListener('online', this.onConnectivity);
     addEventListener('offline', this.onConnectivity);
+    // After every flush attempt the queue is read again: the sync line, and
+    // the register's saved footer ("এখনো পাঠানো হয়নি" → "জমা হয়েছে").
+    this.onOutbox = () => {
+      if (!this.statusHost?.isConnected) return;
+      void this.view?.refreshSaved();
+      void this.paintSync();
+    };
+    this.o.doc.addEventListener('shikhon:outbox', this.onOutbox);
   }
 
   destroy(): void {
@@ -150,6 +172,7 @@ export class AttendanceScreen {
       removeEventListener('online', this.onConnectivity);
       removeEventListener('offline', this.onConnectivity);
     }
+    if (this.onOutbox) this.o.doc.removeEventListener('shikhon:outbox', this.onOutbox);
   }
 
   /**
@@ -494,14 +517,53 @@ export class AttendanceScreen {
    *
    * A queue that said "৩টি পাঠানো যায়নি" with no way to act on it left a
    * teacher only reload-and-hope.
+   *
+   * Paints run one after another, each reading the queue when its turn comes.
+   * Run side by side, an older read that answered last (a flush report, the
+   * register's own delivery change and a reconnect can all ask at once) drew
+   * "১টি অপেক্ষমাণ" back over a queue a newer read had found empty. A request
+   * made while a paint is still waiting for its turn joins that paint: it has
+   * not read yet, so it will see the same change.
    */
-  private async paintSync(): Promise<void> {
+  private paintSync(): Promise<void> {
+    if (this.syncQueued) return this.syncQueued;
+    const next = this.syncRunning.then(() => {
+      this.syncQueued = null;
+      return this.paintSyncNow();
+    });
+    this.syncQueued = next;
+    this.syncRunning = next.catch(() => { /* a failed paint never blocks the next */ });
+    return next;
+  }
+
+  private async paintSyncNow(): Promise<void> {
     const d = this.o.doc;
     const host = this.statusHost;
+    if (!host) return;
     let s: { pending: number; failed: number };
     try { s = await this.o.outbox.state(); } catch { return; }
-    host.querySelector('.att-sync-line')?.remove();
-    if (s.pending === 0 && s.failed === 0) return;
+    // The screen drew a new status strip while the queue was being read.
+    if (host !== this.statusHost) return;
+
+    const old = this.syncLine?.parentNode === host ? this.syncLine : null;
+    const hadFocus = !!old && old.contains(d.activeElement);
+    if (s.pending === 0 && s.failed === 0) {
+      this.syncLine = null;
+      this.syncKey = '';
+      if (!old) return;
+      old.remove();
+      // The line (and a focused "আবার পাঠান") went because the queue emptied.
+      // The register's saved line, if there is one, says where it went.
+      if (hadFocus && focusIsLost(d)) this.view?.focusSaved();
+      return;
+    }
+
+    const online = navigator.onLine;
+    const key = `${s.failed}|${s.pending}|${online}`;
+    // Nothing changed since the line was drawn: keep the node, so a focused
+    // "আবার পাঠান" keeps focus and the live region does not repeat itself on
+    // every flush report.
+    if (old && key === this.syncKey) return;
 
     const line = el(d, 'p', { className: 'att-sync-line', data: { state: s.failed ? 'failed' : 'queued' } });
     append(line, badge(d, {
@@ -516,7 +578,7 @@ export class AttendanceScreen {
       text: s.failed
         ? 'কিছু হাজিরা সার্ভারে পৌঁছায়নি। তথ্য এই যন্ত্রে নিরাপদ আছে।'
         // Offline nothing is being sent, and the line said it was.
-        : navigator.onLine
+        : online
           ? 'হাজিরা এই যন্ত্রে জমা আছে, পাঠানো হচ্ছে।'
           : 'হাজিরা এই যন্ত্রে জমা আছে, সংযোগ পেলে পাঠানো হবে।',
     }));
@@ -543,7 +605,12 @@ export class AttendanceScreen {
         }
       },
     }));
-    append(host, line);
+    if (old) old.replaceWith(line);
+    else append(host, line);
+    this.syncLine = line;
+    this.syncKey = key;
+    // The count changed under a focused "আবার পাঠান": the new line has one.
+    if (hadFocus && focusIsLost(d)) line.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
   }
 
   /** Test seam. */

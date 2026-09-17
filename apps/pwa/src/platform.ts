@@ -586,8 +586,19 @@ export class Console_ {
           // Already in operations, only the section changes: the section is
           // redrawn and the sidebar is left alone. Rebuilding the whole shell
           // for it destroyed the very row that was pressed.
-          if (this.view !== 'ops') { this.view = 'ops'; this.error = ''; this.draw(); }
-          this.opsView?.showSection(key);
+          //
+          // From another page, the operations view that was kept is moved to
+          // the section first and then put back on the page, once. Put back
+          // and then redrawn under the press, its failure card went on the
+          // page twice in one press: reported twice when it was news, and —
+          // had the first counted as heard — redrawn silent when it was not.
+          const kept = this.view !== 'ops' ? this.opsView : null;
+          if (this.view !== 'ops') {
+            this.view = 'ops'; this.error = '';
+            kept?.showSection(key);
+            this.draw();
+          }
+          if (!kept) this.opsView?.showSection(key);
           this.page = this.pageKey();
           // A section is a new page: focus goes to its name, whether or not
           // the row that was pressed survived.
@@ -615,6 +626,7 @@ export class Console_ {
             // sign-in with "অনুমতি নেই" (or the last session's fleet, read
             // with the old credential). The next visit builds a fresh view,
             // which loads with the new one.
+            this.opsView?.destroy();
             this.opsView = null; this.opsHost = null;
             // Nor may anything the session said: a failed load's error (in the
             // server's English, too) sat under the fresh sign-in form as an
@@ -632,7 +644,6 @@ export class Console_ {
     const main = d.createElement('main');
     main.className = 'platform-main';
     main.append(this.offlineBanner);
-    this.root.append(main);
 
     if (!this.token || !this.key) this.renderSignIn(main);
     else if (this.view === 'ops') this.renderOps(main);
@@ -643,6 +654,14 @@ export class Console_ {
     // Every page's name: where a page change puts focus, and a place the
     // keeper can find again when a load redraws the page.
     titleTarget(main);
+    // On the page once, whole. It went in empty and was filled in place, so
+    // a failure card was a second insertion inside a page that had itself
+    // just been inserted: one refusal, reported as two alerts to anything
+    // that watches the page for them.
+    this.root.append(main);
+    // Operations is on the page again: a failure it put back as an alert has
+    // been heard now, if an open drawer is not hiding the page.
+    if (this.opsHost?.isConnected) this.opsView?.attached();
   }
 
   /**
@@ -668,6 +687,10 @@ export class Console_ {
     // re-render — now every sidebar press — took the provisioning list and
     // the go-live screen off the page.
     if (this.opsHost && this.opsView) {
+      // Put back as it was, except that a failure it has already announced
+      // is not announced again by being put back. (draw() tells the view
+      // once the page is in the document: `attached`.)
+      this.opsView.attaching();
       main.append(this.opsHost, this.secondaryBand());
       return;
     }
@@ -779,6 +802,26 @@ export class Console_ {
     };
     for (const f of fields) f.input.addEventListener('input', clearRefusal);
 
+    // A missing field, said. Focus going to the field reads its error through
+    // aria-describedby — but only when focus MOVES. Enter pressed inside the
+    // empty field that already had focus (or inside the token field when only
+    // the key was missing) moved nothing and said nothing: aria-invalid
+    // changed, and a reader does not speak that. So the error line is an
+    // alert while it shows. The check clears the line and writes it afresh,
+    // so a second press is said again. (Where focus does move, the words may
+    // be heard twice; never not at all.)
+    const missing = (f: { wrap: HTMLElement }, message: string): void => {
+      f.wrap.querySelector('.ui-field-error')?.setAttribute('role', 'alert');
+      setFieldError(f.wrap, message);
+    };
+    // Typing clears the line (ui/field.ts); an empty, hidden line is no alert.
+    for (const f of fields) {
+      f.input.addEventListener('input', () => {
+        const line = f.wrap.querySelector<HTMLElement>('.ui-field-error');
+        if (line?.hidden) line.removeAttribute('role');
+      });
+    }
+
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       if (submit.disabled) return;
@@ -790,8 +833,8 @@ export class Console_ {
       // fell to <body>) and said "দুটোই দিতে হবে।" even when one was given.
       clearRefusal();
       for (const f of fields) clearFieldError(f.wrap);
-      if (!token) setFieldError(tokenField.wrap, 'অপারেটর টোকেন দিন।');
-      if (!key) setFieldError(keyField.wrap, 'PLATFORM_API_KEY দিন।');
+      if (!token) missing(tokenField, 'অপারেটর টোকেন দিন।');
+      if (!key) missing(keyField, 'PLATFORM_API_KEY দিন।');
       if (!token || !key) { (token ? keyField : tokenField).input.focus(); return; }
 
       setBusy(submit, true);

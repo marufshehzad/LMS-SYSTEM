@@ -56,6 +56,12 @@ export class NotificationsView {
   private status: PushStatusResponse | null = null;
   private subscribed = false;
   private loading = true;
+  /**
+   * The last load did not produce a status. Distinct from `error`, which an
+   * action (enable, disable, remove) also sets while the status it rendered
+   * is still true: only a failed LOAD leaves the screen with nothing to show.
+   */
+  private loadFailed = false;
   private error = '';
   private notice = '';
   private busy = false;
@@ -69,14 +75,16 @@ export class NotificationsView {
   }
 
   private async load(): Promise<void> {
-    this.loading = true; this.error = ''; this.render();
+    this.loading = true; this.loadFailed = false; this.error = ''; this.render();
     try {
       this.status = await this.client.status();
       if (!this.status) {
+        this.loadFailed = true;
         this.error = 'নোটিফিকেশন সেটিংস আনা যায়নি — সংযোগ পেলে আবার দেখা যাবে।';
       }
       this.subscribed = await this.client.isSubscribed();
     } catch {
+      this.loadFailed = true;
       this.error = 'নোটিফিকেশন সেটিংস আনা যায়নি — সংযোগ পেলে আবার দেখা যাবে।';
     } finally {
       this.loading = false; this.render();
@@ -152,6 +160,11 @@ export class NotificationsView {
     if (this.notice) root.append(successNote(d, this.notice));
     if (this.error) root.append(errorState(d, this.error, () => void this.load()));
     if (this.loading) { root.append(listSkeleton(d, 2)); return; }
+    // A failed load is the error state and nothing else. Without a status,
+    // `state()` reads the server as not set up and the device list as empty,
+    // so going on would stack two claims the screen does not know to be true
+    // ("not enabled on this server", "no devices") under the one it does.
+    if (this.loadFailed) return;
 
     const state = this.state();
     root.append(this.pushBanner(state));
@@ -228,6 +241,30 @@ export class NotificationsView {
       action);
   }
 
+  /**
+   * Who can fix a server with no push keys depends on who is reading.
+   *
+   * The keys (VAPID) are set where the server is deployed, not in this app,
+   * so "tell the school's IT admin" is the right pointer for staff and the
+   * wrong one for the IT admin, who would be told to contact themselves. A
+   * guardian or student has no line to the IT admin at all; what they need
+   * to hear is that nothing is missed meanwhile. Nobody is named: whoever
+   * runs the server is the platform, and a tenant screen does not print the
+   * platform's brand (D11).
+   */
+  private unconfiguredDetail(): string {
+    const role = this.o.auth.role;
+    if (role === 'it_admin') {
+      return 'এটি সার্ভারের সেটিং (VAPID কী), এই অ্যাপ থেকে চালু হয় না — '
+        + 'সার্ভার যিনি চালান, তাঁকে জানান। ততদিন বার্তা আগের মতোই এসএমএসে যাবে।';
+    }
+    if (role === 'guardian' || role === 'student') {
+      return 'বিদ্যালয় চালু করলে এখান থেকে চালু করতে পারবেন। ততদিন বার্তা আগের মতোই '
+        + 'এসএমএসে ও অ্যাপের নোটিশ অংশে পাবেন।';
+    }
+    return 'বিদ্যালয়ের আইটি অ্যাডমিনকে জানাতে পারেন।';
+  }
+
   private bannerCopy(state: PushState): { title: string; detail: string; action?: Child } {
     const d = this.o.doc;
     switch (state) {
@@ -260,7 +297,7 @@ export class NotificationsView {
       case 'unconfigured':
         return {
           title: 'এই সার্ভারে এখনো নোটিফিকেশন চালু করা হয়নি।',
-          detail: 'বিদ্যালয়ের আইটি অ্যাডমিনকে জানাতে পারেন।',
+          detail: this.unconfiguredDetail(),
         };
       default:
         // `off` — the one state the design draws, in its own words. The

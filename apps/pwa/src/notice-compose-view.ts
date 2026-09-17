@@ -55,6 +55,57 @@ import {
 const toBnGrouped = (n: number): string => toBanglaDigits(n.toLocaleString('en-IN'));
 
 /**
+ * A refusal of this notice, in Bangla, from the field it names.
+ *
+ * `parseNotice` (packages/ui-core/src/notice.ts) and ops-svc write their
+ * refusals for a log: "every selection must be an id", "audience type
+ * \"section\" needs at least one selection", "one or more of those sections is
+ * not yours". The composer showed them as they came — in English, to a head
+ * teacher. The field and the code say what went wrong; the words are this
+ * screen's. A message the server already wrote in Bangla is used as it is.
+ */
+function refusalBn(field: string, message: string, code = ''): string {
+  if (/[ঀ-৿]/.test(message)) return message;
+  const m = message.toLowerCase();
+  switch (field) {
+    case 'title':
+      return /fewer/.test(m)
+        ? `শিরোনাম ${toBnGrouped(NOTICE_LIMITS.title)} অক্ষরের মধ্যে লিখুন।`
+        : 'শিরোনাম লিখুন।';
+    case 'body':
+      return /fewer/.test(m)
+        ? `বার্তা ${toBnGrouped(NOTICE_LIMITS.body)} অক্ষরের মধ্যে লিখুন।`
+        : 'বার্তা লিখুন।';
+    case 'category':
+      return 'নোটিশের ধরন বাছাই করুন।';
+    case 'audience':
+      if (/at least one/.test(m)) return 'কারা পাবে — অন্তত একটি শাখা বাছাই করুন।';
+      if (/at most/.test(m)) {
+        return `একটি নোটিশে ${toBnGrouped(NOTICE_LIMITS.ids)}টির বেশি শাখা বাছাই করা যায় না।`;
+      }
+      if (/own sections only/.test(m)) return 'শ্রেণি শিক্ষক শুধু নিজের শাখায় নোটিশ পাঠাতে পারেন।';
+      if (/not yours/.test(m)) {
+        return 'বাছাই করা শাখার অন্তত একটি আপনার নয়। শুধু নিজের শাখা বাছাই করে আবার পাঠান।';
+      }
+      if (/selects nobody/.test(m) || code === 'invalid_audience') {
+        return 'বাছাই করা প্রাপকদের মধ্যে এখন কেউ নেই। নোটিশটি কারও কাছে যেত না — অন্য প্রাপক বাছাই করুন।';
+      }
+      if (/must be an id/.test(m)) {
+        return 'বাছাই করা শাখাটি চেনা যায়নি। পাতাটি আবার খুলে শাখা বাছাই করুন।';
+      }
+      return 'কারা পাবে, তা আবার বাছাই করুন।';
+    default:
+      return 'নোটিশটি পাঠানো যায়নি। লেখাগুলো আরেকবার দেখে আবার পাঠান।';
+  }
+}
+
+/**
+ * A well-formed id standing in for the i-th ticked section, for the check in
+ * `problem()` only. Never sent.
+ */
+const standInId = (i: number): string => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
+
+/**
  * Who may author a notice. Mirrors `AUTHOR_ROLES` in
  * `services/ops-svc/api/notices.ts`, which is the real gate — this copy only
  * decides whether the form is offered, never whether the send succeeds.
@@ -155,8 +206,11 @@ export class NoticeComposeView {
   /** The section list's own three states — it used to show "none" for all of them. */
   private sectionsState: 'loading' | 'ready' | 'failed' = 'loading';
   private busy = false;
+  /** The outcome of the last send, drawn beside Send (see `resultNode`). */
   private notice = '';
   private noticeKind: 'ok' | 'error' | 'offline' | '' = '';
+  /** The field the outcome is about, so fixing that field takes it away. */
+  private noticeField = '';
   private fieldError: { field: string; message: string } | null = null;
 
   constructor(options: NoticeComposeOptions) {
@@ -232,7 +286,9 @@ export class NoticeComposeView {
       return AUDIENCE_LABELS_BN[this.audienceType];
     }
     const n = this.selectedSections.size;
-    if (n === 0) return 'কোনো শাখা বাছাই করা হয়নি';
+    // Send is disabled until a section is ticked; this line, right above it,
+    // is what says why.
+    if (n === 0) return 'কোনো শাখা বাছাই করা হয়নি — পাঠাতে অন্তত একটি শাখা বাছাই করুন';
     const names = this.sections
       .filter((s) => this.selectedSections.has(s.id))
       .map((s) => s.label);
@@ -241,24 +297,134 @@ export class NoticeComposeView {
     return `${names.join(', ')} — শিক্ষার্থী ও অভিভাবক`;
   }
 
+  /**
+   * What is wrong with the notice as written, in Bangla, or null.
+   *
+   * `parseNotice` is the one validator, and the server runs it again at
+   * publish. Every choice the author makes goes through it here: the words,
+   * the category, that a section is ticked, and not too many. The one thing it
+   * is NOT asked here is whether each section id is a well-formed UUID. The
+   * author never writes an id: each came from the list /academics/sections
+   * sent, so that question is the server's, and the server asks it. Asked
+   * here, it refused the demo's `demo-9a` before anything was sent, in
+   * English: a class teacher, who may write only to sections, could not send
+   * a notice at all.
+   */
+  private problem(): { field: string; message: string } | null {
+    const draft = this.draft() as { audience: { type: string; ids?: string[] } };
+    const ids = draft.audience.ids;
+    const checked = ids
+      ? { ...draft, audience: { ...draft.audience, ids: ids.map((_, i) => standInId(i)) } }
+      : draft;
+    try {
+      parseNotice(checked);
+      return null;
+    } catch (err) {
+      if (err instanceof NoticeError) {
+        return { field: err.field, message: refusalBn(err.field, err.message) };
+      }
+      throw err;
+    }
+  }
+
+  /** A refusal that names a field: marked on the field, and said beside Send. */
+  private refuse(field: string, message: string): void {
+    this.fieldError = { field, message };
+    this.notice = message;
+    this.noticeKind = 'error';
+    this.noticeField = field;
+  }
+
+  /**
+   * The person has fixed (or is fixing) `field`: its refusal goes, on the
+   * field and beside Send. An error that stays while it is being put right
+   * reads as "still wrong".
+   */
+  private clearProblem(field: string): void {
+    this.startNextNotice();
+    if (this.fieldError?.field === field) this.fieldError = null;
+    if (field === 'audience') {
+      const root = this.o.root;
+      root.querySelector('.compose-audience > .ui-field-error')?.remove();
+      root.querySelector('.audience-chips')?.removeAttribute('aria-describedby');
+    }
+    if (this.notice && this.noticeField === field) {
+      this.notice = '';
+      this.noticeKind = '';
+      this.noticeField = '';
+      this.o.root.querySelector('[data-send-result]')?.remove();
+    }
+  }
+
+  /**
+   * The person has started the next notice: "১২৮ জনের কাছে পৌঁছেছে" (or
+   * "নির্ধারিত সময়ে পাঠানো হবে।") was about the one already sent, and it goes.
+   *
+   * The outcome is drawn in the panel, between the "পাবে:" line and Send — the
+   * panel that says what is ABOUT to happen. Left there, the past tense of the
+   * last send sat above the count of the next one ("কতজন পাবে ৩০ … ১২৮ জনের
+   * কাছে পৌঁছেছে · পাঠান") and read as a statement about the draft. It is the
+   * same reason send() drops the estimate, the gate and the tick.
+   *
+   * Only a success. A refusal names a field and goes when that field is put
+   * right (`clearProblem`); offline, or a refusal that names none, stays until
+   * the next press of Send, which is its retry.
+   *
+   * Called for every change to the notice: typing in the title or body, a chip,
+   * a section tick, ধরন, the SMS toggle and the time.
+   */
+  private startNextNotice(): void {
+    if (this.noticeKind !== 'ok') return;
+    this.notice = '';
+    this.noticeKind = '';
+    this.noticeField = '';
+    this.o.root.querySelector('[data-send-result]')?.remove();
+  }
+
+  /**
+   * Draw the outcome of a send, and put focus where the person now is.
+   *
+   * The outcome is drawn beside Send, where the person who pressed it is
+   * looking (see `resultNode`). Focus follows it: pressing Send leaves focus on
+   * a button that goes busy — disabled, so the browser drops focus to <body> —
+   * and a rebuild after it left focus there for good. After a refusal, Send is
+   * the retry and the typed notice is still in the form, so focus goes back to
+   * Send. After a send, the form is empty and Send is disabled, so focus goes
+   * to the sentence saying what happened. Focus somewhere else — the person
+   * moved on — is left where they put it.
+   */
+  private settle(sent: boolean): void {
+    const d = this.o.doc;
+    const active = d.activeElement as HTMLElement | null;
+    const onSend = focusIsLost(d) || !!active?.closest?.('[data-send]');
+    this.render();
+    if (!onSend) return;
+    const root = this.o.root;
+    const send = root.querySelector<HTMLButtonElement>('[data-send]');
+    const result = root.querySelector<HTMLElement>('[data-send-result]');
+    const target = !sent && send && !send.disabled ? send : result;
+    // Not preventScroll: the sentence is drawn above Send and can push it
+    // below the fold of a 375px screen.
+    target?.focus();
+  }
+
   private async send(): Promise<void> {
     if (this.busy) return;
     this.fieldError = null;
     this.notice = '';
+    this.noticeKind = '';
+    this.noticeField = '';
 
-    try {
-      parseNotice(this.draft());
-    } catch (err) {
-      if (err instanceof NoticeError) {
-        this.fieldError = { field: err.field, message: err.message };
-        this.render();
-        return;
-      }
-      throw err;
+    const problem = this.problem();
+    if (problem) {
+      this.refuse(problem.field, problem.message);
+      this.settle(false);
+      return;
     }
 
     this.busy = true;
     this.render();
+    let sent = false;
     try {
       const res = await this.o.auth.authedFetch('/api/v1/ops/notices', {
         method: 'POST',
@@ -271,12 +437,21 @@ export class NoticeComposeView {
       });
       const body = (await res.json().catch(() => ({}))) as {
         recipients?: number; smsQueued?: boolean; status?: string;
-        message?: string; field?: string;
+        message?: string; field?: string; error?: string;
       };
       if (!res.ok) {
-        if (body.field) this.fieldError = { field: body.field, message: body.message ?? 'ভুল আছে।' };
-        else {
-          this.notice = serverMessage(body, res.status, 'পাঠানো যায়নি। আবার চেষ্টা করুন।', 'নোটিশ');
+        // ops-svc names the field for a notice it refused (400 invalid_notice,
+        // 403 audience_not_permitted) and writes the reason in English; "that
+        // audience selects nobody" names none, and is about the audience.
+        const field = typeof body.field === 'string' && body.field
+          ? body.field
+          : body.error === 'invalid_audience' ? 'audience' : '';
+        if (field) {
+          this.refuse(field, refusalBn(field, body.message ?? '', body.error));
+        } else {
+          // No subject: "নোটিশ দেখার অনুমতি" is permission to SEE, and this
+          // was a send (see the refusal in render()).
+          this.notice = serverMessage(body, res.status, 'পাঠানো যায়নি। আবার চেষ্টা করুন।');
           this.noticeKind = 'error';
         }
         return;
@@ -306,6 +481,7 @@ export class NoticeComposeView {
       this.estimate = null;
       this.gate = null;
       this.bigSendAcknowledged = false;
+      sent = true;
       this.o.onPublished?.();
     } catch {
       // Offline, not a refusal: the warn tone, and the typed notice is kept.
@@ -313,7 +489,7 @@ export class NoticeComposeView {
       this.noticeKind = 'offline';
     } finally {
       this.busy = false;
-      this.render();
+      this.settle(sent);
     }
   }
 
@@ -427,7 +603,11 @@ export class NoticeComposeView {
 
   private sendDisabled(): boolean {
     const blockedByScale = this.gate !== null && !this.bigSendAcknowledged;
-    return this.busy || !this.title.trim() || !this.body.trim() || blockedByScale;
+    // A section notice with no section ticked is addressed to nobody. Send was
+    // enabled for it, and pressing it gave a refusal at the top of the form,
+    // off a phone's screen. The "পাবে:" line right above Send says why it waits.
+    const noAudience = this.audienceType === 'section' && this.selectedSections.size === 0;
+    return this.busy || !this.title.trim() || !this.body.trim() || blockedByScale || noAudience;
   }
 
   /**
@@ -509,6 +689,10 @@ export class NoticeComposeView {
     const active = d.activeElement;
     const hadFocus = !!active && old.contains(active);
     const next = this.buildPanel(d);
+    // The outcome already on screen moves across as it is: a new alert node
+    // with the same words would be announced a second time.
+    const said = old.querySelector('[data-send-result]');
+    if (said) next.querySelector('[data-send-result]')?.replaceWith(said);
     old.replaceWith(next);
     if (!hadFocus || !focusIsLost(d)) return;
     const target = next.querySelector<HTMLInputElement>('[data-big-send] input[type=checkbox]')
@@ -545,7 +729,7 @@ export class NoticeComposeView {
       attrs: { maxlength: opts.max, ...(opts.multiline ? { rows: 3 } : {}) },
       onInput: (v) => {
         this[key] = v;
-        this.fieldError = null;
+        this.clearProblem(key);
         clearFieldError(f.root);
         this.syncLive();
         // The body decides the segment count and the title is part of the
@@ -580,6 +764,7 @@ export class NoticeComposeView {
       });
       chip.addEventListener('click', () => {
         this.audienceType = a;
+        this.clearProblem('audience');
         // The audience IS the cost. Changing it invalidates any
         // acknowledgement of the previous one.
         this.bigSendAcknowledged = false;
@@ -598,8 +783,14 @@ export class NoticeComposeView {
     if (list) wrap.append(list);
 
     if (this.fieldError?.field === 'audience') {
+      // Tied to the chips by description, the way `setFieldError` ties a text
+      // field to its error. Not an alert: the same sentence is the alert
+      // beside Send, where the person who pressed it is looking, and two
+      // alerts would say it twice.
+      const errId = uid('aud-err');
+      chips.setAttribute('aria-describedby', errId);
       wrap.append(el(d, 'p', {
-        className: 'ui-field-error', attrs: { role: 'alert' },
+        className: 'ui-field-error', attrs: { id: errId },
       }, ...numText(d, this.fieldError.message)));
     }
     return wrap;
@@ -636,6 +827,7 @@ export class NoticeComposeView {
       box.addEventListener('change', () => {
         if (box.checked) this.selectedSections.add(s.id);
         else this.selectedSections.delete(s.id);
+        this.clearProblem('audience');
         this.bigSendAcknowledged = false;
         void this.refreshEstimate();
         this.syncLive();
@@ -687,6 +879,7 @@ export class NoticeComposeView {
       options: NOTICE_CATEGORIES.map((c) => ({ value: c, label: CATEGORY_LABELS_BN[c] })),
       onChange: (v) => {
         this.category = v as NoticeCategory;
+        this.clearProblem('category');
         // The category suggests a default until the author touches the toggle;
         // after that it is theirs.
         const hadSms = this.sendSms;
@@ -729,6 +922,9 @@ export class NoticeComposeView {
     });
     at.addEventListener('change', () => {
       this.publishAt = at.value;
+      // Before swapPanel, which would otherwise carry the last send's outcome
+      // into the new panel.
+      this.startNextNotice();
       // In place: a rebuild threw the field away under the person still
       // adjusting it, and focus with it. The panel carries the send button,
       // whose label names the time.
@@ -749,6 +945,7 @@ export class NoticeComposeView {
     smsBox.addEventListener('change', () => {
       this.sendSms = smsBox.checked;
       this.smsTouched = true;
+      this.startNextNotice();
       // Turning SMS on is the single change that takes the cost from zero to
       // whatever the audience is, so it re-asks immediately rather than after
       // the typing debounce.
@@ -846,24 +1043,6 @@ export class NoticeComposeView {
       actions: [statusBadge(d, { state: 'draft', label: 'খসড়া' })],
     }));
 
-    if (this.notice) {
-      if (this.noticeKind === 'ok') {
-        const ok = successNote(d, this.notice);
-        ok.setAttribute('role', 'status');
-        root.append(ok);
-      } else if (this.noticeKind === 'offline') {
-        root.append(el(d, 'p', {
-          className: 'offline-banner compose-notice', attrs: { role: 'alert' },
-        }, icon(d, 'wifi-off', 'offline-icon'), el(d, 'span', { text: this.notice })));
-      } else {
-        // No retry button: the send button below is the retry, and the typed
-        // notice is still in it.
-        const err = errorState(d, this.notice);
-        err.classList.add('compose-notice');
-        root.append(err);
-      }
-    }
-
     // ── The white body ──────────────────────────────────────────────
     const body = el(d, 'div', { className: 'compose-body' });
     body.append(this.audienceField(d));
@@ -908,10 +1087,14 @@ export class NoticeComposeView {
         text: live.sms, attrs: { 'data-estimate-sms': '' },
       }))));
 
-    panel.append(el(d, 'p', { className: 'compose-line' },
+    const lineId = uid('compose-line');
+    panel.append(el(d, 'p', { className: 'compose-line', attrs: { id: lineId } },
       el(d, 'span', { className: 'compose-line-label', text: 'পাবে:' }), ' ',
       el(d, 'span', { attrs: { 'data-audience-line': '' } },
         ...numText(d, this.audienceSentence()))));
+
+    const result = this.resultNode(d);
+    if (result) panel.append(result);
 
     const send = button(d, {
       label: this.busy
@@ -921,7 +1104,9 @@ export class NoticeComposeView {
       busy: this.busy,
       // The label changes (পাঠান / নির্ধারিত সময়ে পাঠান / পাঠানো হচ্ছে…); the
       // key does not, so the shell's focus keeper finds it across a rebuild.
-      attrs: { 'data-send': '', 'data-focus-key': 'compose-send' },
+      // Described by the "পাবে:" line: who it goes to, and — while no section
+      // is ticked — why it is waiting.
+      attrs: { 'data-send': '', 'data-focus-key': 'compose-send', 'aria-describedby': lineId },
       onClick: () => { void this.send(); },
     });
 
@@ -952,5 +1137,36 @@ export class NoticeComposeView {
     // After the panel has had its say: busy, empty, and the gate together.
     send.disabled = this.sendDisabled();
     return panel;
+  }
+
+  /**
+   * What the last send came to — sent, refused, or offline — or null.
+   *
+   * In the panel, between the "পাবে:" line and Send. It used to sit at the top
+   * of the page, above the form: on a 375px phone the person pressing Send is
+   * a screen and a half below it, so a refusal rendered out of sight (6px
+   * above the viewport) and the tap looked like it did nothing.
+   *
+   * Focusable (tabindex -1) because `settle` puts focus on the sentence after
+   * a send, when Send itself is disabled. No retry button on an error: Send,
+   * just below, is the retry, and the typed notice is still in the form.
+   */
+  private resultNode(d: Document): HTMLElement | null {
+    if (!this.notice) return null;
+    let node: HTMLElement;
+    if (this.noticeKind === 'ok') {
+      node = successNote(d, this.notice);
+      node.setAttribute('role', 'status');
+    } else if (this.noticeKind === 'offline') {
+      node = el(d, 'p', {
+        className: 'offline-banner', attrs: { role: 'alert' },
+      }, icon(d, 'wifi-off', 'offline-icon'), el(d, 'span', { text: this.notice }));
+    } else {
+      node = errorState(d, this.notice);
+    }
+    node.classList.add('compose-notice');
+    node.setAttribute('data-send-result', '');
+    node.setAttribute('tabindex', '-1');
+    return node;
   }
 }

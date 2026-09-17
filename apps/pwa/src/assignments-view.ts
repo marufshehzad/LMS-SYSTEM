@@ -133,6 +133,29 @@ export interface AssignmentsViewOptions {
 
 type Bucket = 'pending' | 'submitted' | 'graded';
 
+/**
+ * Where keyboard focus goes once a change the person asked for is drawn.
+ *
+ * Opening an assignment, going back to the list and retrying a read each
+ * delete the control that was pressed. The shell's focus keeper can only
+ * return focus to that SAME control, and it is not in the new page, so focus
+ * waited on `main#shell-view` with no ring and nothing announced: a
+ * screen-reader user heard nothing about the page they had just opened. Only
+ * this view knows what the new page is, so it says where focus lands:
+ *
+ *   row     the assignment to return to on the list; null: the page title
+ *   retry   the change was a retry, so a second failure lands on the retry
+ *   hold    where focus waits while the change loads (the page title)
+ */
+interface FocusGoal {
+  row: string | null;
+  retry: boolean;
+  hold: HTMLElement | null;
+}
+
+/** The two shapes of a list row's open control: the phone row and the table's chevron. */
+const ROW_OPEN = ['ui-list-hit', 'ui-row-open'] as const;
+
 const CACHE_KEY = 'shikhon_assignments_cache';
 
 const BN: Record<string, string> = { '0':'০','1':'১','2':'২','3':'৩','4':'৪','5':'৫','6':'৬','7':'৭','8':'৮','9':'৯' };
@@ -241,6 +264,14 @@ export class AssignmentsView {
   private recStartedAt = 0;
   /** F-103. Non-null while a grading race is waiting on a human. */
   private conflict: GradeConflict | null = null;
+  /** The focus change in progress (see FocusGoal). A newer action replaces it. */
+  private focusGoal: FocusGoal | null = null;
+  /**
+   * Which shape of row the open assignment was opened from, so going back
+   * returns focus to that one: the other shape is hidden at this width and
+   * cannot take focus.
+   */
+  private openedVia: (typeof ROW_OPEN)[number] | null = null;
 
   /** Per-assignment autosave key (§6.6: "drafts autosave continuously"). */
   private draftKey(assignmentId: string): string {
@@ -259,6 +290,82 @@ export class AssignmentsView {
   /** app.ts calls this when the route unmounts. */
   destroy(): void {
     this.o.doc.defaultView?.removeEventListener('online', this.onOnline);
+    // A read still on the wire must not move focus on the next route's page.
+    this.focusGoal = null;
+  }
+
+  /* ---------------------------------------------------------------- focus */
+
+  /**
+   * Start a focus change for an action the person just took on this screen.
+   * Only when focus is in the screen (or already lost): a re-read nobody
+   * pressed for, or a press while focus is elsewhere, moves nothing.
+   */
+  private claimFocus(row: string | null, retry = false): FocusGoal | null {
+    const d = this.o.doc;
+    const active = d.activeElement;
+    const inView = focusIsLost(d) || (active !== null && this.o.root.contains(active));
+    this.focusGoal = inView ? { row, retry, hold: null } : null;
+    return this.focusGoal;
+  }
+
+  /**
+   * Focus is still where the goal left it, or lost: the person has not moved
+   * on while the change loaded. Asked BEFORE the render that ends the change,
+   * because that render deletes the element focus is waiting on.
+   */
+  private stillHeld(goal: FocusGoal | null): boolean {
+    if (!goal || this.focusGoal !== goal) return false;
+    const d = this.o.doc;
+    return focusIsLost(d) || (goal.hold !== null && d.activeElement === goal.hold);
+  }
+
+  /**
+   * After a render: put focus on the goal's target in what was just drawn.
+   * `done` ends the goal (the change's last render); `held` is stillHeld()
+   * from before that render.
+   */
+  private landFocus(goal: FocusGoal | null, done = false, held = true): void {
+    if (!goal || this.focusGoal !== goal) return;
+    if (done) this.focusGoal = null;
+    const d = this.o.doc;
+    // Focus that is somewhere real (the shell's nav, a control the person
+    // reached while this loaded) is theirs.
+    if (!held || !focusIsLost(d)) return;
+    const root = this.o.root;
+    const targets: HTMLElement[] = [];
+    if (!this.openId && goal.row !== null) {
+      // The row that was opened, in the shape it was opened from first.
+      const hits = [...root.querySelectorAll<HTMLElement>('[data-key]')]
+        .filter((n) => n.dataset.key === goal.row)
+        .flatMap((n) => [...n.querySelectorAll<HTMLElement>(ROW_OPEN.map((c) => `button.${c}`).join(','))]);
+      const via = this.openedVia;
+      if (via) hits.sort((a, b) => Number(b.classList.contains(via)) - Number(a.classList.contains(via)));
+      targets.push(...hits);
+    }
+    if (goal.retry) {
+      const again = root.querySelector<HTMLElement>('.ui-state-error .ui-state-action');
+      if (again) targets.push(again);
+    }
+    // The page title: what a route change announces, and the top of the new
+    // page for the next Tab. tabindex -1 takes it out of the Tab order.
+    const title = root.querySelector<HTMLElement>('h1');
+    if (title) {
+      if (!title.hasAttribute('tabindex')) title.setAttribute('tabindex', '-1');
+      targets.push(title);
+    }
+    for (const t of targets) {
+      // A hidden shape (the table below 1024px) refuses focus; try the next.
+      try { t.focus(); } catch { /* detached */ }
+      if (d.activeElement === t) { goal.hold = t; return; }
+    }
+  }
+
+  /** The row control focus is on, if it is one: which shape the person opened from. */
+  private rowShape(): (typeof ROW_OPEN)[number] | null {
+    const active = this.o.doc.activeElement;
+    if (!active || !this.o.root.contains(active)) return null;
+    return ROW_OPEN.find((c) => active.classList.contains(c)) ?? null;
   }
 
   /**
@@ -287,12 +394,15 @@ export class AssignmentsView {
     return !['student', 'guardian'].includes(this.o.auth.role);
   }
 
-  private async loadList(): Promise<void> {
+  /** `goal`: where focus lands once the list is drawn (see FocusGoal). */
+  private async loadList(goal: FocusGoal | null = null): Promise<void> {
     try {
       const raw = localStorage.getItem(CACHE_KEY);
       if (raw) { this.list = JSON.parse(raw) as Assignment[]; this.loading = false; }
     } catch { /* cache is a nicety */ }
     this.render();
+    // The cached row, or the title over the skeleton, while the list is read.
+    this.landFocus(goal);
 
     try {
       const res = await this.o.auth.authedFetch('/api/v1/academics/assignments');
@@ -307,13 +417,19 @@ export class AssignmentsView {
         this.denied = true;
         this.deniedErr = err; this.list = []; this.offline = false; this.failed = false;
         try { localStorage.removeItem(CACHE_KEY); } catch { /* private mode */ }
-        this.loading = false; this.render(); return;
+        this.loading = false;
+        const held = this.stillHeld(goal);
+        this.render();
+        this.landFocus(goal, true, held);
+        return;
       }
       this.offline = this.list.length > 0;
       this.failed = this.list.length === 0;
     }
     this.loading = false;
+    const held = this.stillHeld(goal);
     this.render();
+    this.landFocus(goal, true, held);
   }
 
   /**
@@ -321,20 +437,38 @@ export class AssignmentsView {
    * see ("আগের নম্বরই রাখা হয়েছে।"). Clearing it here erased that sentence
    * before it was ever drawn.
    */
-  private async openDetail(id: string, keepNotice = false): Promise<void> {
+  private async openDetail(
+    id: string,
+    o: {
+      keepNotice?: boolean;
+      /**
+       * The person asked for this (a row, a retry, a choice on the conflict
+       * card), so focus moves to the opened page's title. Not for a re-read
+       * on reconnect, which must leave focus where it is.
+       */
+      focus?: 'title' | 'retry';
+    } = {},
+  ): Promise<void> {
     if (this.openId !== id) {
       // Typed marks and their messages belong to one assignment's rows.
       this.gradeInputs.clear();
       this.gradeErrors.clear();
       this.gradeSaved = null;
     }
+    let goal: FocusGoal | null = null;
+    if (o.focus) {
+      if (!this.openId) this.openedVia = this.rowShape();
+      goal = this.claimFocus(null, o.focus === 'retry');
+    }
     this.openId = id;
     this.detail = null;
     this.detailDeniedErr = null;
-    if (!keepNotice) this.notice = '';
+    if (!o.keepNotice) this.notice = '';
     this.draft = '';
     this.loading = true;
     this.render();
+    // The title over the skeleton, so the wait is not spent on <main>.
+    this.landFocus(goal);
     try {
       const res = await this.o.auth.authedFetch(
         `/api/v1/academics/assignments?assignmentId=${encodeURIComponent(id)}`,
@@ -357,7 +491,9 @@ export class AssignmentsView {
       else this.offline = true;
     }
     this.loading = false;
+    const held = this.stillHeld(goal);
     this.render();
+    this.landFocus(goal, true, held);
   }
 
   private async submit(): Promise<void> {
@@ -719,7 +855,7 @@ export class AssignmentsView {
         this.gradeErrors.delete(c.submissionId);
         // The row now holds their mark, so what was typed into it is moot.
         this.gradeInputs.delete(c.submissionId);
-        if (this.openId) void this.openDetail(this.openId, true);
+        if (this.openId) void this.openDetail(this.openId, { keepNotice: true, focus: 'title' });
       },
     });
     const replace = button(d, {
@@ -771,9 +907,10 @@ export class AssignmentsView {
     // state: "you have no homework" would be a claim about data never seen.
     if (this.failed) {
       root.append(errorState(d, `বাড়ির কাজের তালিকা আনা গেল না। ${ERROR_TAIL}`, () => {
+        const goal = this.claimFocus(null, true);
         this.failed = false;
         this.loading = true;
-        void this.loadList();
+        void this.loadList(goal);
       }));
       return;
     }
@@ -838,7 +975,7 @@ export class AssignmentsView {
       className: this.isStaff ? 'assign-data' : 'assign-data is-student',
       rows: shown,
       rowKey: (a) => a.id,
-      onRowClick: (a) => { void this.openDetail(a.id); },
+      onRowClick: (a) => { void this.openDetail(a.id, { focus: 'title' }); },
       empty: this.emptyForFilter(),
       columns,
     }));
@@ -893,10 +1030,13 @@ export class AssignmentsView {
     root.textContent = '';
 
     root.append(backLink(d, 'সব কাজ', () => {
+      // Back to the row that was opened, as a browser's back returns to the
+      // link that was followed — not to <main>, and not to the top of the list.
+      const goal = this.claimFocus(this.openId);
       this.openId = null; this.detail = null; this.notice = ''; this.conflict = null;
       this.detailDeniedErr = null;
       this.gradeInputs.clear(); this.gradeErrors.clear(); this.gradeSaved = null;
-      void this.loadList();
+      void this.loadList(goal);
     }));
 
     // Loading, refused and failed are three different sentences. A failed
@@ -912,7 +1052,7 @@ export class AssignmentsView {
         }));
       } else {
         root.append(errorState(d, `কাজটি আনা গেল না। ${ERROR_TAIL}`, () => {
-          if (this.openId) void this.openDetail(this.openId);
+          if (this.openId) void this.openDetail(this.openId, { focus: 'retry' });
         }));
       }
       return;
@@ -1358,7 +1498,18 @@ export class AssignmentsView {
       message,
       detail,
       action: next
-        ? { label: goTo[next], onClick: () => { this.filter = next; this.render(); } }
+        ? {
+            label: goTo[next],
+            onClick: () => {
+              this.filter = next;
+              this.render();
+              // The button went with the empty state. The person is now on
+              // the tab it chose, so focus is too — not parked on <main>.
+              if (focusIsLost(this.o.doc)) {
+                this.o.root.querySelector<HTMLElement>('.assign-tabs [role="tab"][aria-selected="true"]')?.focus();
+              }
+            },
+          }
         : undefined,
     };
   }

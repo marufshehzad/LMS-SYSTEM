@@ -29,7 +29,7 @@ import { hasIcon } from './icon.ts';
 import {
   el, append, icon, lang, numClass, numText, pageHeader, badge, statusBadge, button, setBusy,
   emptyState, errorState, permissionState, permissionMessageWithContact, toast, field,
-  listSkeleton, focusIsLost, uid,
+  listSkeleton, focusIsLost, uid, confirmOverlay, type OverlayHandle,
 } from './ui/index.ts';
 
 export interface ExamSubjectOption {
@@ -80,6 +80,12 @@ export interface MarksOutbox {
     baseVersion?: number;
   }): Promise<{ opId: string }>;
   flush(): Promise<unknown>;
+  /**
+   * What is still waiting in the queue (the sync engine has it). Read when
+   * the shell reports a flush, so the footer stops saying "এই যন্ত্রে জমা"
+   * once the rows have left. Without it the report's own counts are used.
+   */
+  state?(): Promise<{ pending: number; inflight?: number }>;
 }
 
 export interface MarksViewOptions {
@@ -136,11 +142,65 @@ export class MarksView {
   private noteEl: HTMLElement | null = null;
   /** The live "মোট" cell per student. */
   private totalEls = new Map<string, HTMLElement>();
+  /** The page header of the last render: this view is still on screen while it is. */
+  private headerEl: HTMLElement | null = null;
+  /** Counts saves, so a queue read begun before a save cannot speak for it. */
+  private saveCount = 0;
+  /** "Discard these marks?" while it is open. */
+  private switchAsk: OverlayHandle | null = null;
+  private readonly onOutbox = (ev: Event) => { void this.queueChanged(ev); };
 
   constructor(options: MarksViewOptions) {
     this.o = options;
     this.sectionId = localStorage.getItem('shikhon_last_section');
+    // The shell's automatic flush reports each attempt (shell.ts autoFlush).
+    this.o.doc.addEventListener('shikhon:outbox', this.onOutbox);
     void this.init();
+  }
+
+  /** Stop listening. Also done by itself once the route has replaced this view. */
+  destroy(): void {
+    this.o.doc.removeEventListener('shikhon:outbox', this.onOutbox);
+  }
+
+  /**
+   * Marks typed on this sheet that no save holds. Choosing another exam or
+   * subject asks before it throws them away; a route guard can ask the same.
+   */
+  hasUnsavedChanges(): boolean {
+    return this.dirty.size > 0;
+  }
+
+  /**
+   * The queue changed (a flush attempt, a report from the sync engine).
+   *
+   * A save made offline says "৪ সারি এই যন্ত্রে জমা — ইন্টারনেট এলে যাবে",
+   * and nothing ever repainted it: the rows went out on reconnect and the
+   * footer kept saying they were waiting. Once nothing is pending or in
+   * flight it reads "সংরক্ষিত", as a save made online does. With another op
+   * still waiting it stays as it is: it may be late to change, never early.
+   */
+  private async queueChanged(ev: Event): Promise<void> {
+    // The shell reuses its container for the next route and this route has
+    // no unmount: a view whose header is gone has been replaced.
+    if (!this.headerEl?.isConnected) { this.destroy(); return; }
+    if (!this.savedAt || !this.savedOffline) return;
+    const save = this.saveCount;
+    let waiting: number | null = null;
+    if (typeof this.o.outbox.state === 'function') {
+      try {
+        const s = await this.o.outbox.state();
+        waiting = (s.pending ?? 0) + (s.inflight ?? 0);
+      } catch { /* unreadable: fall back to the report */ }
+    }
+    if (waiting === null) {
+      const detail = (ev as CustomEvent<{ pending?: number; inflight?: number }>).detail;
+      if (typeof detail?.pending !== 'number') return;
+      waiting = detail.pending + (detail.inflight ?? 0);
+    }
+    if (waiting > 0 || save !== this.saveCount || !this.savedAt || !this.savedOffline) return;
+    this.savedOffline = false;
+    this.paintSaveBar();
   }
 
   private async init(): Promise<void> {
@@ -243,6 +303,52 @@ export class MarksView {
     this.render();
   }
 
+  /**
+   * An exam and subject chosen in the picker.
+   *
+   * Opening another paper loads its sheet and forgets the marks typed on this
+   * one — silently, until now, and with focus kept on the select a single
+   * ArrowDown did it (R7). With marks not yet saved the picker goes back to
+   * the paper on screen and the teacher is asked first: "বাতিল" keeps the
+   * marks, "বাদ দিন" opens the other paper.
+   */
+  private choosePaper(v: string, select: HTMLSelectElement): void {
+    let next: { exam: ExamSummary; subject: ExamSubjectOption } | null = null;
+    for (const exam of this.exams) {
+      const subject = exam.subjects.find((sub) => sub.examSubjectId === v);
+      if (subject) { next = { exam, subject }; break; }
+    }
+    if (!next) return;
+    const current = this.selected?.subject.examSubjectId ?? '';
+    if (next.subject.examSubjectId === current) return;
+    if (!this.hasUnsavedChanges()) { this.openPaper(next); return; }
+    // The select must not name a paper whose sheet is not the one on screen.
+    select.value = current;
+    // One question at a time. A dialog closed from outside (a route change
+    // closes every overlay) calls neither answer, so ask the DOM, not the flag.
+    if (this.switchAsk?.el.isConnected) return;
+    const target = next;
+    const d = this.o.doc;
+    this.switchAsk = confirmOverlay(d, {
+      title: 'নম্বর সংরক্ষণ করা হয়নি',
+      body: `${formatCount(this.dirty.size, 'bn')} জনের নম্বর এখনো সংরক্ষণ করা হয়নি। `
+        + 'পরীক্ষা বা বিষয় বদলালে এই নম্বরগুলো হারিয়ে যাবে।',
+      confirmLabel: 'বাদ দিন',
+      danger: true,
+      // "বাতিল" returns focus to the select, which is still the one on screen.
+      // "বাদ দিন" rebuilds the sheet and the select with it; when the dialog
+      // closes, the shell's focus keeper puts focus on the new select (the
+      // overlay dispatches ui:overlay-closed for exactly this).
+      onConfirm: () => { this.switchAsk = null; this.openPaper(target); },
+      onCancel: () => { this.switchAsk = null; },
+    });
+  }
+
+  private openPaper(next: { exam: ExamSummary; subject: ExamSubjectOption }): void {
+    this.selected = next;
+    void this.loadSheet(next.subject.examSubjectId);
+  }
+
   private get readOnly(): boolean {
     const s = this.sheet;
     return !!s && (s.markingLocked || s.examStatus === 'published' || s.examStatus === 'locked');
@@ -274,7 +380,10 @@ export class MarksView {
     this.paintSaveBar();
     try {
     let queued = 0;
-    for (const [studentId, change] of this.dirty) {
+    // A copy: another exam chosen during the save (after its question was
+    // answered) empties `dirty`, and iterating the live map would stop the
+    // save half way, the rest of the rows neither sent nor on screen.
+    for (const [studentId, change] of [...this.dirty]) {
       const row = sheet.marks.find((m) => m.studentId === studentId);
       if (!row) continue;
       const merged = { ...row, ...change };
@@ -294,17 +403,24 @@ export class MarksView {
       });
       Object.assign(row, change);
       queued++;
+      // Held now. A box changed again during the save is a new change (a new
+      // object) and stays pending; so does whatever the next sheet holds.
+      if (this.dirty.get(studentId) === change) this.dirty.delete(studentId);
     }
-    this.dirty.clear();
-    this.savedAt = Date.now();
-    // What the footer note reports: "৪ সারি এই যন্ত্রে জমা — ইন্টারনেট এলে যাবে".
-    this.savedRows = queued;
-    this.savedOffline = !navigator.onLine;
+    this.saveCount++;
+    // The footer speaks for the sheet on screen, which is this one unless
+    // another paper was chosen while the rows were being queued.
+    if (this.sheet === sheet) {
+      this.savedAt = Date.now();
+      // What the footer note reports: "৪ সারি এই যন্ত্রে জমা — ইন্টারনেট এলে যাবে".
+      this.savedRows = queued;
+      this.savedOffline = !navigator.onLine;
+    }
     this.cacheSet(MARKS_CACHE_PREFIX + sel.subject.examSubjectId, sheet);
     // Fire-and-forget: offline failure is the normal case, not an error.
     void Promise.resolve(this.o.outbox.flush()).catch(() => {});
     toast(this.o.doc, {
-      message: this.savedOffline
+      message: !navigator.onLine
         ? 'নম্বর এই যন্ত্রে সংরক্ষিত — সংযোগ পেলে নিজেই জমা হবে'
         : 'নম্বর সংরক্ষিত — জমা হচ্ছে',
       tone: 'success',
@@ -513,11 +629,12 @@ export class MarksView {
       : this.readOnly
         ? badge(d, { label: 'প্রকাশিত — পরিবর্তন করা যাবে না', tone: 'info', glyph: 'lock' })
         : statusBadge(d, { state: 'draft', label: 'খসড়া' });
-    append(root, pageHeader(d, {
+    this.headerEl = pageHeader(d, {
       title: 'নম্বর এন্ট্রি',
       actions: chip ? [chip] : undefined,
       primary: editable ? this.saveButton('marks-save-top', false) : undefined,
-    }));
+    });
+    append(root, this.headerEl);
 
     // §5 of the closure pass: ONE permission sentence across the product.
     // The same two sentences as before, now on the shared denied card.
@@ -574,16 +691,7 @@ export class MarksView {
         { value: '', label: 'পরীক্ষা ও বিষয় নির্বাচন করুন', disabled: !!this.selected },
         ...options,
       ],
-      onChange: (v) => {
-        for (const exam of this.exams) {
-          const subject = exam.subjects.find((sub) => sub.examSubjectId === v);
-          if (subject) {
-            this.selected = { exam, subject };
-            void this.loadSheet(subject.examSubjectId);
-            return;
-          }
-        }
-      },
+      onChange: (v, e) => this.choosePaper(v, e.currentTarget as HTMLSelectElement),
     });
     picker.root.querySelector('.ui-field-help')?.classList.add('ui-sr-only');
     const filters = el(d, 'div', { className: 'marks-filters' }, picker.root);

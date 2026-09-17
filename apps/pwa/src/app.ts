@@ -916,7 +916,10 @@ async function main() {
           assignmentsView = new AssignmentsView({ root: container, doc: document, auth, outbox: engine });
         },
         unmount: () => { destroyView(assignmentsView); assignmentsView = null; },
-        queuesOffline: true,
+        // Only a student's submission goes to the outbox. A teacher's grade
+        // (and anything staff do here) is a direct POST that fails offline,
+        // so staff are told saving needs a connection, not that it is kept.
+        queuesOffline: auth.role === 'student',
       },
       {
         path: 'results',

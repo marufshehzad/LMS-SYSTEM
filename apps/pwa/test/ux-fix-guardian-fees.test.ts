@@ -45,6 +45,7 @@ beforeEach(() => {
   closeAllOverlays();
   doc().body.innerHTML = '<main id="root"></main>';
   localStorage.clear();
+  dom.window.sessionStorage.clear();
   fakeNavigator.onLine = true;
 });
 

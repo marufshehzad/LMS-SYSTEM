@@ -114,7 +114,7 @@ describe('25, 33 — a money figure in a stat band stays on one line', () => {
     });
   }
   test('the ledger mismatch sentence keeps a wrapped figure together', () => {
-    assert.equal(valueAt('.ledger-mismatch-text .ledger-fig', 'white-space', 375), 'nowrap');
+    assert.equal(valueAt('.ledger-mismatch-text .ledger-mismatch-fig', 'white-space', 375), 'nowrap');
   });
 });
 

@@ -5,8 +5,9 @@
  * first question), the change since the last exam in an info strip, then one
  * row per subject — name, total, grade. Around it, the pieces §6.5 makes
  * load-bearing and the drawing leaves out: the exam selector (in the page
- * header), the publication date (in the hero), the component breakdown, the
- * optional-subject footnote and the trend across terms.
+ * header; a guardian's under the child strip), the publication date (in the
+ * hero), the component breakdown, the optional-subject footnote and the trend
+ * across terms.
  *
  * Three rules from §6.5, each load-bearing:
  *
@@ -35,7 +36,10 @@ import {
   childSelector, childIdentity,
   el, icon, uid, numText, numClass, type Column,
 } from './ui/index.ts';
-import { CACHE_KEY as WARD_CACHE_KEY, toChildOption, type WardSummary } from './guardian-view.ts';
+import {
+  CACHE_KEY as WARD_CACHE_KEY, toChildOption, readChosenChild, rememberChosenChild,
+  type WardSummary,
+} from './guardian-view.ts';
 
 interface SubjectRow {
   subjectBn: string;
@@ -88,14 +92,17 @@ function readWardCache(): WardCache | null {
 }
 
 /**
- * The child a guardian means when the link names none: the one they last
- * chose on আমার সন্তান, as long as that child is still theirs, else the first.
+ * The child a guardian means when the link names none, as long as that child
+ * is still theirs: the one last on screen on either tab (guardian-view.ts,
+ * CHOSEN_CHILD_KEY), else the one আমার সন্তান saved last, else the first.
  */
-function rememberedChild(cached: WardCache | null): string | undefined {
-  if (!cached) return undefined;
-  const last = cached.home?.studentId;
-  if (last && cached.wards.some((w) => w.studentId === last)) return last;
-  return cached.wards[0]?.studentId;
+function rememberedChild(wards: WardSummary[], chosen: string | null,
+  saved?: string): string | undefined {
+  const mine = (id: string | null | undefined): id is string =>
+    !!id && wards.some((w) => w.studentId === id);
+  if (mine(chosen)) return chosen;
+  if (mine(saved)) return saved;
+  return wards[0]?.studentId;
 }
 
 const bn = (n: number | string | null | undefined): string =>
@@ -198,10 +205,13 @@ export class ResultsView {
     if (this.guardian) {
       const cached = readWardCache();
       this.wards = cached?.wards ?? [];
-      if (!this.studentId) {
-        this.studentId = rememberedChild(cached);
-        if (this.studentId) this.rememberChild(this.studentId);
+      if (!this.studentId && cached) {
+        this.studentId = rememberedChild(cached.wards,
+          readChosenChild(options.doc, options.auth), cached.home?.studentId);
       }
+      // The link's child or the remembered one: either way the child on
+      // screen, and আমার সন্তান opens on them next.
+      if (this.studentId) this.rememberChild(this.studentId);
     }
     // One cache per child: a guardian with two children must never be shown
     // the other child's marks while the network is slow. Still `shikhon_`
@@ -253,7 +263,8 @@ export class ResultsView {
         if (!current()) return;
         if (wards.length === 0) { this.noWards = true; this.results = []; return; }
         this.noWards = false;
-        this.useChild(wards[0].studentId);
+        this.useChild(rememberedChild(wards, readChosenChild(this.o.doc, this.o.auth))
+          ?? wards[0].studentId);
         this.loading = this.results.length === 0;
         this.render();
       } else if (this.guardian && !this.wardOf(this.studentId)) {
@@ -332,12 +343,19 @@ export class ResultsView {
   }
 
   /**
-   * Put the child in the address, as মার্কশিট দেখুন does, so a reload stays
-   * on the child on screen. `replaceState`, not a hash change: the route is
-   * the same, so the shell would not remount anyway, and one history entry
-   * per tap would make Android back walk through children instead of leaving.
+   * Record the child on screen in two places.
+   *
+   * The shared choice, so আমার সন্তান opens on the same child (R4): before,
+   * a child picked on this strip stayed only in this page's address, and the
+   * other tab still showed the child picked there.
+   *
+   * The address, as মার্কশিট দেখুন does, so a reload stays on the child on
+   * screen. `replaceState`, not a hash change: the route is the same, so the
+   * shell would not remount anyway, and one history entry per tap would make
+   * Android back walk through children instead of leaving.
    */
   private rememberChild(studentId: string): void {
+    if (this.guardian) rememberChosenChild(this.o.doc, this.o.auth, studentId);
     const w = this.o.doc.defaultView;
     try {
       if (!w) return;
@@ -369,13 +387,21 @@ export class ResultsView {
     // picker is the one control every Android user already knows. Now a
     // `field()`, so it carries a visible label rather than an `aria-label`
     // only a screen reader ever meets.
+    //
+    // A student's sits in the page header. A guardian's sits UNDER the child
+    // strip (R3): the picker exists only for a child with two or more
+    // published exams, so in the header it came and went as the parent
+    // switched children, the strip below it moved (87px on a phone), and the
+    // next tap where the other child's tab had just been landed on the empty
+    // state. Under the strip, the header and the strip are the same for every
+    // child, and 04 Guardian §03 draws the strip first, above the sheet.
     const picker = this.results.length > 1
       ? field(d, {
           label: 'পরীক্ষা',
           name: 'exam',
           kind: 'select',
           value: this.selected ?? undefined,
-          className: 'exam-select-field',
+          className: this.guardian ? 'exam-select-field result-exam-pick' : 'exam-select-field',
           options: this.results.map((r) => ({ value: r.examId, label: r.examNameBn })),
           onChange: (v) => this.selectExam(v),
         })
@@ -384,7 +410,7 @@ export class ResultsView {
     root.append(pageHeader(d, {
       title: 'ফলাফল',
       subtitle: 'প্রকাশিত পরীক্ষার ফলাফল ও মার্কশিট',
-      actions: picker ? [picker.root] : undefined,
+      actions: picker && !this.guardian ? [picker.root] : undefined,
     }));
     this.bodyNodes = [];
 
@@ -404,6 +430,8 @@ export class ResultsView {
     // other child from here.
     const child = this.childContext();
     if (child) root.append(child);
+    // Not part of bodyNodes: an exam change keeps this node, and its focus.
+    if (picker && this.guardian) root.append(picker.root);
 
     this.bodyNodes = this.body();
     root.append(...this.bodyNodes);

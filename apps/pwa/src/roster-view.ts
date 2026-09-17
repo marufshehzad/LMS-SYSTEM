@@ -26,7 +26,7 @@ import {
 import {
   el, append, icon, numText, pageHeader, field, searchField, button, dataTable,
   statRow, statCard, avatar, listSkeleton, emptyState, errorState, permissionState,
-  announce, humanError, type Column,
+  announce, humanError, focusIsLost, type Column,
 } from './ui/index.ts';
 
 export interface SectionSummary {
@@ -103,6 +103,16 @@ function matches(s: RosterStudent, query: string): boolean {
 /** What the panel shows under its control band. */
 type Body = 'loading' | 'denied' | 'error' | 'pick' | 'none' | 'list';
 
+/**
+ * Which of dataTable's two renderings a control sits in: the list a phone
+ * shows, or the table a laptop shows. CSS hides the other one.
+ */
+type Shape = 'list' | 'table';
+
+function shapeOf(node: Element | null): Shape {
+  return node?.closest('.ui-list') ? 'list' : 'table';
+}
+
 export interface RosterViewOptions {
   root: HTMLElement;
   doc: Document;
@@ -112,8 +122,11 @@ export interface RosterViewOptions {
 export class RosterView {
   private readonly o: RosterViewOptions;
   private sections: SectionSummary[] = [];
-  /** F-202: the code just issued, shown once, and for whom. */
-  private issued: { studentId: string; nameBn: string; code: string } | null = null;
+  /**
+   * F-202: the code just issued, shown once, and for whom — and the rendering
+   * whose কোড button asked for it, so dismissing the card can go back there.
+   */
+  private issued: { studentId: string; nameBn: string; code: string; shape: Shape } | null = null;
   private issuing: string | null = null;
   private selectedId: string | null = null;
   private roster: RosterStudent[] = [];
@@ -448,7 +461,7 @@ export class RosterView {
           // already is — beside the child's name. WHO may issue for WHOM is
           // the server's RLS policy; this button only asks.
           ariaLabel: `${r.fullName.bn ?? ''} এর জন্য সক্রিয়ন কোড তৈরি করুন`,
-          onClick: () => { void this.issueCode(r); },
+          onClick: (e) => { void this.issueCode(r, shapeOf(e.currentTarget as Element | null)); },
         }),
       },
     ];
@@ -522,12 +535,28 @@ export class RosterView {
     input.focus();
   }
 
-  private async issueCode(s: RosterStudent): Promise<void> {
+  /**
+   * F-202: ask for a code for one student.
+   *
+   * Focus (UX sweep 8): the press rebuilds the screen twice — busy, then the
+   * answer — and the button that had focus is gone both times. Left to the
+   * shell's keeper, focus went to "the same button", of which dataTable draws
+   * two (the phone's list and the laptop's table, one hidden by CSS); with the
+   * new card above the panel the two tie, the hidden table copy wins, cannot
+   * take focus, and at 375 focus was parked on main with no ring. So the view
+   * says where it goes: onto the card holding the new code (which scrolls it
+   * into view — at 375 it appears above the list, out of sight of row ২০), or
+   * back onto the row's VISIBLE কোড button when no code came. Only when focus
+   * was still lost when the answer came: somebody who moved on meanwhile
+   * keeps their place.
+   */
+  private async issueCode(s: RosterStudent, shape: Shape): Promise<void> {
     if (this.issuing) return;
     this.issuing = s.studentId;
     this.errorMsg = '';
     this.failed = null;
     this.render();
+    let made = false;
     try {
       const res = await this.o.auth.authedFetch('/api/v1/auth/activate', {
         method: 'POST',
@@ -546,45 +575,101 @@ export class RosterView {
           studentId: s.studentId,
           nameBn: s.fullName.bn || s.fullName.en || '—',
           code: body.code,
+          shape,
         };
+        made = true;
       }
     } catch {
       this.errorMsg = 'সংযোগ পাওয়া যায়নি।';
     } finally {
       this.issuing = null;
+      // Asked BEFORE the redraw, which takes focus from whatever in the view
+      // had it: lost now means lost since the busy render took the button.
+      const lost = focusIsLost(this.o.doc);
       this.render();
+      if (lost) {
+        if (made) this.o.root.querySelector<HTMLElement>('.issued-code-card')?.focus();
+        else this.focusRowCode(s.studentId, shape);
+      }
+      // Once, when the code is made — not on every later redraw that still
+      // shows the card (a section change redraws twice).
+      if (made && this.issued) {
+        announce(this.o.doc, `${this.issued.nameBn} এর সক্রিয়ন কোড তৈরি হয়েছে`);
+      }
     }
+  }
+
+  /**
+   * Focus a row's কোড button: the copy that is on screen. dataTable draws
+   * every row twice and CSS hides one rendering; a hidden button cannot take
+   * focus. jsdom and a detached layout report no boxes for either, so the
+   * rendering that was pressed stands in. A row no longer on screen (the
+   * search now hides it) sends focus to the section picker, the panel's first
+   * control, rather than leaving it parked on the page.
+   */
+  private focusRowCode(studentId: string, shape: Shape): void {
+    const root = this.o.root;
+    const copies = [...root.querySelectorAll<HTMLButtonElement>('.roster-issue')]
+      .filter((b) => b.closest<HTMLElement>('[data-key]')?.dataset.key === studentId);
+    const target = copies.find((b) => b.getClientRects().length > 0)
+      ?? copies.find((b) => shapeOf(b) === shape)
+      ?? root.querySelector<HTMLElement>('select[name="section"]');
+    target?.focus();
+  }
+
+  /** "বুঝেছি": the code goes away, and focus goes back to the row it was for. */
+  private dismissIssued(card: HTMLElement): void {
+    const d = this.o.doc;
+    const issued = this.issued;
+    // Focus in the card (this button, or the card itself) or nowhere follows
+    // the row; focus somewhere else is left where it is.
+    const here = focusIsLost(d) || card.contains(d.activeElement);
+    this.issued = null;
+    this.render();
+    if (here && issued) this.focusRowCode(issued.studentId, issued.shape);
   }
 
   /**
    * The one and only place the code is ever visible. Large enough to be
    * read across a desk, dismissed deliberately, and honest about the two
    * facts that matter: it dies in ৭২ hours, and issuing again kills it.
+   *
+   * Focus lands here when the code is made (see issueCode), so the card is a
+   * script-only focus target (tabindex -1, never a Tab stop) with a name and a
+   * description: arriving on it, a screen reader says whose code it is, the
+   * code, and the two facts. Stable ids: there is one card at a time, and the
+   * shell's keeper can find it again by id if the screen redraws under it.
    */
   private issuedCard(): HTMLElement {
     const d = this.o.doc;
     const issued = this.issued as NonNullable<typeof this.issued>;
     const wrap = el(d, 'section', {
-      className: 'card issued-code-card roster-code', attrs: { role: 'status' },
+      className: 'card issued-code-card roster-code',
+      attrs: {
+        id: 'roster-issued-code',
+        role: 'status',
+        tabindex: '-1',
+        'aria-labelledby': 'roster-issued-code-who',
+        'aria-describedby': 'roster-issued-code-value roster-issued-code-note',
+      },
     });
     append(wrap,
-      el(d, 'p', { className: 'issued-code-who' },
+      el(d, 'p', { className: 'issued-code-who', attrs: { id: 'roster-issued-code-who' } },
         ...numText(d, `${issued.nameBn} এর সক্রিয়ন কোড`)),
       // Split for reading aloud across a desk; the server strips separators
       // on redeem. `dir=ltr` because the code is Latin and must not reorder.
       // `n`: a code is a figure to copy, set in the number face like one.
       el(d, 'p', {
-        className: 'issued-code-value n', attrs: { dir: 'ltr' },
+        className: 'issued-code-value n', attrs: { dir: 'ltr', id: 'roster-issued-code-value' },
         text: `${issued.code.slice(0, 4)}-${issued.code.slice(4)}`,
       }),
-      el(d, 'p', { className: 'issued-code-note' },
+      el(d, 'p', { className: 'issued-code-note', attrs: { id: 'roster-issued-code-note' } },
         ...numText(d, 'কোডটি লিখে শিক্ষার্থীকে দিন — এটি আর দেখা যাবে না। '
           + 'মেয়াদ ৭২ ঘণ্টা; নতুন কোড তৈরি করলে এটি বাতিল হয়ে যাবে।')),
       button(d, {
         label: 'বুঝেছি', variant: 'primary',
-        onClick: () => { this.issued = null; this.render(); },
+        onClick: () => { this.dismissIssued(wrap); },
       }));
-    announce(d, `${issued.nameBn} এর সক্রিয়ন কোড তৈরি হয়েছে`);
     return wrap;
   }
 }

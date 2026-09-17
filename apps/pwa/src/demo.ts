@@ -1803,6 +1803,45 @@ function demoNoticeSmsBody(title: string, body: string, org: string, maxChars: n
   return tail ? `${head}: ${tail} — ${org}` : `${head} — ${org}`;
 }
 
+/**
+ * The demo's sections stand for rows with UUID ids, and each gets a fixed one
+ * for the notice check below.
+ *
+ * `parseNotice` — the same module ops-svc runs — accepts only a UUID in a
+ * section audience. The demo's ids are `demo-9a` and must stay so: app.ts
+ * recognises a demo's cached sections by the `demo-` prefix and purges them
+ * before a real login. So every notice to a section was refused here with
+ * "every selection must be an id", and a class teacher, who may write only
+ * to sections, could not send a notice in the preview at all.
+ */
+const DEMO_SECTION_STAND_IN = new Map(
+  SECTIONS.map((s, i) => [s.id, `00000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`]));
+
+/**
+ * `parseNotice`, with the demo's section ids standing in as the UUIDs they
+ * represent. The notice keeps the demo's own ids, as the service keeps a real
+ * one. An id the demo does not have is left as it came, and refused as the
+ * service would refuse it.
+ */
+function parseDemoNotice(input: unknown): NoticeDraft {
+  const n = input as { audience?: { ids?: unknown } } | null;
+  const ids = n && typeof n === 'object' && n.audience && typeof n.audience === 'object'
+    && Array.isArray(n.audience.ids) ? n.audience.ids as unknown[] : null;
+  if (!n || !ids) return parseNotice(input);
+  const back = new Map<string, string>();
+  const swapped = ids.map((id) => {
+    const standIn = typeof id === 'string' ? DEMO_SECTION_STAND_IN.get(id) : undefined;
+    if (!standIn) return id;
+    back.set(standIn, id as string);
+    return standIn;
+  });
+  const draft = parseNotice({ ...n, audience: { ...n.audience, ids: swapped } });
+  if (draft.audience.ids) {
+    draft.audience = { ...draft.audience, ids: draft.audience.ids.map((u) => back.get(u) ?? u) };
+  }
+  return draft;
+}
+
 /** Notices written in this preview, as the author list returns them. */
 const demoSentNotices: Array<{
   id: string; title: string; body: string; category: string; audience: unknown;
@@ -1847,7 +1886,7 @@ function demoNotices(url: URL, init: RequestInit): Response {
   const b = bodyOf<{ notice: unknown; publish: boolean; publishAt: string | null }>(init);
   let draft: NoticeDraft;
   try {
-    draft = parseNotice(b.notice);
+    draft = parseDemoNotice(b.notice);
   } catch (err) {
     if (err instanceof NoticeError) return refuse(400, 'invalid_notice', err.message, { field: err.field });
     throw err;
@@ -2944,8 +2983,11 @@ function demoRolloverRows(): DemoRolloverRow[] {
       toLevel: detained ? 9 : 10,
       toSection: detained ? null : 'খ',
       toRoll: detained ? null : nextRoll('10|খ'),
-      // format('%s শ্রেণিতে "%s" শাখা নতুন বছরে তৈরি হয়নি', target_level, section)
-      blockerBn: detained ? '9 শ্রেণিতে "খ" শাখা নতুন বছরে তৈরি হয়নি' : null,
+      // The function's reason, naming the class the way the rest of the demo
+      // does. Its `format('%s শ্রেণিতে …', target_level, …)` puts the bare
+      // level in — "9 শ্রেণিতে", a Latin figure inside a Bangla sentence,
+      // where every other screen says "নবম শ্রেণি".
+      blockerBn: detained ? 'নবম শ্রেণিতে "খ" শাখা নতুন বছরে তৈরি হয়নি' : null,
     });
   });
   const TEN_A = ['ফাহিম মুনতাসির', 'নাদিয়া সুলতানা', 'তৌহিদুল ইসলাম', 'মৌমিতা দে', 'আবির হাসান',

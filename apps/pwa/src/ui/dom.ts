@@ -230,17 +230,38 @@ export function numClass(base: string, text: string): string {
  * A MutationObserver on the container then acts when — and only when — the
  * tracked element has left the document AND focus is on `<body>` (or
  * nowhere). It focuses the equivalent element in the new DOM
- * (`preventScroll`), restores the caret, and if nothing matches it focuses
- * the container itself (tabindex -1), never `<body>`. If a later rebuild
- * (skeleton → data) brings the control back while focus is still parked on
- * the container, focus moves on to it.
+ * (`preventScroll`) and restores the caret. A control drawn twice (a table
+ * row and its phone-list copy, one hidden by CSS) is tried copy by copy: a
+ * copy that is not rendered cannot take focus, and the next one is.
+ *
+ * When nothing in the new DOM is equivalent — a chapter opened, a detail
+ * opened or closed with its back link, the next practice question, a retry
+ * that worked — focus LANDS on a heading, never on `<body>`:
+ *   - on a different page (its `<h1>` no longer reads what it read when the
+ *     control was focused), that page's `<h1>`;
+ *   - on the same page rebuilt in place, the nearest heading at or before
+ *     where the control stood (the practice card's "অনুশীলন", not the
+ *     lesson title a screen above it);
+ * given `tabindex="-1"` and the class `ui-focus-landing` (its light focus
+ * style, not a ring around a full-width title row) for as long as it holds
+ * focus. It is focused with `preventScroll`; when the person got here by
+ * KEYBOARD a moment ago it is then brought into view the shortest way
+ * (`block: 'nearest'`, which keeps it clear of the sticky bars through the
+ * page's scroll-padding), never scrolled past. A touch or mouse press does
+ * not scroll: that person's place on the page is where they left it, and
+ * they see no focus ring to look for. Only a page with no visible heading
+ * falls back to the container itself (tabindex -1). If a later rebuild
+ * (skeleton → data) brings the control back while focus still waits on that
+ * landing, focus moves on to it; if the rebuild replaces the landing heading
+ * itself, focus lands again on the new one, without scrolling.
  *
  * A control that comes back DISABLED (a busy render: "পাঠানো হচ্ছে…") is
  * waited for, not parked on: focus stays where the browser put it, so a
  * view's own "focus was lost, put it back" code still sees `<body>`, and the
  * next rebuild that enables the control gets focus back. Views that check
  * for lost focus themselves should ask `focusIsLost(doc)`, which also counts
- * focus parked on a keeper's container as lost.
+ * focus the keeper landed (on a heading or the container) as lost — see
+ * there for why.
  *
  * ── What it never does ──────────────────────────────────────────────────
  * - Override a deliberate move: focus that went somewhere else, or a blur to
@@ -262,24 +283,37 @@ export function keepFocusWithin(container: HTMLElement): () => void {
   if (!win || typeof win.MutationObserver !== 'function') return () => {};
 
   let tracked: Tracked | null = null;
-  /** Focus was put on the container by the fallback, not by the person. */
-  let parked = false;
+  /**
+   * Where the fallback put focus — a heading, or the container — because the
+   * control that had it vanished. Null while focus is where the person (or a
+   * view) put it.
+   */
+  let landing: HTMLElement | null = null;
   let parkedAt = 0;
   /** When the control came back disabled and is being waited for (0: not). */
   let heldAt = 0;
   /** Set while this function moves focus itself, so focusin ignores it. */
   let moving = false;
+  /** The person's last press inside the container: a key or not, and when. */
+  let lastPress = { key: false, at: 0 };
 
-  const setParked = (on: boolean) => {
-    parked = on;
-    if (on) { parkedAt = Date.now(); PARKED.add(container); } else PARKED.delete(container);
+  /** `keepClock`: a landing replaced by a rebuild keeps the first one's window. */
+  const park = (node: HTMLElement, keepClock: boolean) => {
+    if (!(keepClock && landing)) parkedAt = Date.now();
+    if (landing && landing !== node) PARKED.delete(landing);
+    landing = node;
+    PARKED.add(node);
   };
-  const forget = () => { tracked = null; heldAt = 0; setParked(false); };
+  const unpark = () => {
+    if (landing) PARKED.delete(landing);
+    landing = null;
+  };
+  const forget = () => { tracked = null; heldAt = 0; unpark(); };
 
   const onFocusIn = (e: Event) => {
     if (moving) return;
     const t = e.target as HTMLElement | null;
-    setParked(false);
+    unpark();
     heldAt = 0;
     if (!t || t === container || !container.contains(t)) { tracked = null; return; }
     tracked = describe(container, t);
@@ -288,6 +322,9 @@ export function keepFocusWithin(container: HTMLElement): () => void {
   const onEdit = (e: Event) => {
     if (tracked && e.target === tracked.el) readSelection(tracked);
   };
+  const onPress = (e: Event) => {
+    lastPress = { key: e.type === 'keydown', at: Date.now() };
+  };
   const onFocusOut = (e: Event) => {
     const t = e.target;
     // Decided a microtask later: a removal disconnects the element within the
@@ -295,8 +332,9 @@ export function keepFocusWithin(container: HTMLElement): () => void {
     queueMicrotask(() => {
       if (!tracked || !onBody(doc)) return;
       if (tracked.el === t && tracked.el.isConnected) tracked = null;
-      // Focus parked on the container, then moved away by the person.
-      else if (parked && t === container) forget();
+      // Focus the fallback landed, then moved away by the person. A landing
+      // heading that a rebuild removed is not that: restore() replaces it.
+      else if (landing && t === landing && landing.isConnected) forget();
     });
   };
 
@@ -307,17 +345,86 @@ export function keepFocusWithin(container: HTMLElement): () => void {
     return doc.activeElement === node;
   }
 
+  /**
+   * Put focus on a heading for the person to start again from. Returns false
+   * when none takes it. The tabindex and the class are the keeper's only
+   * while the heading holds focus: a mouse press on a title does not become
+   * a focus stop, and a heading a view made focusable keeps its own.
+   */
+  function landOnHeading(t: Tracked): HTMLElement | null {
+    for (const h of landingsFor(container, t)) {
+      if (h === doc.activeElement) return h;
+      const hadTab = h.hasAttribute('tabindex');
+      const hadClass = h.classList.contains(LANDING_CLASS);
+      if (!hadTab) h.setAttribute('tabindex', '-1');
+      h.classList.add(LANDING_CLASS);
+      if (focusEl(h)) {
+        if (!hadTab || !hadClass) {
+          const tidy = () => {
+            // The window lost focus (another app), not the heading: keep it.
+            if (doc.activeElement === h) return;
+            h.removeEventListener('blur', tidy);
+            if (!hadTab) h.removeAttribute('tabindex');
+            if (!hadClass) h.classList.remove(LANDING_CLASS);
+          };
+          h.addEventListener('blur', tidy);
+        }
+        return h;
+      }
+      if (!hadTab) h.removeAttribute('tabindex');
+      if (!hadClass) h.classList.remove(LANDING_CLASS);
+    }
+    return null;
+  }
+
+  /** Nothing equivalent came back: land on a heading, else the container. */
+  function land(t: Tracked, followUp: boolean, now: number): void {
+    const active = doc.activeElement;
+    // Already waiting on a heading that is still here: do not hop headings.
+    if (landing && landing !== container && active === landing) return;
+    const h = landOnHeading(t);
+    if (h) {
+      park(h, followUp);
+      // Brought into view only for a keyboard press a moment ago, and only on
+      // the first landing: a rebuild while the person reads further down must
+      // never scroll the page back up under them.
+      if (!followUp && lastPress.key && now - lastPress.at < REVEAL_MS) reveal(h);
+      return;
+    }
+    if (landing === container && active === container) return;
+    if (!container.hasAttribute('tabindex')) container.setAttribute('tabindex', '-1');
+    if (focusEl(container)) park(container, followUp);
+  }
+
   const restore = () => {
     if (!tracked) return;
     const active = doc.activeElement;
-    const followUp = parked && active === container;
-    if (!(onBody(doc) || followUp)) {
+    const lost = onBody(doc);
+    // Still waiting where the fallback put focus: on it, or on nothing because
+    // a rebuild took the landing heading away as well.
+    let followUp = landing !== null
+      && (active === landing || (lost && !landing.isConnected));
+    if (!(lost || followUp)) {
       // Waiting for a disabled control, and the person went somewhere else.
       if (heldAt) forget();
       return;
     }
     const now = Date.now();
-    if ((followUp && now - parkedAt > PARK_MS) || (heldAt && now - heldAt > PARK_MS)) {
+    if (followUp && now - parkedAt > PARK_MS) {
+      if (active === landing) {
+        // Too late for the control to come back. Focus stays on the landing;
+        // a heading it waits on is followed from now on like any control.
+        const on = landing;
+        forget();
+        if (on && on !== container) tracked = describe(container, on);
+        return;
+      }
+      // The landing heading was rebuilt away after the window closed: start
+      // over as a fresh loss, so focus lands again rather than on <body>.
+      unpark();
+      followUp = false;
+    }
+    if (heldAt && now - heldAt > PARK_MS) {
       forget();
       return;
     }
@@ -330,31 +437,33 @@ export function keepFocusWithin(container: HTMLElement): () => void {
       // Moved rather than rebuilt: the same node is still here.
       if (tracked.el === active) return;
       if (isDisabled(tracked.el)) { hold(followUp, now); return; }
-      if (focusEl(tracked.el)) { writeSelection(tracked); heldAt = 0; setParked(false); return; }
+      if (focusEl(tracked.el)) { writeSelection(tracked); heldAt = 0; unpark(); return; }
     }
     // A later rebuild (skeleton → data) may only bring focus back to the SAME
     // control, never to whatever happens to sit at the old index path.
-    const match = findMatch(container, tracked, followUp ? 2 : 1);
-    if (match && isDisabled(match)) {
-      // A busy render: the control is here but cannot take focus yet. Do not
-      // park — leave focus where the browser put it, so a view's own "focus
-      // was lost" repair still runs, and try again on the next rebuild.
-      hold(followUp, now);
-      return;
-    }
-    if (match && focusEl(match)) {
-      const prev = tracked;
-      tracked = describe(container, match);
-      tracked.sel = prev.sel;
-      writeSelection(tracked);
-      heldAt = 0;
-      setParked(false);
-      return;
+    for (const match of findMatches(container, tracked, followUp ? 2 : 1)) {
+      // A copy CSS hides (a table row's phone-list twin) cannot take focus.
+      if (!rendered(container, match)) continue;
+      if (isDisabled(match)) {
+        // A busy render: the control is here but cannot take focus yet. Do
+        // not park — leave focus where the browser put it, so a view's own
+        // "focus was lost" repair still runs, and try again on the next
+        // rebuild.
+        hold(followUp, now);
+        return;
+      }
+      if (focusEl(match)) {
+        const prev = tracked;
+        tracked = describe(container, match);
+        tracked.sel = prev.sel;
+        writeSelection(tracked);
+        heldAt = 0;
+        unpark();
+        return;
+      }
     }
     heldAt = 0;
-    if (parked) return;
-    if (!container.hasAttribute('tabindex')) container.setAttribute('tabindex', '-1');
-    if (focusEl(container)) setParked(true);
+    land(tracked, followUp, now);
   };
   /** Wait for a disabled control. Parked focus keeps its own clock. */
   function hold(followUp: boolean, now: number): void {
@@ -369,6 +478,7 @@ export function keepFocusWithin(container: HTMLElement): () => void {
   // it (see above). A bubbling listener runs after the observer has already
   // restored a stale caret.
   for (const ev of EDIT_EVENTS) container.addEventListener(ev, onEdit, true);
+  for (const ev of PRESS_EVENTS) container.addEventListener(ev, onPress, true);
   doc.addEventListener('ui:overlay-closed', restore);
   const current = doc.activeElement as HTMLElement | null;
   if (current && current !== container && container.contains(current)) {
@@ -380,6 +490,7 @@ export function keepFocusWithin(container: HTMLElement): () => void {
     container.removeEventListener('focusin', onFocusIn);
     container.removeEventListener('focusout', onFocusOut);
     for (const ev of EDIT_EVENTS) container.removeEventListener(ev, onEdit, true);
+    for (const ev of PRESS_EVENTS) container.removeEventListener(ev, onPress, true);
     doc.removeEventListener('ui:overlay-closed', restore);
     forget();
   };
@@ -387,11 +498,18 @@ export function keepFocusWithin(container: HTMLElement): () => void {
 
 /**
  * Has keyboard focus been lost? True when focus is on `<body>` or nowhere,
- * AND when a `keepFocusWithin` keeper parked it on its container because the
- * control that had it vanished. A view that repairs focus after an async
- * render ("if focus was lost, put it on the heading") must ask this, not
- * `activeElement === body`: inside the shell, lost focus waits on
- * `main#shell-view`, not on `<body>`.
+ * AND when a `keepFocusWithin` keeper LANDED it — on the page's heading, or
+ * on its container — because the control that had it vanished. A view that
+ * repairs focus after an async render ("if focus was lost, put it on the
+ * verdict") must ask this, not `activeElement === body`: inside the shell,
+ * lost focus waits on a heading (or `main#shell-view`), not on `<body>`.
+ *
+ * A landing counts as lost on purpose. The heading is the keeper's
+ * placeholder, a visible place to start again from: a view that knows the
+ * better place (the practice verdict, the saved-marks note, the row that was
+ * opened) still gets to move focus there, exactly as it could while the
+ * keeper parked focus on `main`. Once the person moves focus themselves, or
+ * the keeper stops waiting for the control to come back, it is not lost.
  */
 export function focusIsLost(doc: Document): boolean {
   const a = doc.activeElement;
@@ -406,15 +524,32 @@ interface Tracked {
   path: number[];
   text: boolean;
   sel: { start: number; end: number; dir: 'forward' | 'backward' | 'none' } | null;
+  /** The page's `<h1>` text when this was focused: a different one later is a different page. */
+  title: string | null;
 }
 
 const EDIT_EVENTS = ['input', 'keyup', 'select', 'pointerup', 'mouseup'];
+/** A press, to tell a keyboard person (who needs the landing on screen) from a touch. */
+const PRESS_EVENTS = ['keydown', 'pointerdown', 'mousedown', 'touchstart'];
 /**
  * How long focus parked on the container may still follow its control back
  * in. Long enough for a slow 2G reload of the same view; short enough that a
  * timer ticking on the page an hour later cannot move anybody's focus.
  */
 const PARK_MS = 30_000;
+/**
+ * How recent a key press must be for a landing heading to be scrolled into
+ * view: an Enter that opened a chapter over a slow connection, yes; a
+ * background refresh while the person reads further down, never.
+ */
+const REVEAL_MS = 10_000;
+/**
+ * On a heading the keeper landed focus on. app.css gives it a focus style of
+ * its own: the global `[tabindex]:focus-visible` ring drew a 2px accent box
+ * round the whole title row, 970px wide on a desktop.
+ */
+export const LANDING_CLASS = 'ui-focus-landing';
+const HEADINGS = 'h1, h2, h3, h4, h5, h6, [role="heading"]';
 /** Looks like `uid()` output: a prefix and a counter. Not stable across renders. */
 const GENERATED_ID = /^[a-z][a-z-]*-\d+$/;
 const ROW_ATTRS = ['data-key', 'data-id', 'data-student-id', 'data-node'];
@@ -427,7 +562,7 @@ const TEXT_TYPES = new Set([
   '', 'text', 'search', 'tel', 'url', 'email', 'password', 'number',
 ]);
 
-/** Containers whose keeper has parked lost focus on them (see focusIsLost). */
+/** Where a keeper landed lost focus: a heading or its container (see focusIsLost). */
 const PARKED = new WeakSet<Element>();
 
 function onBody(doc: Document): boolean {
@@ -499,6 +634,7 @@ function describe(container: HTMLElement, node: HTMLElement): Tracked {
     path: pathOf(container, node),
     text: isTextEntry(node),
     sel: null,
+    title: pageTitle(container),
   };
 }
 
@@ -527,22 +663,23 @@ function sharedPrefix(a: number[], b: number[]): number {
 }
 
 /**
- * The element in the rebuilt DOM that stands where the tracked one stood.
- * Score: same identity in the same row (4) › same identity, no row to
- * compare (3) › same tag in the same row (2) › same tag at the same index
- * path (1). Ties go to the candidate nearest the old position, then to one
- * that is enabled.
+ * The elements in the rebuilt DOM that stand where the tracked one stood,
+ * best first. Score: same identity in the same row (4) › same identity, no
+ * row to compare (3) › same tag in the same row (2) › same tag at the same
+ * index path (1). Ties go to the candidate nearest the old position, then to
+ * one that is enabled, then to document order.
  *
- * A DISABLED candidate is returned when it is the best one: the caller waits
- * for it rather than handing focus to a worse match or parking it. Skipping
- * it here would park focus on the container in every busy render, where a
- * view's own "focus fell to body, put it back" repair then no longer runs.
+ * All of them, not only the best: a table draws each row twice (the desktop
+ * table and the phone list, one hidden by CSS), and the best-scoring copy can
+ * be the hidden one, which refuses focus. The caller tries them in turn.
+ *
+ * A DISABLED candidate stays in its place: when it is the best one the caller
+ * waits for it rather than handing focus to a worse match or parking it.
+ * Skipping it here would park focus in every busy render, where a view's own
+ * "focus fell to body, put it back" repair then no longer runs.
  */
-function findMatch(container: HTMLElement, t: Tracked, minScore = 1): HTMLElement | null {
-  let best: HTMLElement | null = null;
-  let bestScore = 0;
-  let bestNear = -1;
-  let bestEnabled = false;
+function findMatches(container: HTMLElement, t: Tracked, minScore = 1): HTMLElement[] {
+  const found: Array<{ node: HTMLElement; score: number; near: number; enabled: boolean }> = [];
   for (const node of container.querySelectorAll<HTMLElement>(FOCUS_CANDIDATE)) {
     if (node.getAttribute('type') === 'hidden') continue;
     if (isTextEntry(node) && !t.text) continue;
@@ -560,12 +697,74 @@ function findMatch(container: HTMLElement, t: Tracked, minScore = 1): HTMLElemen
       score = 1;
     }
     if (score < minScore) continue;
-    const near = sharedPrefix(path, t.path);
-    const enabled = !isDisabled(node);
-    if (score > bestScore || (score === bestScore && (near > bestNear
-      || (near === bestNear && enabled && !bestEnabled)))) {
-      best = node; bestScore = score; bestNear = near; bestEnabled = enabled;
-    }
+    found.push({ node, score, near: sharedPrefix(path, t.path), enabled: !isDisabled(node) });
   }
-  return best;
+  // Array.prototype.sort is stable: equal candidates keep document order.
+  found.sort((x, y) => (y.score - x.score) || (y.near - x.near)
+    || (Number(y.enabled) - Number(x.enabled)));
+  return found.map((f) => f.node);
+}
+
+/**
+ * Can this element be seen? Only answerable where there is layout: when the
+ * container itself has boxes, an element with none is not rendered
+ * (`display: none` on it or an ancestor). Without layout (jsdom, a detached
+ * tree) everything counts as rendered and a refused focus() decides instead.
+ */
+function rendered(container: HTMLElement, node: Element): boolean {
+  try {
+    if (container.getClientRects().length === 0) return true;
+    return node.getClientRects().length > 0;
+  } catch {
+    return true;
+  }
+}
+
+/** The page's title, as the one `<h1>` reads. */
+function pageTitle(container: HTMLElement): string | null {
+  const h1 = container.querySelector('h1');
+  return h1 ? (h1.textContent ?? '').replace(/\s+/g, ' ').trim() : null;
+}
+
+/** -1, 0 or 1: document order of two index paths (an ancestor comes first). */
+function comparePaths(a: number[], b: number[]): number {
+  const n = sharedPrefix(a, b);
+  if (n < a.length && n < b.length) return a[n] < b[n] ? -1 : 1;
+  return Math.sign(a.length - b.length);
+}
+
+/**
+ * The headings focus may land on when nothing equivalent to the lost control
+ * came back, best first (see keepFocusWithin): a new page's `<h1>`; on the same
+ * page, the nearest heading at or before where the control stood; then the
+ * `<h1>` and the rest in document order. Never a heading nobody can see: a
+ * screen-reader-only one (`ui-sr-only`), one inside `hidden`, `inert` or
+ * `aria-hidden`, or one CSS does not render.
+ */
+function landingsFor(container: HTMLElement, t: Tracked): HTMLElement[] {
+  const all = [...container.querySelectorAll<HTMLElement>(HEADINGS)].filter((h) =>
+    !h.closest('.ui-sr-only, [hidden], [inert], [aria-hidden="true"]')
+    && rendered(container, h));
+  if (!all.length) return [];
+  const h1 = all.find((h) => h.tagName === 'H1') ?? null;
+  const order: HTMLElement[] = [];
+  if (h1 && pageTitle(container) !== t.title) order.push(h1);
+  const before = all.filter((h) => comparePaths(pathOf(container, h), t.path) <= 0);
+  if (before.length) order.push(before[before.length - 1]);
+  if (h1) order.push(h1);
+  order.push(...all);
+  return [...new Set(order)];
+}
+
+/**
+ * Bring a landing into view the shortest way. `nearest` scrolls only when it
+ * is not already fully on screen, and the page's scroll-padding keeps it
+ * clear of the sticky topbar and the tab bar; it never scrolls past it.
+ */
+function reveal(node: HTMLElement): void {
+  try {
+    if (typeof node.scrollIntoView === 'function') {
+      node.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  } catch { /* no layout */ }
 }

@@ -498,6 +498,8 @@ describe('ShellRoute.hasUnsavedChanges (finding 52)', () => {
     const dialog = doc().querySelector('.ui-scrim [role="alertdialog"]') as HTMLElement;
     assert.ok(dialog, 'the question is asked');
     assert.match(dialog.textContent ?? '', /হাজিরা জমা দেওয়া হয়নি/);
+    // The address is put back by a step back through history, which lands a task or two later.
+    for (let i = 0; i < 100 && dom.window.location.hash !== '#/attendance'; i++) await tick(5);
     assert.equal(dom.window.location.hash, '#/attendance', 'the address bar is put back');
     assert.match(host().textContent ?? '', /view:attendance/, 'the register is still mounted');
 
@@ -756,9 +758,8 @@ describe('app.ts route table wiring', async () => {
   });
 
   test('32 — exactly the queueing routes say so', () => {
-    for (const p of ['attendance', 'marks', 'assignments', 'learn']) {
-      assert.match(routeBlock(p), /queuesOffline: true/, p);
-    }
+    for (const p of ['attendance', 'marks', 'learn']) assert.match(routeBlock(p), /queuesOffline: true/, p);
+    assert.match(routeBlock('assignments'), /queuesOffline: auth\.role === 'student'/, 'assignments');
     for (const p of ['fees', 'invoices', 'feestructures', 'publish']) {
       assert.doesNotMatch(routeBlock(p), /queuesOffline/, p);
     }

@@ -227,11 +227,23 @@ export class StaffAttendanceView {
     if (!data) return;
 
     if (data.teachers.length === 0) {
-      root.append(emptyState(d, {
-        glyph: 'users',
-        message: 'এই প্রতিষ্ঠানে এখনো কোনো শিক্ষক যোগ করা হয়নি।',
-        detail: 'শিক্ষকের অ্যাকাউন্ট যোগ হলে এখানে তাঁদের হাজিরা নেওয়া যাবে।',
-      }));
+      // The GET is not role-gated, and `users_scope` hides the staff from a
+      // family: a student or guardian who opens this by its URL gets an empty
+      // register from every school, full of teachers or not. "No teachers
+      // have been added" was a false statement about their school; say what
+      // is true for them instead.
+      const family = ['student', 'guardian'].includes(this.o.auth.role);
+      root.append(emptyState(d, family
+        ? {
+          glyph: 'users',
+          message: 'শিক্ষকদের হাজিরা এই অ্যাকাউন্ট থেকে দেখা যায় না।',
+          detail: 'এই খাতা বিদ্যালয়ের অফিস রাখে। কোনো শিক্ষকের বিষয়ে জানতে বিদ্যালয়ে যোগাযোগ করুন।',
+        }
+        : {
+          glyph: 'users',
+          message: 'এই প্রতিষ্ঠানে এখনো কোনো শিক্ষক যোগ করা হয়নি।',
+          detail: 'শিক্ষকের অ্যাকাউন্ট যোগ হলে এখানে তাঁদের হাজিরা নেওয়া যাবে।',
+        }));
       return;
     }
 

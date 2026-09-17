@@ -37,11 +37,12 @@
 import type { Auth } from './auth.ts';
 import { formatCount } from '../../../packages/ui-core/src/format.ts';
 import { PracticeView, type PracticeQuestion } from './practice-view.ts';
+import { cachedSubjectName } from './subjects-view.ts';
 import { refuseUnlessOk, isDenied } from './http-status.ts';
 import {
   el, append, icon, clear, numText, field, backLink, statusBadge, list, listItem,
-  pageHeader, sectionHeading, listSkeleton, emptyState, errorState,
-  permissionState, deniedMessage, deniedContact,
+  pageHeader, sectionHeading, listSkeleton, emptyState, errorState, button,
+  permissionState, deniedMessage, deniedContact, announce, focusIsLost,
 } from './ui/index.ts';
 
 export interface Chapter {
@@ -92,13 +93,23 @@ export interface LearnViewOptions {
   /**
    * The subject to show first — the one the student tapped on আমার বিষয়
    * (F-802). Only the strip's starting choice: it fetches nothing and filters
-   * nothing the server sends. Unknown or absent, the first subject is shown.
+   * nothing the server sends. Absent, the first subject is shown; unknown or
+   * without chapters, the first subject is shown UNDER a notice that says so
+   * (finding 15) — never silently in its place.
    */
   subjectId?: string;
 }
 
 const CHAPTERS_CACHE = 'shikhon_chapters_cache';
 const TOPIC_CACHE_PREFIX = 'shikhon_topic_cache_';
+
+/**
+ * The class ui/dom.ts's focus keeper puts on a heading it lands focus on,
+ * for its light focus style. Written out rather than imported so this view
+ * does not depend on the keeper's internals; if the name ever changes, only
+ * the style is lost, never the focus.
+ */
+const FOCUS_LANDING_CLASS = 'ui-focus-landing';
 
 /** The one sentence under every "could not fetch" title (00 Foundations §04). */
 const FETCH_FAILED_DETAIL = 'ইন্টারনেট নেই বা সার্ভার সাড়া দিচ্ছে না।';
@@ -143,10 +154,32 @@ export class LearnView {
    * themselves, their pick wins over a late fetch.
    */
   private wantedSubjectId: string | null;
+  /**
+   * The chapters request has answered (or failed) since this load began.
+   * Until then a cached list that lacks the wanted subject is not evidence
+   * that the subject has no chapters.
+   */
+  private chaptersSettled = false;
+  /**
+   * Finding 15. The subject asked for on arrival turned out to have no
+   * chapters here; its id while the notice over the strip stands. Cleared by
+   * the student's own pick and by opening a chapter.
+   */
+  private missingSubjectId: string | null = null;
+  /**
+   * A `data-focus-key` to move focus to once the view that holds it has
+   * loaded — the topic row a student came back from, which exists only after
+   * the chapter's topics arrive. Until then focus waits on the title.
+   */
+  private focusWhenLoaded: string | null = null;
   private readingSince = 0;
   private lastBlockSeen = 0;
   private questions: PracticeQuestion[] = [];
   private practising = false;
+  /** The practice card on screen, so focus can be put on its question. */
+  private practice: PracticeView | null = null;
+  /** "পাঠ সম্পন্ন" was pressed, or the practice set finished, for this topic. */
+  private markedDone = false;
   private textSize = LearnView.loadTextSize();
 
   constructor(options: LearnViewOptions) {
@@ -196,6 +229,7 @@ export class LearnView {
   /* --------------------------------------------------------------- loads */
 
   private async loadChapters(): Promise<void> {
+    this.chaptersSettled = false;
     const cached = this.cacheGet<Chapter[]>(CHAPTERS_CACHE);
     if (cached) { this.chapters = cached; this.loading = false; }
     this.render();
@@ -218,20 +252,32 @@ export class LearnView {
         try { localStorage.removeItem(CHAPTERS_CACHE); } catch { /* private mode */ }
         // These two have no `finally { render() }`, so a bare return
         // computed the denied state and never painted it.
+        this.chaptersSettled = true;
         this.loading = false; this.render(); return;
       }
       this.offline = this.chapters.length > 0;
       this.loadFailed = this.chapters.length === 0;
     }
+    this.chaptersSettled = true;
     this.loading = false;
     this.render();
   }
 
-  private async openChapter(chapter: Chapter): Promise<void> {
+  /** `fromTopicId`: the lesson the student is coming back from, for focus. */
+  private async openChapter(chapter: Chapter, fromTopicId?: string): Promise<void> {
     this.mode = { kind: 'topics', chapter };
     this.loading = true;
     this.topicsFailed = false;
+    this.missingSubjectId = null;
+    // The control that opened this view is gone with the render. The shell's
+    // focus keeper lands focus on the new view's title. Back from a lesson,
+    // focus moves on from that title to the lesson's row once the rows
+    // arrive (settleFocus) — and the title is put in focus here, because the
+    // keeper would first match the reader's back link to this view's back
+    // link at the same place ("সব অধ্যায়", one more Enter from the list).
+    this.focusWhenLoaded = fromTopicId ? `learn-topic-${fromTopicId}` : null;
     this.render();
+    if (fromTopicId && focusIsLost(this.o.doc)) this.focusTitle();
     try {
       const res = await this.o.auth.authedFetch(
         `/api/v1/academics/topics?chapterId=${encodeURIComponent(chapter.id)}`,
@@ -258,6 +304,8 @@ export class LearnView {
     this.readingSince = Date.now();
     this.lastBlockSeen = 0;
     this.practising = false;
+    this.markedDone = false;
+    this.focusWhenLoaded = null;
     this.questions = [];
 
     const cached = this.cacheGet<{ title: string; blocks: Block[] }>(TOPIC_CACHE_PREFIX + topicId);
@@ -336,13 +384,27 @@ export class LearnView {
   private render(): void {
     const d = this.o.doc;
     const root = this.o.root;
+    // What had focus inside the view, by the key that names it across a
+    // rebuild — only this view's own keyed controls; the shell's keeper
+    // looks after the rest.
+    const active = d.activeElement;
+    const heldKey = active && active !== root && root.contains(active)
+      ? active.getAttribute('data-focus-key') : null;
     root.textContent = '';
+    this.practice = null;
+    this.paint();
+    this.settleFocus(heldKey);
+  }
+
+  private paint(): void {
+    const d = this.o.doc;
+    const root = this.o.root;
 
     if (this.mode.kind === 'reader') { this.renderReader(); return; }
     if (this.mode.kind === 'topics') { this.renderTopics(); return; }
 
     // ---------------------------------------------------------- chapter list
-    root.append(pageHeader(d, {
+    root.append(this.header({
       title: 'পড়াশোনা',
       subtitle: 'তোমার শ্রেণির অধ্যায় ও পাঠ',
     }));
@@ -393,9 +455,23 @@ export class LearnView {
     }
     // Arriving from আমার বিষয়: start on the subject that was tapped, as soon as
     // the chapters on hand include it.
-    if (this.wantedSubjectId !== null && bySubject.has(this.wantedSubjectId)) {
-      this.subjectId = this.wantedSubjectId;
+    const wanted = this.wantedSubjectId;
+    if (wanted !== null && bySubject.has(wanted)) {
+      this.subjectId = wanted;
       this.wantedSubjectId = null;
+    } else if (wanted !== null && !this.chaptersSettled) {
+      // The saved list predates it, and the fresh one is still on its way.
+      // Wait in the loading state: painting the first subject meanwhile is
+      // the "tapped গণিত, got বাংলা" this screen must not show (finding 15).
+      root.append(listSkeleton(d, 5));
+      return;
+    } else if (wanted !== null) {
+      // The chapters have answered and this subject is not among them (or,
+      // offline, not among the saved ones). Show the first subject so there
+      // is still something to read — under a notice, said once aloud.
+      this.wantedSubjectId = null;
+      this.missingSubjectId = wanted;
+      announce(d, this.missingMessage(wanted));
     }
     if (this.subjectId === null || !bySubject.has(this.subjectId)) {
       this.subjectId = bySubject.keys().next().value ?? null;
@@ -403,6 +479,8 @@ export class LearnView {
 
     const wrap = el(d, 'div', { className: 'learn-list' });
     if (this.offline) wrap.append(this.offlineBanner());
+    const notice = this.missingSubjectId !== null ? this.missingNotice(this.missingSubjectId) : null;
+    if (notice) wrap.append(notice);
 
     // The subject's name as the level-2 heading the grouped sections used to
     // give, kept for heading navigation; the select already shows it.
@@ -425,8 +503,15 @@ export class LearnView {
       value: this.subjectId ?? undefined,
       options: [...bySubject].map(([id, group]) => ({ value: id, label: group.bn })),
       // Refill only the list: a re-render would rebuild the select and take
-      // focus away from the person still choosing.
-      onChange: (v) => { this.subjectId = v; this.wantedSubjectId = null; fill(); },
+      // focus away from the person still choosing. A pick of their own
+      // answers the notice, so it goes.
+      onChange: (v) => {
+        this.subjectId = v;
+        this.wantedSubjectId = null;
+        this.missingSubjectId = null;
+        notice?.remove();
+        fill();
+      },
     });
     // Drawn without a visible label; the word stays the select's name.
     subject.root.querySelector('.ui-field-label')?.classList.add('ui-sr-only');
@@ -444,7 +529,8 @@ export class LearnView {
 
     const btn = el(d, 'button', {
       className: 'chapter-card',
-      data: { progressTone: tone },
+      // The key brings focus back to this row from the chapter it opens.
+      data: { progressTone: tone, focusKey: `learn-chapter-${c.id}` },
       attrs: {
         type: 'button',
         // Bangla. This announced "…, 2 of 4 topics done" in the middle of a
@@ -479,11 +565,19 @@ export class LearnView {
     const d = this.o.doc;
     const root = this.o.root;
     const chapter = this.mode.chapter;
-    const back = (): void => { this.mode = { kind: 'list' }; this.render(); };
+    const back = (): void => {
+      this.mode = { kind: 'list' };
+      this.focusWhenLoaded = null;
+      this.render();
+      // Back to the row that opened this chapter, the way a browser's back
+      // returns a reader to where they left; the list's title if that row is
+      // not on screen.
+      this.land(`learn-chapter-${chapter.id}`);
+    };
 
     root.append(backLink(d, 'সব অধ্যায়', back));
 
-    root.append(pageHeader(d, {
+    root.append(this.header({
       title: chapter.name.bn,
       subtitle: chapter.summaryBn || undefined,
     }));
@@ -525,6 +619,7 @@ export class LearnView {
     if (hit) {
       hit.classList.add('topic-card');
       hit.dataset.state = state;
+      hit.dataset.focusKey = `learn-topic-${t.id}`;
     }
     return li;
   }
@@ -537,10 +632,10 @@ export class LearnView {
 
     root.append(backLink(d, chapter.name.bn, () => {
       void this.recordProgress(topicId, 'started');
-      void this.openChapter(chapter);
+      void this.openChapter(chapter, topicId);
     }));
 
-    root.append(pageHeader(d, { title: this.topicTitle || 'পাঠ' }));
+    root.append(this.header({ title: this.topicTitle || 'পাঠ' }));
 
     // Before the tools and the done button: a lesson that never arrived has
     // no text to resize and nothing to mark as read.
@@ -601,7 +696,7 @@ export class LearnView {
       const practiceWrap = el(d, 'section', { className: 'prac-wrap' },
         sectionHeading(d, { title: 'অনুশীলন' }), host);
       root.append(practiceWrap);
-      new PracticeView({
+      this.practice = new PracticeView({
         root: host,
         doc: d,
         questions: this.questions,
@@ -610,8 +705,12 @@ export class LearnView {
           // Finishing the practice set is a far better completion signal
           // than a self-declared button, so it marks the topic done.
           void this.recordProgress(topicId, 'completed');
+          this.markedDone = true;
           this.practising = false;
           this.render();
+          // "শেষ করো" went with the card. Back to the button the practice was
+          // started from, which now stands where the card stood.
+          this.land('learn-practice');
         },
       });
       practiceWrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -626,21 +725,43 @@ export class LearnView {
         className: 'btn-primary btn-block topic-done', attrs: { type: 'button' },
       }, el(d, 'span', { className: 'btn-label' },
         ...numText(d, `অনুশীলন করো (${formatCount(this.questions.length, 'bn')}টি প্রশ্ন)`)));
-      start.addEventListener('click', () => { this.practising = true; this.render(); });
+      start.dataset.focusKey = 'learn-practice';
+      start.addEventListener('click', () => {
+        this.practising = true;
+        this.render();
+        // The button is gone; the first question is where the work starts.
+        // No scroll of its own: the section is already scrolling into view.
+        if (focusIsLost(d)) this.practice?.focusQuestion(false);
+      });
       root.append(start);
     }
 
-    const doneLabel = el(d, 'span', { className: 'btn-label', text: 'পাঠ সম্পন্ন' });
+    const doneLabel = el(d, 'span', { className: 'btn-label' });
     const done = el(d, 'button', {
       className: this.questions.length > 0
         ? 'btn-secondary btn-block topic-done-alt'
         : 'btn-primary btn-block topic-done',
       attrs: { type: 'button' },
+      data: { focusKey: 'learn-done' },
     }, doneLabel, icon(d, 'check', 'btn-glyph'));
+    // Finding 12(b). Done is marked with aria-disabled, never `disabled`: a
+    // button disabled under the finger is blurred by the browser, so pressing
+    // "পাঠ সম্পন্ন" dropped the student's focus to <body>. aria-disabled keeps
+    // focus on it and is still announced as unavailable; the handler ignores
+    // a second press, so it is still one op. Kept in `markedDone`, so a
+    // re-render (practice questions arriving late) does not offer it again.
+    const showDone = (): void => {
+      doneLabel.textContent = this.markedDone ? 'সম্পন্ন হয়েছে' : 'পাঠ সম্পন্ন';
+      if (this.markedDone) done.setAttribute('aria-disabled', 'true');
+    };
+    showDone();
     done.addEventListener('click', () => {
+      if (this.markedDone) return;
+      this.markedDone = true;
       void this.recordProgress(topicId, 'completed');
-      doneLabel.textContent = 'সম্পন্ন হয়েছে';
-      done.disabled = true;
+      showDone();
+      // The focused button's name changed; not every screen reader says so.
+      announce(d, 'পাঠটি সম্পন্ন হিসেবে রাখা হলো');
     });
     root.append(done);
   }
@@ -675,7 +796,108 @@ export class LearnView {
     }
   }
 
+  /* --------------------------------------------------------------- focus */
+
+  /**
+   * The page header, its title keyed. Opening a chapter or a lesson removes
+   * the control that did it, and the shell's keeper (ui/dom.ts) lands focus
+   * on the new view's `<h1>` — the key is how settleFocus recognises focus
+   * waiting there. Not made focusable here: the keeper does that, with its
+   * own light focus style, for as long as the title holds focus.
+   */
+  private header(o: { title: string; subtitle?: string }): HTMLElement {
+    const head = pageHeader(this.o.doc, o);
+    head.querySelector('h1')?.setAttribute('data-focus-key', 'learn-title');
+    return head;
+  }
+
+  /**
+   * Focus this view's title the way the keeper lands on one: focusable and
+   * marked with the keeper's landing class (its light focus style, rather
+   * than the accent ring round the whole title row) only while it holds
+   * focus. For the one case the keeper would land somewhere worse first.
+   */
+  private focusTitle(): void {
+    const h1 = this.findKey('learn-title');
+    if (!h1) return;
+    const tidy: Array<() => void> = [];
+    if (!h1.hasAttribute('tabindex')) {
+      h1.setAttribute('tabindex', '-1');
+      tidy.push(() => h1.removeAttribute('tabindex'));
+    }
+    if (!h1.classList.contains(FOCUS_LANDING_CLASS)) {
+      h1.classList.add(FOCUS_LANDING_CLASS);
+      tidy.push(() => h1.classList.remove(FOCUS_LANDING_CLASS));
+    }
+    h1.addEventListener('blur', () => { for (const t of tidy) t(); }, { once: true });
+    h1.focus({ preventScroll: true });
+  }
+
+  private findKey(key: string): HTMLElement | null {
+    for (const node of this.o.root.querySelectorAll<HTMLElement>('[data-focus-key]')) {
+      if (node.dataset.focusKey === key) return node;
+    }
+    return null;
+  }
+
+  /**
+   * After a change of view the student asked for, when a better place than
+   * the title exists (back to the chapter row that was opened, back to
+   * "অনুশীলন করো" after practice): the control they used has gone, so focus
+   * goes to `key`. Synchronous, so the keeper — which runs a microtask later
+   * and lands on a heading only when focus is still lost — leaves it there.
+   * Only when focus was lost: a person who has already moved on stays put.
+   * Not on screen, nothing happens here and the keeper lands on the title.
+   */
+  private land(key: string): void {
+    if (!focusIsLost(this.o.doc)) return;
+    this.findKey(key)?.focus();
+  }
+
+  /**
+   * After every rebuild. Focus waiting on this view's title (where the keeper
+   * landed it while the view loaded) moves on to the place `focusWhenLoaded`
+   * names once the view has loaded and that place exists. Anything else that
+   * had focus is the keeper's to restore.
+   */
+  private settleFocus(heldKey: string | null): void {
+    const pending = this.loading ? null : this.focusWhenLoaded;
+    if (!this.loading) this.focusWhenLoaded = null;
+    if (heldKey !== 'learn-title' || pending === null || !focusIsLost(this.o.doc)) return;
+    this.findKey(pending)?.focus();
+  }
+
   /* --------------------------------------------------------------- bits */
+
+  /** Finding 15, in words: which subject, and what the student can do. */
+  private missingMessage(subjectId: string): string {
+    const name = cachedSubjectName(subjectId);
+    if (this.offline) {
+      return `${name ? `${name} বিষয়ের` : 'এই বিষয়ের'} অধ্যায় এই যন্ত্রে সংরক্ষিত নেই। `
+        + 'ইন্টারনেট এলে আবার খোলো, বা নিচে অন্য বিষয় বেছে নাও।';
+    }
+    return `${name ? `${name} বিষয়ে` : 'এই বিষয়ে'} এখনো কোনো অধ্যায় যুক্ত হয়নি। `
+      + 'নিচে অন্য বিষয় বেছে নাও।';
+  }
+
+  /**
+   * The --info-tint strip over the subject select: the subject asked for has
+   * no chapters, so what is shown below is the first subject. Its action goes
+   * back to আমার বিষয়, as the empty syllabus's does.
+   */
+  private missingNotice(subjectId: string): HTMLElement {
+    const d = this.o.doc;
+    return el(d, 'div', { className: 'learn-missing', data: { subjectId } },
+      icon(d, 'info'),
+      el(d, 'p', { className: 'learn-missing-text' }, ...numText(d, this.missingMessage(subjectId))),
+      button(d, {
+        label: 'আমার বিষয় দেখো',
+        variant: 'ghost',
+        size: 'sm',
+        className: 'learn-missing-action',
+        onClick: () => { location.hash = '/subjects'; },
+      }));
+  }
 
   /**
    * The --warn-tint strip (00 Foundations §04). In the chapter list it is the

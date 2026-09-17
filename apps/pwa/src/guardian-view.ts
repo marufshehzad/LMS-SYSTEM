@@ -117,6 +117,48 @@ export class HttpStatus extends Error {
 /** Shared with the guardian home, which reads the same ward payload. */
 export const CACHE_KEY = 'shikhon_guardian_home';
 
+/**
+ * The child the guardian last had on screen, on আমার সন্তান OR on ফলাফল.
+ *
+ * Both tabs read it and both write it, so a parent who picks তাহিয়া on one
+ * and opens the other finds তাহিয়া there too. The ward cache above could not
+ * carry that: it holds one child's whole panel, and ফলাফল has no panel to put
+ * in it, so a choice made on ফলাফল never came back (R4).
+ *
+ * `sessionStorage`: a choice belongs to this sitting, and when the app is
+ * opened fresh each tab starts from what it saved last. Logout's purge only
+ * sweeps `localStorage`, so the entry names the signed-in user it belongs to,
+ * and anybody else signing in on this tab reads nothing from it. Every reader
+ * still checks the id against the children it knows: a stale entry is
+ * ignored, never fetched.
+ */
+export const CHOSEN_CHILD_KEY = 'shikhon_guardian_child';
+
+/** Whose choice. An auth with no user yet reads as '' on both sides. */
+function signedInUser(auth: Auth): string {
+  try { return String((auth as { userId?: unknown }).userId ?? ''); } catch { return ''; }
+}
+
+/** The child last on screen for this user, or null. Never throws. */
+export function readChosenChild(doc: Document, auth: Auth): string | null {
+  try {
+    const raw = doc.defaultView?.sessionStorage.getItem(CHOSEN_CHILD_KEY);
+    const p = raw ? (JSON.parse(raw) as { user?: unknown; studentId?: unknown }) : null;
+    if (!p || typeof p.studentId !== 'string' || p.studentId === '') return null;
+    return p.user === signedInUser(auth) ? p.studentId : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Record the child now on screen. Storage that refuses leaves each tab on its own child. */
+export function rememberChosenChild(doc: Document, auth: Auth, studentId: string): void {
+  try {
+    doc.defaultView?.sessionStorage.setItem(CHOSEN_CHILD_KEY,
+      JSON.stringify({ user: signedInUser(auth), studentId }));
+  } catch { /* private mode or quota */ }
+}
+
 export class GuardianView {
   private readonly o: GuardianViewOptions;
   private wards: WardSummary[] = [];
@@ -138,6 +180,12 @@ export class GuardianView {
   private marker: HTMLElement | null = null;
   private destroyed = false;
   private onOnline: (() => void) | null = null;
+  /**
+   * The saved panel of a child other than the one this page opened on. Kept
+   * only for the first load: if that load cannot reach the network, the page
+   * shows this child, named, under the offline banner instead of an error.
+   */
+  private fallback: WardHome | null = null;
 
   constructor(options: GuardianViewOptions) {
     this.o = options;
@@ -147,9 +195,20 @@ export class GuardianView {
     const cached = this.readCache();
     if (cached) {
       this.wards = cached.wards;
-      this.home = cached.home;
-      this.selected = cached.home?.studentId ?? cached.wards[0]?.studentId ?? null;
-      this.loading = false;
+      const saved = cached.home?.studentId ?? null;
+      const chosen = readChosenChild(options.doc, options.auth);
+      if (chosen && chosen !== saved && cached.wards.some((w) => w.studentId === chosen)) {
+        // ফলাফল moved to another child after this panel was saved. Open on
+        // that child: the strip names them at once and a skeleton stands in
+        // for their panel. Painting the saved panel first would show one
+        // child's figures under the other child's selected tab.
+        this.selected = chosen;
+        this.fallback = cached.home;
+      } else {
+        this.home = cached.home;
+        this.selected = saved ?? cached.wards[0]?.studentId ?? null;
+        this.loading = false;
+      }
     }
     this.render();
     void this.load();
@@ -184,7 +243,10 @@ export class GuardianView {
   private readCache(): { wards: WardSummary[]; home: WardHome | null } | null {
     try {
       const raw = localStorage.getItem(CACHE_KEY);
-      return raw ? (JSON.parse(raw) as { wards: WardSummary[]; home: WardHome | null }) : null;
+      const p = raw ? (JSON.parse(raw) as { wards?: unknown; home?: WardHome | null }) : null;
+      return p && Array.isArray(p.wards)
+        ? { wards: p.wards as WardSummary[], home: p.home ?? null }
+        : null;
     } catch {
       return null;
     }
@@ -213,13 +275,21 @@ export class GuardianView {
       // pick one and fetch it. A guardian with one child must never have
       // to choose it.
       if (!body.student && body.wards.length > 0) {
-        this.selected = body.wards[0].studentId;
+        // The child last on screen on ফলাফল, when this device has no panel
+        // saved; else the first. Only a child the server just listed.
+        const chosen = readChosenChild(this.o.doc, this.o.auth);
+        this.selected = chosen && chosen !== target
+          && body.wards.some((w) => w.studentId === chosen)
+          ? chosen
+          : body.wards[0].studentId;
         this.loading = true;
         this.render();
         await this.load(this.selected);
         return;
       }
       this.selected = body.student?.studentId ?? null;
+      this.fallback = null;
+      if (this.selected) rememberChosenChild(this.o.doc, this.o.auth, this.selected);
       try {
         localStorage.setItem(CACHE_KEY, JSON.stringify({ wards: this.wards, home: this.home }));
       } catch { /* quota */ }
@@ -232,9 +302,19 @@ export class GuardianView {
       // slowly. But NOT for a 403 — showing a cached child to somebody the
       // server has just refused is the opposite of what the refusal meant,
       // and no retry will change it.
-      if (status === 403) { this.home = null; this.wards = []; this.error = true; }
+      if (status === 403) { this.home = null; this.wards = []; this.fallback = null; this.error = true; }
       else if (this.home) this.offline = true;
-      else this.error = true;
+      else if (this.fallback) {
+        // Opened on the child chosen on ফলাফল, and their panel could not be
+        // read. The saved child instead, selected and named, under the same
+        // banner as any saved panel: last week's figures for the child the
+        // strip names beat an error page. Not recorded as the choice —
+        // nobody chose it.
+        this.home = this.fallback;
+        this.selected = this.fallback.studentId;
+        this.fallback = null;
+        this.offline = true;
+      } else this.error = true;
     } finally {
       // The nested load for the first child has already painted, and a
       // superseded one must not paint the child the guardian moved away from.
@@ -248,6 +328,10 @@ export class GuardianView {
   private select(studentId: string): void {
     if (studentId === this.selected || this.destroyed) return;
     this.selected = studentId;
+    // Recorded at the tap, not when the panel lands: a parent who picks a
+    // child and opens ফলাফল before the answer comes finds that child there.
+    rememberChosenChild(this.o.doc, this.o.auth, studentId);
+    this.fallback = null;
     this.home = null;
     this.loading = true;
     this.render();

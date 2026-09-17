@@ -60,6 +60,7 @@ function stubAuth(home: unknown, wards = [ANIKA, BIJOY], seen: string[] = []) {
 
 async function mount(home: unknown, wards = [ANIKA, BIJOY], seen: string[] = []) {
   localStorage.clear();
+  dom.window.sessionStorage.clear();   // the child shared with ফলাফল (R4)
   const root = dom.window.document.getElementById('root') as HTMLElement;
   root.textContent = '';
   new GuardianView({

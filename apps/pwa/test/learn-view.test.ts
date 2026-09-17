@@ -63,9 +63,13 @@ function mount() {
         : { questions: [] },
     }),
   } as never;
-  const outbox = { enqueue: async () => ({ opId: 'op' }), flush: async () => {} } as never;
+  const ops: Array<{ entity: string; payload: { state?: string } }> = [];
+  const outbox = {
+    enqueue: async (op: { entity: string; payload: { state?: string } }) => { ops.push(op); return { opId: 'op' }; },
+    flush: async () => {},
+  } as never;
   new LearnView({ root, doc: dom.window.document, auth, outbox, classId: 'cls-1' });
-  return { root };
+  return { root, ops };
 }
 
 /** list → chapter → topic → reader */
@@ -325,16 +329,25 @@ describe('topics and reader states (§7)', () => {
   });
 
   test('the reader has one primary: done, full width, with its label intact', async () => {
-    const { root } = mount();
+    const { root, ops } = mount();
     await openReader(root);
     const primaries = root.querySelectorAll('.btn-primary');
     assert.equal(primaries.length, 1, 'one primary button');
     const done = primaries[0] as HTMLButtonElement;
     assert.ok(done.classList.contains('btn-block'));
     assert.equal(done.textContent, 'পাঠ সম্পন্ন');
+    const completed = () => ops.filter((o) => o.payload.state === 'completed').length;
     done.click();
     assert.equal(done.textContent, 'সম্পন্ন হয়েছে');
-    assert.equal(done.disabled, true);
+    // Unavailable once pressed. Marked aria-disabled rather than `disabled`
+    // (finding 12b: a disabled button under focus is blurred to <body>); the
+    // guarantee `disabled` gave is checked directly: a second press is inert.
+    assert.equal(done.getAttribute('aria-disabled'), 'true');
+    await settle();
+    done.click();
+    await settle();
+    assert.equal(completed(), 1, 'pressing it again records nothing more');
+    assert.equal(done.textContent, 'সম্পন্ন হয়েছে');
   });
 });
 

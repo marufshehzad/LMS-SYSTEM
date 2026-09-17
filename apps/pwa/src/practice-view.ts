@@ -227,6 +227,29 @@ export class PracticeView {
     this.typed = '';
     this.shownAt = Date.now();
     this.render();
+    // "আবার চেষ্টা করো" and "পরের প্রশ্ন" are gone with the render, so focus
+    // fell out of the card. The shell's keeper can only land it on a heading
+    // (before, on the page itself, and the next Tab started again at the back
+    // link); the question is where the student goes on. Only when it was
+    // lost: a person who went somewhere else meanwhile is left there.
+    if (focusIsLost(this.o.doc)) this.focusQuestion();
+  }
+
+  /**
+   * Focus the start of the current question, where answering begins: the
+   * option that is the group's Tab stop (a screen reader hears the option and
+   * the question that labels the group), or — for a typed answer — the stem.
+   * Never the answer box: focusing it raises a phone's keyboard over the
+   * question nobody has read yet, and the next Tab reaches it anyway.
+   *
+   * Public for learn-view, which mounts the card from "অনুশীলন করো" and
+   * would otherwise leave focus where that button used to be.
+   */
+  focusQuestion(scroll = true): void {
+    const root = this.o.root;
+    const target = root.querySelector<HTMLElement>('.prac-option[tabindex="0"]:not(:disabled)')
+      ?? root.querySelector<HTMLElement>('.prac-stem');
+    target?.focus({ preventScroll: !scroll });
   }
 
   private next(): void {
@@ -303,6 +326,11 @@ export class PracticeView {
     const stem = d.createElement('p');
     setNumText(d, stem, 'prac-stem', q.stemBn);
     stem.id = stemId;
+    // Focusable by script only: focusQuestion() lands here for a typed answer.
+    // One key for every question's stem, so focus left on it follows to the
+    // next question's rather than to whatever sits at the same place.
+    stem.tabIndex = -1;
+    stem.dataset.focusKey = 'prac-stem';
     card.append(stem);
 
     // Declared here, built with the actions below: the answer box's listener

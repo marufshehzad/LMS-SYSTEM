@@ -125,6 +125,26 @@ export interface ShellOptions {
 
 /** Below this the sidebar is gone and the bottom bar is the navigation. */
 const DESKTOP_MIN = 1024;
+/** The key the shell numbers history entries under, inside `history.state`. */
+const NAV_KEY = 'shikhonNav';
+/** A navigation the leave guard is holding: how far it moved, and whether it replaced the entry. */
+interface Hold { delta: number; replaced: boolean }
+/** A held navigation being undone by a step through history that has not arrived yet. */
+interface Undo {
+  hold: Hold;
+  /** The number of the entry the step has to land on: the page on screen. */
+  expect: number;
+  stay: string;
+  target: string;
+  /** Of unknown kind (no Navigation API): check where the step lands. */
+  check: boolean;
+  /** Stepping forward again, onto an entry the navigation replaced. */
+  returning: boolean;
+  /** Answered "go on" before the step arrived. */
+  resume: boolean;
+  /** Where the step was sent from. A hashchange still there is the same navigation, delivered again. */
+  from: { hash: string; at: number | null };
+}
 /** Between DESKTOP_MIN and this the sidebar is an icon rail, not a choice. */
 const RAIL_MAX = 1279;
 const RAIL_KEY = 'shikhon_sidebar_rail';
@@ -156,6 +176,17 @@ export class Shell {
   private currentRoute: ShellRoute | null = null;
   /** Set for exactly one navigation, by a guard that has been satisfied. */
   private bypassGuard = false;
+  /** The current history entry's number (see stampEntry), once one is counted. */
+  private navIndex = 0;
+  private navCounted = false;
+  /** Whether the entry on screen really carries its number (a history API that took it). */
+  private navStamped = false;
+  /** What the Navigation API said the last navigation was, where there is one. */
+  private lastNavigate: { url: string; delta: number | null } | null = null;
+  /** A held navigation's step back, not yet arrived (see settleUndo). */
+  private undo: Undo | null = null;
+  /** The address the page on screen was opened at, query and all. */
+  private currentHash = '';
   private booted = false;
   private readonly onHashChange = () => { void this.renderRoute(); };
   private onConnectivity?: () => void;
@@ -168,6 +199,7 @@ export class Shell {
     this.o = options;
     this.nav = options.role ? navFor(options.role) : null;
     this.renderChrome();
+    this.watchNavigate();
     addEventListener('hashchange', this.onHashChange);
     void this.renderRoute();
   }
@@ -1060,25 +1092,76 @@ export class Shell {
   /* ── routing ────────────────────────────────────────────────────────── */
 
   private async renderRoute(): Promise<void> {
+    if (this.settleUndo()) return;
     const path = this.resolvePath();
-    if (this.currentRoute?.path === path) return;
+    if (this.currentRoute?.path === path) {
+      // The same page: a query change, or the address put back by a held
+      // navigation. Its history entry still has to be counted.
+      this.stampEntry();
+      this.currentHash = location.hash;
+      return;
+    }
 
     // §17. The hash has ALREADY changed by the time this runs, so blocking
     // means putting it back — otherwise the address bar says the person is
     // somewhere they are not, and the back button lands somewhere neither of
     // us expects.
+    //
+    // Put back WITHOUT adding history (R5). `location.hash = …` pushed a new
+    // entry for every held back press and another for the resume, so after
+    // "বাতিল" then "বাদ দিন" the next back returned to the page just left, now
+    // with a blank register. A navigation that moved through history — a back
+    // or forward press, and a new entry (a tab, a link, the bell), which is a
+    // step forward onto a new entry — is undone by travelling the same
+    // distance the other way and resumed by travelling it again. A new entry
+    // must NOT be overwritten in place: that left two entries with the same
+    // address side by side, and the next back press moved between them with
+    // no hashchange, so it did nothing. Its entry stays ahead as a forward
+    // entry, which the next tab press replaces. Only a navigation that
+    // REPLACED the entry is put back by overwriting it.
     const leaving = this.currentRoute;
     if (!this.bypassGuard && leaving && (leaving.guardLeave || leaving.hasUnsavedChanges)) {
+      const target = location.hash;
+      const { delta, known } = this.travelled();
+      const hold: Hold = { delta, replaced: delta === 0 };
+      const stay = this.hashFor(leaving);
+      let deciding = true;
+      let resumedNow = false;
       const resume = () => {
+        // Answered before the guard even returned: nothing to put back.
+        if (deciding) { resumedNow = true; return; }
+        // The step back to the page is still on its way: go on once it lands.
+        if (this.undo?.hold === hold) { this.undo.resume = true; return; }
         this.bypassGuard = true;
-        location.hash = `#/${path}`;
+        if (hold.replaced) {
+          this.replaceHash(target);
+          void this.renderRoute();
+        } else {
+          this.go(hold.delta);
+        }
       };
       const held = leaving.guardLeave
         ? leaving.guardLeave(resume)
         : this.askBeforeLeaving(leaving, resume);
-      if (held) { location.hash = `#/${leaving.path}`; return; }
+      deciding = false;
+      if (held && !resumedNow) {
+        if (hold.replaced) {
+          // The entry the navigation replaced is the page's own entry again,
+          // number and all: a later step counts from it.
+          this.replaceHash(stay);
+          if (this.navStamped) this.numberEntry(this.navIndex);
+        } else {
+          this.undo = {
+            hold, expect: this.navIndex, stay, target, check: !known, returning: false, resume: false,
+            from: { hash: target, at: this.entryIndex() },
+          };
+          this.go(-delta);
+        }
+        return;
+      }
     }
     this.bypassGuard = false;
+    this.stampEntry();
 
     this.closeProfile();
     // An overlay lives on <body>, outside every route: without this a sheet
@@ -1100,6 +1183,7 @@ export class Shell {
       }
     }
     this.paintCrumb(path);
+    this.currentHash = location.hash;
 
     this.viewEl.textContent = '';
     // Armed after the old page is gone and before the new one mounts, so an
@@ -1121,6 +1205,167 @@ export class Shell {
       try { scrollTo({ top: 0 }); } catch { /* not a browser */ }
     }
     this.booted = true;
+  }
+
+  /* ── history (R5) ───────────────────────────────────────────────────── */
+
+  private get history(): History | null {
+    try { return this.o.doc.defaultView?.history ?? null; } catch { return null; }
+  }
+
+  /** This entry's place in the session history, as the shell numbered it. */
+  private entryIndex(): number | null {
+    try {
+      const st = this.history?.state as Record<string, unknown> | null | undefined;
+      const n = st && typeof st === 'object' ? st[NAV_KEY] : undefined;
+      return typeof n === 'number' && Number.isFinite(n) ? n : null;
+    } catch { return null; }
+  }
+
+  /**
+   * Number the current history entry. An entry numbered before (a back or
+   * forward press, a reload) keeps its number; a new one is one past the
+   * entry it was pushed from. Entries only ever form a line — a push drops
+   * everything ahead of it — so the difference between two numbers is the
+   * distance a back or forward press travelled. Whatever else a view keeps
+   * in the state (results-view preserves it on replace) is kept too.
+   */
+  private stampEntry(): void {
+    const at = this.entryIndex();
+    if (at !== null) { this.navIndex = at; this.navCounted = true; this.navStamped = true; return; }
+    this.numberEntry(this.navCounted ? this.navIndex + 1 : 0);
+  }
+
+  /** Give the current entry number `n`, keeping the rest of its state. */
+  private numberEntry(n: number): void {
+    this.navIndex = n;
+    this.navCounted = true;
+    this.navStamped = false;
+    const h = this.history;
+    if (!h) return;
+    try {
+      const st = h.state;
+      const base = st && typeof st === 'object' ? st as Record<string, unknown> : {};
+      h.replaceState({ ...base, [NAV_KEY]: n }, '');
+      this.navStamped = this.entryIndex() === n;
+    } catch { /* no history API, or a state it cannot clone: count nothing */ }
+  }
+
+  /**
+   * How far the navigation now being decided moved through history, and
+   * whether that is known or assumed: -1 for a back press, +1 for forward or
+   * a new entry (a tab, a link, a typed address), 0 for a navigation that
+   * replaced the entry.
+   *
+   * A numbered entry says it exactly. An entry with no number yet is new, or
+   * was replaced, or is one from before the shell started; the Navigation
+   * API, where the browser has it, said which as it began. Without it the
+   * shell assumes a new entry — every way this app leaves a page pushes one —
+   * and settleUndo checks where the step back lands.
+   */
+  private travelled(): { delta: number; known: boolean } {
+    const at = this.entryIndex();
+    if (at !== null) return { delta: at - this.navIndex, known: true };
+    const told = this.lastNavigate;
+    if (told && told.delta !== null && told.url === location.href) return { delta: told.delta, known: true };
+    // The page on screen has no number to travel back to: overwrite in place.
+    if (!this.navStamped) return { delta: 0, known: true };
+    return { delta: 1, known: false };
+  }
+
+  /**
+   * Listen to the Navigation API's `navigate`, which fires before a
+   * navigation moves and says what kind it is. Cap-safe: a push at Chrome's
+   * fifty-entry limit keeps the same index, but still says "push".
+   */
+  private watchNavigate(): void {
+    type Nav = EventTarget & { currentEntry?: { index?: number } | null };
+    type NavigateEvent = Event & { navigationType?: string; destination?: { url?: string; index?: number } };
+    let nav: Nav | undefined;
+    try {
+      nav = (this.o.doc.defaultView as unknown as { navigation?: Nav } | null)?.navigation;
+    } catch { return; }
+    if (!nav || typeof nav.addEventListener !== 'function') return;
+    const api = nav;
+    const onNavigate = (e: Event) => {
+      const n = e as NavigateEvent;
+      const from = api.currentEntry?.index ?? -1;
+      const to = n.destination?.index ?? -1;
+      this.lastNavigate = {
+        url: n.destination?.url ?? '',
+        delta: n.navigationType === 'push' ? 1
+          : n.navigationType === 'replace' ? 0
+          : n.navigationType === 'traverse' && from >= 0 && to >= 0 ? to - from
+          : null,
+      };
+    };
+    api.addEventListener('navigate', onNavigate);
+    this.teardowns.push(() => api.removeEventListener('navigate', onNavigate));
+  }
+
+  /**
+   * Where the step undoing a held navigation landed. On the page's own
+   * entry: undone, and if the answer came while travelling, the navigation
+   * goes on now. For a navigation of unknown kind (no Navigation API), one
+   * entry further back means it had REPLACED the page's entry, not pushed
+   * one: step forward onto that entry again and overwrite it with the page.
+   * Returns true when this hashchange was one of those steps, or the held
+   * navigation delivered a second time, and must not be drawn.
+   */
+  private settleUndo(): boolean {
+    const u = this.undo;
+    if (!u) return false;
+    const at = this.entryIndex();
+    // Still where the step was sent from: the same navigation again (a second
+    // hashchange for it), not the step. It has been dealt with already.
+    if (location.hash === u.from.hash && at === u.from.at) return true;
+    this.undo = null;
+    if (!u.returning && at === u.expect) {
+      // An entry shown as the default route (an empty or unknown hash) is
+      // given the page's own address, in place, as the overwrite always did.
+      if (location.hash !== u.stay) this.replaceHash(u.stay);
+      if (u.resume) { this.bypassGuard = true; this.go(u.hold.delta); }
+      return false;   // the same-page branch counts the entry
+    }
+    if (u.check && !u.returning && at === u.expect - 1) {
+      u.hold.replaced = true;
+      this.undo = { ...u, returning: true, from: { hash: location.hash, at } };
+      this.go(1);
+      return true;
+    }
+    if (u.returning && at === null && location.hash === u.target) {
+      if (u.resume) {
+        // The target keeps the entry it replaced, and that entry's number.
+        this.numberEntry(u.expect);
+        this.bypassGuard = true;
+        return false;
+      }
+      this.replaceHash(u.stay);
+      this.numberEntry(u.expect);
+      this.currentHash = location.hash;
+      return true;
+    }
+    return false;   // some other navigation got there first: handle it as usual
+  }
+
+  private go(delta: number): void {
+    try { this.history?.go(delta); } catch { /* nowhere to go */ }
+  }
+
+  /** Point the current entry at `hash` without a new entry or an event. */
+  private replaceHash(hash: string): void {
+    const h = this.history;
+    try {
+      if (h) { h.replaceState(h.state, '', hash); return; }
+    } catch { /* fall through */ }
+    location.replace(hash);
+  }
+
+  /** The address of the page on screen, query included when the address still names it. */
+  private hashFor(route: ShellRoute): string {
+    const h = this.currentHash;
+    const at = h.replace(/^#\/?/, '').split('?')[0];
+    return at === route.path ? h : `#/${route.path}`;
   }
 
   private paintCrumb(path: string): void {
@@ -1172,7 +1417,10 @@ export class Shell {
  *
  * `progress` is to be called with the engine's state on every change (its
  * `onProgress`): it arms the retry and asks the service worker for a
- * Background Sync, so Chrome can also send while the app is closed.
+ * Background Sync, so Chrome can also send while the app is closed. Every
+ * report, and the state read after every flush attempt, is also dispatched
+ * on the document as `shikhon:outbox` (`detail: { pending, inflight }`) for
+ * the screens that show a queue line.
  * The flush function never throws (SyncEngine.flush), but a rejection is
  * swallowed here anyway: this runs from event listeners.
  */
@@ -1198,6 +1446,27 @@ export function autoFlush(o: {
 
   const online = () => typeof navigator === 'undefined' || navigator.onLine !== false;
 
+  /**
+   * Tell the page what is still waiting: `shikhon:outbox` on the document,
+   * `detail: { pending, inflight }`, after every flush attempt (kick) and
+   * every progress report. A screen that shows a queue line (attendance's
+   * "১টি অপেক্ষমাণ", the marks footer) listens and repaints it. Before this
+   * only the register saved in that same view could learn that its queue had
+   * emptied: after a cold start, or leaving the screen and coming back, the
+   * line said "পাঠানো হচ্ছে" long after the work had gone. A listener that
+   * throws is the browser's to report; it cannot stop the flush.
+   */
+  const announce = (st: { pending: number; inflight?: number }) => {
+    const doc = o.doc ?? (typeof document === 'undefined' ? undefined : document);
+    const Ev = doc?.defaultView?.CustomEvent;
+    if (!doc || typeof Ev !== 'function') return;
+    try {
+      doc.dispatchEvent(new Ev('shikhon:outbox', {
+        detail: { pending: st.pending, inflight: st.inflight ?? 0 },
+      }));
+    } catch { /* a document being torn down */ }
+  };
+
   const registerSync = o.registerSync ?? (() => {
     try {
       void navigator.serviceWorker?.ready
@@ -1218,6 +1487,7 @@ export function autoFlush(o: {
     },
     progress(st) {
       if (stopped) return;
+      announce(st);
       const waiting = st.pending > 0;
       if (!waiting) { syncAsked = false; return; }
       if (!syncAsked) { syncAsked = true; registerSync(); }
