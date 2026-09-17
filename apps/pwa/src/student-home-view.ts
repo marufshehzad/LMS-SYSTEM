@@ -110,8 +110,16 @@ export interface StudentHomeOptions {
   now?: () => Date;
 }
 
-/** The blocks a refusal can land on. */
+/** The blocks a refusal — or a failed request — can land on. */
 type Block = 'routine' | 'next' | 'attendance';
+
+/**
+ * A request for a block that did not answer: thrown, offline, a 5xx, a body
+ * that would not parse. Kept apart from a refusal (retrying a refusal is
+ * futile) and, above all, apart from an empty answer: "the routine could not
+ * be read" must never be drawn as "no class today".
+ */
+interface Failure { status?: number }
 
 /** A 403, kept as the server said it so the sentence can name the right errand. */
 interface Refusal {
@@ -132,29 +140,80 @@ export class StudentHomeView {
   private notices: NoticeRow[] = [];
   private unread = 0;
   private refused: Partial<Record<Block, Refusal>> = {};
+  /** Blocks whose request did not answer, in the load that is current. */
+  private failures: Partial<Record<Block, Failure>> = {};
   private failed = false;
   private errText = '';
   private booted = false;
+  /** Bumped per load, so an answer from a load a retry replaced is dropped. */
+  private seq = 0;
+  private destroyed = false;
+  /**
+   * The header of the last paint. While it is still a child of the root, the
+   * root is this screen's; once the shell has emptied the root for another
+   * route (it reuses the same element), nothing here may paint into it.
+   */
+  private painted: HTMLElement | null = null;
 
   constructor(options: StudentHomeOptions) {
     this.o = options;
     this.render();
+    // A block that failed while the connection was down reloads when it comes
+    // back, rather than holding its error until the student navigates away.
+    this.o.doc.defaultView?.addEventListener('online', this.onOnline);
     void this.load();
+  }
+
+  /**
+   * Nothing from this screen paints after it. The listener also detaches
+   * itself the first time it fires after the screen has left the root, since
+   * the shell's home route does not keep this instance to call this.
+   */
+  destroy(): void {
+    this.destroyed = true;
+    this.seq++;
+    this.o.doc.defaultView?.removeEventListener('online', this.onOnline);
+  }
+
+  private readonly onOnline = (): void => {
+    if (!this.owns()) { this.destroy(); return; }
+    const f = this.failures;
+    if (this.failed || f.routine || f.next || f.attendance) this.reload();
+  };
+
+  private owns(): boolean {
+    return !this.destroyed && (this.painted === null || this.painted.parentNode === this.o.root);
   }
 
   private now(): Date { return this.o.now ? this.o.now() : new Date(); }
 
   /* ── data ───────────────────────────────────────────────────────────── */
 
+  /** Ask again: the retry buttons and the connection coming back. */
+  private reload(): void {
+    if (!this.owns()) return;
+    this.failed = false;
+    this.booted = false;
+    this.failures = {};
+    this.render();
+    void this.load();
+  }
+
   private async load(): Promise<void> {
+    const seq = ++this.seq;
+    const current = (): boolean => seq === this.seq && !this.destroyed;
     this.refused = {};
+    this.failures = {};
     // Independent requests. One slow answer must not hold the others back,
     // so each repaints when it lands rather than awaiting the set.
     //
     // A 403 is still a null here — nothing about what is fetched or how the
     // blocks read their data changes — but it is also written down, so the
     // block it belongs to can say "not for you" rather than "nothing due"
-    // (§7: denied is never a blank or an empty list).
+    // (§7: denied is never a blank or an empty list). Any other failure is
+    // written down too, so the block says it could not be read — a null
+    // turned into an empty list read "no class today" and "nothing to hand
+    // in" to a student whose request had simply failed.
     const get = async <T>(path: string, block?: Block, subject?: string): Promise<T | null> => {
       try {
         const res = await this.o.auth.authedFetch(path);
@@ -163,45 +222,69 @@ export class StudentHomeView {
             let body: { error?: unknown; message?: unknown } | null = null;
             try { body = await res.json(); } catch { /* a refusal with no body */ }
             const err = { code: body?.error, reasonBn: body?.message };
-            this.refused[block] = {
-              err, message: deniedMessage(err, subject), contact: deniedContact(err),
-            };
+            if (current()) {
+              this.refused[block] = {
+                err, message: deniedMessage(err, subject), contact: deniedContact(err),
+              };
+            }
+          } else if (block && current()) {
+            this.failures[block] = { status: res.status };
           }
           return null;
         }
         return (await res.json()) as T;
-      } catch { return null; }
+      } catch {
+        if (block && current()) this.failures[block] = {};
+        return null;
+      }
     };
 
     const jobs = [
       // B-15. First in the list because it is first on the screen, and its own
       // request because a slow inbox must not delay "where do I have to be".
+      // A failed or refused answer stays null — never [], which means "no
+      // classes today" — and the block reads which it was.
       get<{ slots: RoutineSlot[] }>('/api/v1/academics/myroutine', 'routine', 'আজকের রুটিন')
-        .then((b) => { this.slots = b?.slots ?? []; this.repaint(); }),
+        .then((b) => { if (!current()) return; this.slots = b ? (b.slots ?? []) : null; this.repaint(); }),
       get<{ suggestions: Suggestion[] }>('/api/v1/academics/next', 'next', 'জমা দেওয়ার কাজ')
-        .then((b) => { this.next = b?.suggestions ?? []; this.repaint(); }),
+        .then((b) => { if (!current()) return; this.next = b ? (b.suggestions ?? []) : null; this.repaint(); }),
       get<{ totals: AttendanceTotals }>('/api/v1/academics/attendance?months=1', 'attendance', 'হাজিরা')
-        .then((b) => { this.totals = b?.totals ?? null; this.repaint(); }),
+        .then((b) => { if (!current()) return; this.totals = b?.totals ?? null; this.repaint(); }),
       get<{ results: RecentResult[] }>('/api/v1/academics/results')
-        .then((b) => { this.result = b?.results?.[0] ?? null; this.repaint(); }),
+        .then((b) => { if (!current()) return; this.result = b?.results?.[0] ?? null; this.repaint(); }),
       get<{ notices: NoticeRow[]; unread: number }>('/api/v1/ops/inbox?limit=3')
-        .then((b) => { this.notices = b?.notices ?? []; this.unread = b?.unread ?? 0; this.repaint(); }),
+        .then((b) => { if (!current()) return; this.notices = b?.notices ?? []; this.unread = b?.unread ?? 0; this.repaint(); }),
     ];
 
     await Promise.all(jobs);
+    if (!current()) return;
     this.booted = true;
-    // Everything failed AND nothing is cached from a previous paint: that is
-    // an error worth a screen. One failure among several is not — the block
-    // that failed simply shows its own state.
-    if (this.next === null && this.totals === null && this.slots === null
-        && !this.notices.length) {
-      this.failed = true;
-      this.errText = humanError(navigator.onLine ? null : 'offline');
-    }
+    // Every block this screen draws failed: that is an error worth a screen,
+    // one answer rather than three copies of it. One failure among several
+    // is not — the block that failed shows its own state, with its own retry.
+    const f = this.failures;
+    this.failed = !!(f.routine && f.next && f.attendance);
+    if (this.failed) this.errText = this.failText(f.routine);
     this.repaint();
   }
 
-  private repaint(): void { this.render(); }
+  /** The plain sentence for a failure: offline, the server, or neither. */
+  private failText(failure: Failure | undefined): string {
+    return humanError(navigator.onLine ? null : 'offline', failure?.status);
+  }
+
+  private repaint(): void { if (this.owns()) this.render(); }
+
+  /**
+   * The error card with its retry. Two can be on screen at once (the class
+   * card and the due panel) with the same label, so each retry carries its
+   * own focus key: the one pressed is the one focus goes back to.
+   */
+  private retryable(message: string, focusKey: string): HTMLElement {
+    const state = errorState(this.o.doc, message, () => this.reload());
+    state.querySelector('button')?.setAttribute('data-focus-key', focusKey);
+    return state;
+  }
 
   /* ── render ─────────────────────────────────────────────────────────── */
 
@@ -213,9 +296,10 @@ export class StudentHomeView {
     // 03 Student §01: the salutation and the student's name, no date line.
     // The name is the page's one h1 and the salutation its sub-line; the
     // header itself stays the sheet's (Wave 2 lead decision 1).
-    append(root, pageHeader(d, this.o.displayName
+    this.painted = pageHeader(d, this.o.displayName
       ? { title: this.o.displayName, subtitle: SALUTATION }
-      : { title: SALUTATION }));
+      : { title: SALUTATION });
+    append(root, this.painted);
 
     if (!this.booted && this.next === null && this.totals === null) {
       // Foundations §04: grey rows, never a spinner.
@@ -233,11 +317,7 @@ export class StudentHomeView {
       return;
     }
     if (this.failed) {
-      append(root, errorState(d, this.errText, () => {
-        this.failed = false; this.booted = false;
-        this.render();
-        void this.load();
-      }));
+      append(root, this.retryable(this.errText, 'sh-retry'));
       return;
     }
 
@@ -275,6 +355,13 @@ export class StudentHomeView {
     const stateSlot = (child: HTMLElement) => el(d, 'div', { className: 'sh-now-empty' }, child);
 
     if (this.refused.routine) return stateSlot(permissionState(d, this.refused.routine));
+
+    if (this.failures.routine) {
+      // Not "no class today": the routine was not read, and the card says
+      // that, with the way to ask again.
+      return stateSlot(this.retryable(
+        `আজকের রুটিন আনা যায়নি। ${this.failText(this.failures.routine)}`, 'sh-retry-routine'));
+    }
 
     if (this.slots === null) {
       // The card's own shell around one grey row, so nothing jumps when the
@@ -363,6 +450,12 @@ export class StudentHomeView {
       append(wrap, permissionState(d, this.refused.next));
       return wrap;
     }
+    if (this.failures.next) {
+      // Not "nothing to hand in": the list was not read.
+      append(wrap, this.retryable(
+        `জমা দেওয়ার কাজের তালিকা আনা যায়নি। ${this.failText(this.failures.next)}`, 'sh-retry-next'));
+      return wrap;
+    }
     if (this.next === null) {
       append(wrap, listSkeleton(d, 2));
       return wrap;
@@ -399,13 +492,14 @@ export class StudentHomeView {
    * no routine route. It reads the same `/academics/myroutine` answer the
    * card does — nothing more is fetched.
    *
-   * When the routine is refused, or the day has no classes, the card's slot
-   * already says so; a second copy of the same sentence here would be noise,
-   * so the section is left out rather than repeated.
+   * When the routine is refused or could not be read, or the day has no
+   * classes, the card's slot already says so; a second copy of the same
+   * sentence here would be noise, so the section is left out rather than
+   * repeated.
    */
   private day(): HTMLElement | null {
     const d = this.o.doc;
-    if (this.refused.routine) return null;
+    if (this.refused.routine || this.failures.routine) return null;
     const wrap = el(d, 'section', { className: 'sh-day' },
       sectionHeading(d, { title: 'আজকের রুটিন' }));
 
@@ -440,13 +534,14 @@ export class StudentHomeView {
    * not. Ranked server side, so the client neither re-sorts nor invents a
    * rule.
    *
-   * Left out while that answer is loading or refused (the panel above already
-   * shows the skeleton or the refusal) and when there is nothing to suggest —
-   * the panel's empty state already names the way on to পড়াশোনা.
+   * Left out while that answer is loading, refused or failed (the panel above
+   * already shows the skeleton, the refusal or the error) and when there is
+   * nothing to suggest — the panel's empty state already names the way on to
+   * পড়াশোনা.
    */
   private study(): HTMLElement | null {
     const d = this.o.doc;
-    if (this.refused.next || this.next === null) return null;
+    if (this.refused.next || this.failures.next || this.next === null) return null;
     const items = this.next.filter((s) => s.kind !== 'assignment');
     if (!items.length) return null;
     return el(d, 'section', { className: 'sh-study' },

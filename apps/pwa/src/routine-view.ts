@@ -24,7 +24,7 @@ import { HttpStatus, statusOf } from './http-status.ts';
 import { formatDayMonth, formatTime, todayLocalIso } from '../../../packages/ui-core/src/format.ts';
 import {
   el, append, icon, pageHeader, sectionHeading, tabs, listSkeleton, emptyState, errorState,
-  permissionState, permissionMessage, humanError, announce, numText, numClass,
+  permissionState, permissionMessage, humanError, announce, numText, numClass, focusIsLost,
 } from './ui/index.ts';
 
 export interface RoutineSlot {
@@ -77,10 +77,38 @@ export class RoutineView {
    * what is requested.
    */
   private failStatus: Record<Mode, number | null> = { day: null, week: null };
+  /**
+   * Bumped by every load and by destroy(). An answer that arrives for an
+   * earlier load is dropped rather than painted: a read started offline that
+   * gives up after the reconnect read has already answered must not put the
+   * "অফলাইন" banner back, and nothing paints into the shell's view after the
+   * teacher has left this page (the next route is mounted into it).
+   */
+  private seq = 0;
+  /** Removed in destroy(). */
+  private readonly onOnline = (): void => { this.reconnected(); };
 
   constructor(options: RoutineViewOptions) {
     this.o = options;
+    this.o.doc.defaultView?.addEventListener('online', this.onOnline);
     void this.load();
+  }
+
+  /** The shell's unmount (app.ts). Nothing from this page loads or paints after it. */
+  destroy(): void {
+    this.seq++;
+    this.o.doc.defaultView?.removeEventListener('online', this.onOnline);
+  }
+
+  /**
+   * The connection came back. The banner promises "সংযোগ পেলে নিজেই হালনাগাদ
+   * হবে" and the shell only hides its own banner, so read again — but only
+   * while this screen shows a cached copy, or the no-answer error with nothing
+   * cached. A routine that is current is left alone (no skeleton flash), and a
+   * refusal is not something a connection fixes.
+   */
+  private reconnected(): void {
+    if (this.offline || this.failStatus[this.mode] === 0) void this.load();
   }
 
   private cacheGet<T>(key: string): T | null {
@@ -101,6 +129,7 @@ export class RoutineView {
   }
 
   private async load(): Promise<void> {
+    const run = ++this.seq;
     this.failStatus[this.mode] = null;
     this.loading = true;
     this.render();
@@ -112,12 +141,17 @@ export class RoutineView {
       try {
         const res = await this.o.auth.authedFetch(`/api/v1/rms/routine?scope=day&date=${this.date}`);
         if (!res.ok) throw new HttpStatus(res.status);
-        this.day = (await res.json()) as DayResponse;
+        const body = (await res.json()) as DayResponse;
+        if (run !== this.seq) return;
+        this.day = body;
         this.offline = false;
         this.cacheSet(cacheKey, this.day);
       } catch (err) {
+        if (run !== this.seq) return;
+        const status = failureStatus(err);
+        if (status === 403) this.day = this.refused(cacheKey);
         this.offline = this.day !== null;
-        if (this.day === null) this.failStatus.day = failureStatus(err);
+        if (this.day === null) this.failStatus.day = status;
       }
     } else {
       const cacheKey = WEEK_CACHE_PREFIX + this.date;
@@ -126,17 +160,38 @@ export class RoutineView {
       try {
         const res = await this.o.auth.authedFetch(`/api/v1/rms/routine?scope=week&weekStart=${this.date}`);
         if (!res.ok) throw new HttpStatus(res.status);
-        this.week = (await res.json()) as WeekResponse;
+        const body = (await res.json()) as WeekResponse;
+        if (run !== this.seq) return;
+        this.week = body;
         this.offline = false;
         this.cacheSet(cacheKey, this.week);
       } catch (err) {
+        if (run !== this.seq) return;
+        const status = failureStatus(err);
+        if (status === 403) this.week = this.refused(cacheKey);
         this.offline = this.week !== null;
-        if (this.week === null) this.failStatus.week = failureStatus(err);
+        if (this.week === null) this.failStatus.week = status;
       }
     }
 
     this.loading = false;
     this.render();
+  }
+
+  /**
+   * A refusal is not an offline state (marks-view.ts draws the same line).
+   * Showing the cached routine under "অফলাইন" says the opposite of what the
+   * server just said, to the reader it just refused, and on a shared phone
+   * that copy can be somebody else's. The copy is dropped and the denied card
+   * is drawn. Returns the "nothing to show" the caller stores.
+   */
+  private refused(cacheKey: string): null {
+    try {
+      localStorage.removeItem(cacheKey);
+    } catch {
+      // best-effort cache
+    }
+    return null;
   }
 
   /** The one mode-switch path: the আজ / সপ্তাহ tabs and the empty state's button. */
@@ -145,6 +200,20 @@ export class RoutineView {
     this.mode = id;
     announce(this.o.doc, id === 'day' ? 'আজকের রুটিন' : 'সাপ্তাহিক রুটিন');
     void this.load();
+  }
+
+  /**
+   * The empty day's way onward. The button goes with the day it was offered
+   * on, and the rebuilt view has no control like it for the shell's focus
+   * keeper to find, so focus would wait on the page itself. Its place is the
+   * সপ্তাহ tab, now selected: the control that says what is on screen, and
+   * where the arrow keys lead back to আজ.
+   */
+  private showWeekFromEmptyDay(): void {
+    this.selectMode('week');
+    if (!focusIsLost(this.o.doc)) return;
+    this.o.root.querySelector<HTMLElement>('.routine-mode [role="tab"][aria-selected="true"]')
+      ?.focus({ preventScroll: true });
   }
 
   private render(): void {
@@ -158,6 +227,17 @@ export class RoutineView {
         ? 'আজকের ক্লাস ও সময়সূচি — বদলি ক্লাস চিহ্নিত করা আছে।'
         : 'এই সপ্তাহের সব ক্লাস, দিন অনুযায়ী।',
     }));
+
+    const current = this.mode === 'day' ? this.day : this.week;
+    const failed = this.failStatus[this.mode];
+    // Refused: the denied card alone. আজ and সপ্তাহ are the same request and
+    // the same refusal, so a tab here could only lead back to this card.
+    if (!current && failed === 403) {
+      append(root, permissionState(d, {
+        message: permissionMessage('রুটিন'), contact: 'প্রধান শিক্ষক',
+      }));
+      return;
+    }
 
     // A real tab strip: roving tabindex and arrow keys, instead of two
     // buttons wearing an `.active` class.
@@ -180,26 +260,18 @@ export class RoutineView {
         })));
     }
 
-    const current = this.mode === 'day' ? this.day : this.week;
     if (this.loading && !current) {
       append(root, listSkeleton(d, 5));
       return;
     }
 
-    // Nothing cached and the request failed: say which of the two it was,
-    // rather than letting a refusal or an outage read as "no classes".
-    const failed = this.failStatus[this.mode];
+    // Nothing cached and the request failed: say so, rather than letting an
+    // outage read as "no classes". A refusal was drawn above.
     if (!current && failed !== null) {
-      if (failed === 403) {
-        append(root, permissionState(d, {
-          message: permissionMessage('রুটিন'), contact: 'প্রধান শিক্ষক',
-        }));
-      } else {
-        const why = failed > 0
-          ? humanError(null, failed)
-          : 'ইন্টারনেট নেই বা সার্ভার সাড়া দিচ্ছে না।';
-        append(root, errorState(d, `রুটিন আনা গেল না। ${why}`, () => void this.load()));
-      }
+      const why = failed > 0
+        ? humanError(null, failed)
+        : 'ইন্টারনেট নেই বা সার্ভার সাড়া দিচ্ছে না।';
+      append(root, errorState(d, `রুটিন আনা গেল না। ${why}`, () => void this.load()));
       return;
     }
 
@@ -399,7 +471,7 @@ export class RoutineView {
         message: 'এই দিনে আপনার কোনো ক্লাস নেই।',
         action: inPanel
           ? undefined
-          : { label: 'সপ্তাহের রুটিন দেখুন', onClick: () => this.selectMode('week') },
+          : { label: 'সপ্তাহের রুটিন দেখুন', onClick: () => this.showWeekFromEmptyDay() },
       }));
       return;
     }

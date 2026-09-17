@@ -30,6 +30,7 @@ import { emptyState, errorState, bnNum } from './view-states.ts';
 import {
   pageHeader, button, badge, listSkeleton, numText, append,
   permissionState, permissionMessage, serverMessage, deniedContact,
+  announce, focusIsLost,
 } from './ui/index.ts';
 
 export interface InboxNotice {
@@ -173,6 +174,12 @@ export class InboxView {
     }
   }
 
+  /**
+   * Record a read. Does NOT render: its one caller, the row's click handler,
+   * renders right after calling it. Everything above the `await` runs
+   * synchronously, so that render already shows the row as read. Rendering
+   * here as well rebuilt all fifty rows twice for every notice opened.
+   */
   private async markRead(noticeId: string): Promise<void> {
     const row = this.notices.find((n) => n.noticeId === noticeId);
     if (!row || row.readAt) return;
@@ -181,7 +188,6 @@ export class InboxView {
     row.readAt = new Date().toISOString();
     this.unread = Math.max(0, this.unread - 1);
     this.o.onUnreadChange?.(this.unread);
-    this.render();
     try {
       await this.o.auth.authedFetch('/api/v1/ops/inbox', {
         method: 'POST',
@@ -192,10 +198,31 @@ export class InboxView {
   }
 
   private async markAllRead(): Promise<void> {
+    const d = this.o.doc;
+    const root = this.o.root;
+    // "সব পড়া হয়েছে" exists only while something is unread, so the render
+    // below removes the very button that was pressed. The shell's focus
+    // keeper finds no equivalent control and parks focus on the page itself:
+    // no ring, and a screen reader's place is gone. Focus moves on to where
+    // the next Tab would have gone, the first notice. Only when focus was in
+    // the inbox: a tap that never focused the button (iOS) is left alone.
+    const active = d.activeElement;
+    const hadFocus = !!active && active !== root && root.contains(active);
     for (const n of this.notices) n.readAt ??= new Date().toISOString();
     this.unread = 0;
     this.o.onUnreadChange?.(0);
     this.render();
+    if (hadFocus && focusIsLost(d)) {
+      let next = root.querySelector<HTMLElement>('.notice-head');
+      if (!next) {
+        next = root.querySelector<HTMLElement>('h1');
+        next?.setAttribute('tabindex', '-1');
+      }
+      next?.focus({ preventScroll: true });
+    }
+    // The only visible change is the rows losing their tint and the count
+    // chip going away; a screen-reader user is told in words.
+    announce(d, 'সব নোটিশ পড়া হয়েছে');
     try {
       await this.o.auth.authedFetch('/api/v1/ops/inbox', {
         method: 'POST',
@@ -261,6 +288,11 @@ export class InboxView {
     for (const n of this.notices) {
       const item = d.createElement('article');
       item.className = 'notice-card';
+      // The row's identity for the shell's focus keeper (keepFocusWithin).
+      // Opening or closing a notice rebuilds the list; the head's text changes
+      // as it does (the preview line goes), so its text cannot say which new
+      // button is "the same one". The notice id and a fixed key can.
+      item.dataset.key = n.noticeId;
       if (!n.readAt) item.classList.add('unread');
       const urgent = n.category === 'emergency';
       if (urgent) item.classList.add('urgent');
@@ -268,6 +300,7 @@ export class InboxView {
       const head = d.createElement('button');
       head.type = 'button';
       head.className = 'notice-head';
+      head.dataset.focusKey = 'notice-head';
       const open = this.expanded.has(n.noticeId);
       head.setAttribute('aria-expanded', String(open));
 
@@ -330,6 +363,9 @@ export class InboxView {
 
       head.append(dot, main, when);
 
+      // One render per press (markRead does not render). The rebuild replaces
+      // this button; the shell's focus keeper puts focus on the new head for
+      // the same notice, by the keys above, so a second Enter closes it.
       head.addEventListener('click', () => {
         if (this.expanded.has(n.noticeId)) this.expanded.delete(n.noticeId);
         else {

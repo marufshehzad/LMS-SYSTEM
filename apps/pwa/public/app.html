@@ -40,9 +40,17 @@
 </head>
 <body>
   <!-- The shell renders before any data arrives, so a cold offline start
-       shows a working screen rather than an error page. -->
+       shows a working screen rather than an error page. Until app.js has
+       downloaded and run, #root holds the same skeleton view-states.ts
+       skeleton() builds (skeleton-first, never a lone line of text); main()
+       replaces it with the login card or the shell. -->
   <main id="root" lang="bn">
-    <p class="att-sub" style="padding:var(--s-4)">লোড হচ্ছে…</p>
+    <div class="is-skeleton ui-skeleton" aria-busy="true" aria-label="লোড হচ্ছে">
+      <div class="skel skel-title"></div>
+      <div class="skel skel-bar"></div>
+      <div class="skel skel-bar"></div>
+      <div class="skel skel-bar"></div>
+    </div>
   </main>
 
   <script type="module" src="/app.js"></script>

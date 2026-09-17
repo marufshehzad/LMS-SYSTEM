@@ -44,10 +44,12 @@ import {
   el, append, numText, numClass, hasDigit,
   dataTable, statusBadge, searchField, filterBar, tabs, pagination, timeline,
   list, listItem, button, backLink, sectionHeading, listSkeleton,
-  permissionState, serverMessage,
+  permissionState, serverMessage, announce, focusIsLost,
 } from './ui/index.ts';
 import { pageHeader } from './ui/page-header.ts';
-import { formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
+import {
+  formatAcademicYear, formatBdt, formatIdentifier,
+} from '../../../packages/ui-core/src/format.ts';
 
 export interface StudentsViewOptions {
   root: HTMLElement;
@@ -192,8 +194,31 @@ export class StudentsView {
   private historyDenied = false;
   private tab: Tab = 'enrolments';
 
+  /**
+   * Where focus goes once the render that answers an action has settled.
+   *
+   * Every render empties the view, so the control just used is destroyed.
+   * The shell's focus keeper finds the same control again when one exists
+   * (the search box, its button, the status select, a tab), but opening a
+   * student and going back swap the whole screen: there is no "same control"
+   * to return to, and focus used to wait on the page itself, with nothing
+   * read out. `record` puts it on the student's name once the record is
+   * drawn (ফলাফলে ফিরুন while it loads, or when it fails); a row puts it back
+   * on the result that was opened. `filters` is for the buttons that remove
+   * a filter and so remove themselves (a chip, সব সরান, ছাঁকনি সরান): focus
+   * goes to the status filter they changed. `page` is আগে / পরে: the button
+   * pressed comes back disabled on the first or last page, where focus would
+   * wait on nothing, so it goes to the other one.
+   */
+  private focusAfter:
+    'record' | 'filters' | { row: string } | { page: 'prev' | 'next' } | null = null;
+  /** The shape of the result control that opened the record: table or list. */
+  private openedFrom: 'ui-row-open' | 'ui-list-hit' | null = null;
+
   /** Bumped per request so a slow first search cannot overwrite a fast second. */
   private seq = 0;
+  /** The same for a record: bumped by each opening and by ফলাফলে ফিরুন. */
+  private openSeq = 0;
 
   constructor(o: StudentsViewOptions) {
     this.o = o;
@@ -220,6 +245,10 @@ export class StudentsView {
 
     const mine = ++this.seq;
     this.searching = true; this.searchError = ''; this.searchDenied = false; this.render();
+    // What the answer says aloud. The count line under the table is built
+    // fresh with its words already in it, which a screen reader does not
+    // reliably read; a search that only changes the page tells nobody else.
+    let found = '';
     try {
       const p = new URLSearchParams();
       if (text) p.set('q', text);
@@ -243,32 +272,49 @@ export class StudentsView {
       }
       this.payload = await res.json() as SearchPayload;
       this.searched = true;
+      found = foundSentence(this.payload);
     } catch {
       if (mine !== this.seq) return;
       this.searchError = 'সংযোগ নেই — শিক্ষার্থীদের তথ্য লোড করা যায়নি।';
       this.payload = null;
     } finally {
-      if (mine === this.seq) { this.searching = false; this.render(); }
+      if (mine === this.seq) {
+        this.searching = false;
+        this.render();
+        // An error card is its own alert (role="alert"). A refusal's card is
+        // a note, which nothing reads out, so the refusal is said here too.
+        if (found) announce(this.doc, found);
+        else if (this.searchDenied) announce(this.doc, this.searchError);
+      }
     }
   }
 
   private async open(id: string): Promise<void> {
+    const mine = ++this.openSeq;
+    // Only the newest opening may answer. A record the person left with
+    // ফলাফলে ফিরুন, or replaced by opening another student, arrives into
+    // nothing: it must not draw the wrong child's name (and take the focus
+    // meant for the right one), nor rebuild the search box under typing.
+    const stale = () => mine !== this.openSeq;
     this.openId = id;
     this.history = null;
     this.historyError = '';
     this.historyDenied = false;
     this.historyLoading = true;
     this.tab = 'enrolments';
+    this.focusAfter = 'record';
     this.render();
     try {
       const res = await this.o.auth.authedFetch(
         `/api/v1/academics/students/history?studentId=${encodeURIComponent(id)}`);
+      if (stale()) return;
       if (!res.ok) {
         if (res.status === 401 || res.status === 403) {
           let body: { message?: unknown; error?: unknown } | null = null;
           try {
             body = await res.json() as typeof body;
           } catch { /* a non-JSON refusal still gets the canonical sentence */ }
+          if (stale()) return;
           this.historyDenied = true;
           this.historyError = serverMessage(body, res.status,
             'শিক্ষার্থীর তথ্য লোড করা যায়নি। আবার চেষ্টা করুন।', 'শিক্ষার্থীর তথ্য');
@@ -279,12 +325,20 @@ export class StudentsView {
           : 'শিক্ষার্থীর তথ্য লোড করা যায়নি। আবার চেষ্টা করুন।';
         return;
       }
-      this.history = await res.json() as HistoryPayload;
+      const history = await res.json() as HistoryPayload;
+      if (stale()) return;
+      this.history = history;
     } catch {
+      if (stale()) return;
       this.historyError = 'সংযোগ নেই — শিক্ষার্থীর তথ্য লোড করা যায়নি।';
     } finally {
-      this.historyLoading = false;
-      this.render();
+      if (!stale()) {
+        this.historyLoading = false;
+        this.render();
+        // Focus waits on ফলাফলে ফিরুন, which says nothing about why: a
+        // refusal's card is a note, not an alert, so it is said aloud.
+        if (this.historyDenied) announce(this.doc, this.historyError);
+      }
     }
   }
 
@@ -292,6 +346,11 @@ export class StudentsView {
 
   private render(): void {
     const d = this.doc;
+    // Read before the rebuild: was the person on this screen (or nowhere)?
+    // Focus they took somewhere else — the sidebar, the bell — while a record
+    // was loading is theirs, and is not pulled back.
+    const lost = focusIsLost(d);
+    const focusHere = lost || this.o.root.contains(d.activeElement);
     this.o.root.replaceChildren();
 
     // P12-2. The shared header, not a hand-rolled `h2`.
@@ -307,8 +366,67 @@ export class StudentsView {
       subtitle: 'আইডি, নাম বা মোবাইল দিয়ে যেকোনো শিক্ষার্থীর তথ্য ও ইতিহাস দেখুন।',
     }));
 
-    if (this.openId) { this.renderDetail(); return; }
-    this.renderSearch();
+    if (this.openId) this.renderDetail();
+    else this.renderSearch();
+    this.settleFocus(focusHere, lost);
+  }
+
+  /** Carries out `focusAfter` once the render it waited for is on screen. */
+  private settleFocus(focusHere: boolean, lost: boolean): void {
+    const want = this.focusAfter;
+    if (!want) return;
+    const root = this.o.root;
+    if (want === 'record') {
+      if (!this.openId) { this.focusAfter = null; return; }
+      // Still loading: keep the intent for the render that brings the record.
+      if (!this.historyLoading) this.focusAfter = null;
+      if (!focusHere) return;
+      // The student's name says which record opened, and the next Tab goes
+      // on to the tabs. While it loads, or when it could not load, the way
+      // back is the one control there is.
+      const target = this.historyLoading
+        ? null
+        : root.querySelector<HTMLElement>('#stu-record-name');
+      (target ?? root.querySelector<HTMLElement>('.ui-back'))?.focus();
+      return;
+    }
+    if (typeof want === 'object' && 'page' in want) {
+      // The shimmer while the page loads has no pager: wait for the answer.
+      if (this.searching) return;
+      this.focusAfter = null;
+      // Only focus that went nowhere is placed. Someone who moved on to the
+      // search box while the page loaded keeps their place.
+      if (this.openId || !lost) return;
+      // The strip's two buttons, আগে then পরে. The one pressed when it is
+      // still live (the shell's keeper would find it too), else the other.
+      const btns = [...root.querySelectorAll<HTMLButtonElement>('.stu-search .ui-page-btn')];
+      const pressed = btns[want.page === 'next' ? 1 : 0];
+      (pressed && !pressed.disabled ? pressed : btns.find((b) => !b.disabled))?.focus();
+      return;
+    }
+    this.focusAfter = null;
+    if (this.openId || !focusHere) return;
+    if (want === 'filters') {
+      // The select on a desktop; below 1024 the select is hidden and the
+      // ছাঁকনি button stands for it.
+      const shapes = [...root.querySelectorAll<HTMLElement>(
+        '.stu-filters select[name="status"], .stu-filters .ui-filters-open')];
+      (shapes.find((c) => c.getClientRects().length > 0) ?? shapes[0])?.focus();
+      return;
+    }
+    // Back on the result that was opened, in whichever shape is on screen:
+    // the table's open button on a desktop, the list row on a phone.
+    const controls: HTMLElement[] = [];
+    for (const row of root.querySelectorAll<HTMLElement>('[data-key]')) {
+      if (row.dataset.key !== want.row) continue;
+      for (const c of row.querySelectorAll<HTMLElement>('button.ui-row-open, button.ui-list-hit')) {
+        controls.push(c);
+      }
+    }
+    const shown = controls.find((c) => c.getClientRects().length > 0);
+    const opener = this.openedFrom;
+    (shown ?? controls.find((c) => opener !== null && c.classList.contains(opener)) ?? controls[0])
+      ?.focus();
   }
 
   private renderSearch(): void {
@@ -344,11 +462,14 @@ export class StudentsView {
     // What is typed is kept as it is typed, so a status change searches with
     // it and a re-render never loses it.
     search.input.addEventListener('input', () => { this.q = search.input.value; });
-    if (this.searching) {
+    const submit = search.root.querySelector<HTMLButtonElement>('.ui-search-submit');
+    // The glyph button is the search action, not a second copy of the box's
+    // description: the field shares its label with the button it makes.
+    submit?.setAttribute('aria-label', 'খুঁজুন');
+    if (this.searching && submit) {
       // A search in flight cannot be sent again with Enter: a form whose
       // submit control is disabled does not submit implicitly.
-      const submit = search.root.querySelector<HTMLButtonElement>('.ui-search-submit');
-      if (submit) { submit.disabled = true; submit.setAttribute('aria-busy', 'true'); }
+      submit.disabled = true; submit.setAttribute('aria-busy', 'true');
     }
 
     // The select slot of the strip. It is the status filter this screen has
@@ -362,8 +483,10 @@ export class StudentsView {
           ...Object.entries(STATUS_BN).map(([value, label]) => ({ value, label })),
         ],
       }],
-      onChange: (_id, value) => { this.status = value; void this.runSearch(); },
-      onClearAll: () => { this.status = ''; void this.runSearch(); },
+      onChange: (_id, value) => {
+        this.status = value; this.focusFilterIfButtonGoes(); void this.runSearch();
+      },
+      onClearAll: () => { this.status = ''; this.focusFilterIfButtonGoes(); void this.runSearch(); },
     });
 
     // The search box is NOT the bar's `extra`: below 1024px the bar's inline
@@ -408,7 +531,9 @@ export class StudentsView {
           ? 'বানান দেখুন, অথবা অবস্থা ছাঁকনি সরিয়ে আবার খুঁজুন।'
           : 'আইডি বা নামের বানান দেখে আবার খুঁজুন।',
         action: canClear
-          ? { label: 'ছাঁকনি সরান', onClick: () => { this.status = ''; void this.runSearch(); } }
+          ? { label: 'ছাঁকনি সরান', onClick: () => {
+            this.status = ''; this.focusAfter = 'filters'; void this.runSearch();
+          } }
           : undefined,
       }));
       return;
@@ -418,7 +543,15 @@ export class StudentsView {
       caption: 'শিক্ষার্থী অনুসন্ধানের ফলাফল',
       rows: p.students,
       rowKey: (r) => r.id,
-      onRowClick: (r) => { void this.open(r.id); },
+      onRowClick: (r) => {
+        // Which of the two shapes was used, for ফলাফলে ফিরুন to land on.
+        const used = (this.doc.activeElement as Element | null)
+          ?.closest?.('.ui-row-open, .ui-list-hit') ?? null;
+        this.openedFrom = used && this.o.root.contains(used)
+          ? (used.classList.contains('ui-list-hit') ? 'ui-list-hit' : 'ui-row-open')
+          : null;
+        void this.open(r.id);
+      },
       columns: [
         // The name stays FIRST, although 05 §03 draws আইডি first: the first
         // column is the row header, and it names each row's open button. A
@@ -450,12 +583,15 @@ export class StudentsView {
     const limit = Math.max(1, p.limit);
     const page = Math.floor(p.offset / limit) + 1;
     const hasMore = p.offset + p.students.length < p.total;
-    const summary = `${bnNum(p.total)}টির মধ্যে ${bnNum(p.offset + 1)}–${bnNum(p.offset + p.students.length)}`;
+    const summary = rangeSummary(p);
     const pager = pagination(d, {
       page,
       pageCount: Math.max(Math.ceil(p.total / limit), hasMore ? page + 1 : page),
       summary,
-      onGo: (n) => { void this.runSearch((n - 1) * limit); },
+      onGo: (n) => {
+        this.focusAfter = { page: n > page ? 'next' : 'prev' };
+        void this.runSearch((n - 1) * limit);
+      },
     });
     // One page: no buttons to press, but the count still closes the panel.
     panel.append(pager ?? el(d, 'div', { className: 'ui-pagination' },
@@ -474,9 +610,13 @@ export class StudentsView {
   private renderDetail(): void {
     const d = this.doc;
 
+    const opened = this.openId;
     this.o.root.append(backLink(d, 'ফলাফলে ফিরুন', () => {
-      this.openId = null; this.history = null;
+      // A record still on its way is dropped when it arrives (see open()).
+      this.openSeq++;
+      this.openId = null; this.history = null; this.historyLoading = false;
       this.historyError = ''; this.historyDenied = false;
+      this.focusAfter = opened ? { row: opened } : null;
       this.render();
     }));
 
@@ -507,7 +647,8 @@ export class StudentsView {
       el(d, 'div', { className: 'stu-record-titles' },
         el(d, 'h2', {
           className: 'stu-record-name', text: h.student.name.bn,
-          attrs: { id: 'stu-record-name' },
+          // Focusable by script only, so opening a student reads the name.
+          attrs: { id: 'stu-record-name', tabindex: '-1' },
         }),
         el(d, 'p', { className: 'stu-record-code n', text: h.student.studentCode })),
       statusBadge(d, {
@@ -552,6 +693,10 @@ export class StudentsView {
       case 'fees':       this.renderFees(panel, h); break;
       case 'documents':  this.renderDocuments(panel, h); break;
     }
+
+    // The strip is new on every render and starts scrolled to its left end,
+    // so a tab chosen near the right end would drop back out of view.
+    revealTab(strip, strip.querySelector<HTMLElement>('[aria-selected="true"]'));
   }
 
   private renderProfile(panel: HTMLElement, h: HistoryPayload): void {
@@ -610,7 +755,8 @@ export class StudentsView {
     // 14 Components §04: the year above a sentence, a dot, a rail.
     const entry = (e: Enrolment) => ({
       when: formatAcademicYear(e.yearLabel),
-      title: [e.classBn, e.groupBn, `শাখা ${e.section}`, `রোল ${bnNum(e.rollNo)}`]
+      // A roll is an identifier, Latin as in the search result (R-8).
+      title: [e.classBn, e.groupBn, `শাখা ${e.section}`, `রোল ${formatIdentifier(e.rollNo)}`]
         .filter(Boolean).join(' · '),
       detail: (ENROLMENT_STATUS_BN[e.status] ?? e.status)
         + (e.endedOn ? ` · ${bnDate(e.endedOn)} পর্যন্ত` : ''),
@@ -705,7 +851,8 @@ export class StudentsView {
       }));
       return;
     }
-    // Amounts keep the server's figure as it always has (R-8: money is Latin).
+    // Money through formatBdt, as on every other finance screen: Latin
+    // (R-8), with its separators ("৳ 14,400.00", not "৳ 14400.00").
     if (f.years.length > 0) {
       panel.append(el(d, 'div', { className: 'stu-block' },
         sectionHeading(d, { title: 'বছরওয়ারি', level: 3 }),
@@ -718,15 +865,15 @@ export class StudentsView {
             { key: 'year', header: 'শিক্ষাবর্ষ', mobile: 'title',
               cell: (y) => formatAcademicYear(y.yearLabel) },
             { key: 'billed', header: 'বিল', numeric: true, mobile: 'meta',
-              cell: (y) => this.labelled('বিল', `৳ ${y.billed}`) },
+              cell: (y) => this.labelled('বিল', this.money(y.billed)) },
             { key: 'paid', header: 'জমা', numeric: true, mobile: 'meta',
-              cell: (y) => this.labelled('জমা', `৳ ${y.paid}`) },
+              cell: (y) => this.labelled('জমা', this.money(y.paid)) },
             // Not `numeric`: on a phone that sets the whole status slot, word
             // and all, in the numeral face. `.stu-fees` right-aligns it instead,
             // and only the figure takes `n`. The phone reads its word aloud —
             // a status slot has no hidden header in front of it.
             { key: 'due', header: 'বকেয়া', mobile: 'status',
-              cell: (y) => this.labelled('বকেয়া', `৳ ${y.due}`, true) },
+              cell: (y) => this.labelled('বকেয়া', this.money(y.due), true) },
           ],
         })));
     }
@@ -743,7 +890,7 @@ export class StudentsView {
             { key: 'date', header: 'তারিখ', mobile: 'subtitle',
               cell: (r) => bnDate(r.issuedAt) },
             { key: 'amount', header: 'টাকা', numeric: true, mobile: 'status',
-              cell: (r) => `৳ ${r.amount}` },
+              cell: (r) => this.money(r.amount) },
           ],
         })));
     }
@@ -791,16 +938,69 @@ export class StudentsView {
    * phone's meta line the word is aria-hidden, because the list already
    * announces the header before the value; `announce` keeps it for a status
    * slot, which has no header in front of it.
+   *
+   * The word and its figure are one unit on the line (`.stu-pair` is an
+   * inline-block): the phone's meta line breaks at its " · " between pairs,
+   * not between "জমা" and "৳ 13,200.00". A pair wider than the whole line
+   * still wraps inside itself rather than overflow.
    */
-  private labelled(word: string, value: string, announce = false): HTMLElement {
+  private labelled(word: string, value: string | HTMLElement, announce = false): HTMLElement {
     const d = this.doc;
-    return el(d, 'span', {},
+    return el(d, 'span', { className: 'stu-pair' },
       el(d, 'span', {
         className: 'stu-cell-word', text: `${word} `,
         attrs: { 'aria-hidden': announce ? null : 'true' },
       }),
       value);
   }
+
+  /**
+   * A filter chip or সব সরান was pressed: it is not drawn again once its
+   * filter is gone, so there is no same control for focus to return to. The
+   * select itself (or the phone's sheet) is left to the shell's keeper.
+   */
+  private focusFilterIfButtonGoes(): void {
+    const a = this.doc.activeElement;
+    if (a && this.o.root.contains(a) && a.matches('.ui-filter-chip, .ui-filter-clear')) {
+      this.focusAfter = 'filters';
+    }
+  }
+
+  /**
+   * One amount, as one unbreakable figure: a line never breaks after the ৳
+   * (`.stu-money` is `white-space: nowrap`). A receipt's amount stands alone
+   * in its slot; a year's amounts sit in a `.stu-pair` with their word.
+   */
+  private money(amount: string): HTMLElement {
+    return el(this.doc, 'span', { className: 'stu-money', text: formatBdt(amount) });
+  }
+}
+
+/** "৭৮৪টির মধ্যে ১–২০": the result page's place in the whole answer. */
+function rangeSummary(p: SearchPayload): string {
+  return `${bnNum(p.total)}টির মধ্যে ${bnNum(p.offset + 1)}–${bnNum(p.offset + p.students.length)}`;
+}
+
+/** What a finished search says aloud. */
+function foundSentence(p: SearchPayload): string {
+  if (p.students.length === 0) return 'কোনো শিক্ষার্থী পাওয়া যায়নি।';
+  const found = `${bnNum(p.total)} জন শিক্ষার্থী পাওয়া গেছে`;
+  return p.total > p.students.length ? `${found}, দেখানো হচ্ছে ${rangeSummary(p)}` : found;
+}
+
+/**
+ * Scroll a tab strip sideways just enough that `tab` is wholly inside it,
+ * with a little of its neighbour showing, so the strip visibly goes on.
+ * Only the strip scrolls: `scrollIntoView` would move the page as well. A
+ * strip that fits (the phone's wrapped grid) is left alone.
+ */
+function revealTab(strip: HTMLElement, tab: HTMLElement | null): void {
+  if (!tab || strip.scrollWidth <= strip.clientWidth) return;
+  const PEEK = 24;
+  const s = strip.getBoundingClientRect();
+  const t = tab.getBoundingClientRect();
+  if (t.right > s.right) strip.scrollLeft += t.right - s.right + PEEK;
+  else if (t.left < s.left) strip.scrollLeft -= s.left - t.left + PEEK;
 }
 
 /**

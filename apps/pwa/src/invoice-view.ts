@@ -42,7 +42,7 @@
  * Collection (B-48) stays here, drawn as 07 §03's payment sheet: who, the
  * balance as the figure, the amount, and how the money came.
  */
-import { formatBdt } from '../../../packages/ui-core/src/format.ts';
+import { formatBdt, parseUserNumber } from '../../../packages/ui-core/src/format.ts';
 import type { Auth } from './auth.ts';
 import {
   skeleton, errorState, emptyState, successNote, bnNum, bnMonth,
@@ -50,14 +50,21 @@ import {
 import {
   pageHeader, serverMessage, sectionHeading, button, dataTable, statusBadge, badge,
   field, setFieldError, clearFieldError, permissionState, permissionMessage,
-  irreversiblePanel, el, append, clear, icon, uid, numText,
-  openDrawer, setBusy, announce,
+  irreversiblePanel, el, append, clear, icon, uid, numText, focusIsLost,
+  openDrawer, setOverlayBody, setBusy, announce,
   type OverlayHandle, type IrreversibleItem, type IrreversiblePanel,
 } from './ui/index.ts';
 
 interface InvoiceRow {
   id: string; invoiceNo: string; billingPeriod: string;
   totalAmount: string; balanceAmount: string; status: string;
+}
+
+/** GET /api/v1/finance/payments?invoiceId= — one bill as the counter needs it. */
+interface CollectData {
+  invoice: { invoiceNo: string; studentBn: string; balanceAmount: number; totalAmount: number };
+  methods: { code: string; labelBn: string }[];
+  receipts: { receiptNo: string; amount: number; methodBn: string }[];
 }
 
 export interface InvoiceViewOptions {
@@ -98,7 +105,7 @@ export class InvoiceView {
   private denied = false;
   /** The LIST failed: drawn where the list goes, never as "no invoices yet". */
   private listError = '';
-  /** A run or a collection failed: drawn above the panel. */
+  /** A run failed: drawn above the panel. (A collection fails inside its own sheet.) */
   private error = '';
   /** That failure never reached the server. Nothing is queued. */
   private offline = false;
@@ -110,6 +117,8 @@ export class InvoiceView {
   private chip: HTMLElement | null = null;
   private gate: IrreversiblePanel | null = null;
   private periodInput: HTMLElement | null = null;
+  /** The outcome drawn by the last render — the failure if there is one, else the note. */
+  private result: HTMLElement | null = null;
 
   constructor(options: InvoiceViewOptions) {
     this.o = options;
@@ -137,7 +146,9 @@ export class InvoiceView {
   }
 
   private async generate(): Promise<void> {
-    this.busy = true; this.error = ''; this.offline = false; this.render();
+    // The last run's or collection's note is not this run's outcome: left in
+    // place, it sat above a new failure saying the opposite.
+    this.busy = true; this.error = ''; this.offline = false; this.notice = ''; this.render();
     try {
       const res = await this.o.auth.authedFetch('/api/v1/finance/generate', {
         method: 'POST',
@@ -167,13 +178,37 @@ export class InvoiceView {
           (body.notified ? ` · ${bnNum(body.notified)} জন অভিভাবককে জানানো হয়েছে।` : '।');
       // A finished run is not an acknowledgement of the next one.
       this.acknowledged = false;
-      await this.load();
+      // The reload draws the note at once; say it now, not after the list.
+      const reloading = this.load();
+      this.reveal();
+      await reloading;
     } catch {
       this.error = 'সংযোগ নেই — ইনভয়েস তৈরি করা যায়নি।';
       this.offline = true;
     } finally {
       this.busy = false; this.render();
+      this.reveal();
     }
+  }
+
+  /**
+   * Take the person to what their action produced (findings 30, 31).
+   *
+   * The outcome is drawn at the top of the page, and on a phone the person
+   * who pressed the button is scrolled far below it: the run's count, the
+   * offline failure and the receipt number all landed above the viewport
+   * while the pressed control was rebuilt out from under the focus. Focusing
+   * the outcome scrolls it into view (clear of the sticky bar — `:root`
+   * carries the scroll-padding) and has a screen reader read it, which a
+   * freshly inserted polite live region often does not.
+   *
+   * Only when focus was lost. Somebody who moved on while the network was
+   * slow — into the bell, another field — keeps their place.
+   */
+  private reveal(): void {
+    const target = this.result;
+    if (!target?.isConnected || !focusIsLost(this.o.doc)) return;
+    target.focus();
   }
 
   private render(): void {
@@ -183,6 +218,7 @@ export class InvoiceView {
     this.chip = null;
     this.gate = null;
     this.periodInput = null;
+    this.result = null;
 
     // 07 §02's bar: the title, and one neutral chip naming the month billed.
     root.append(pageHeader(d, {
@@ -205,8 +241,23 @@ export class InvoiceView {
       return;
     }
 
-    if (this.notice) root.append(successNote(d, this.notice));
-    if (this.error) root.append(this.alert());
+    // Focusable from script only (tabindex -1), so `reveal()` can take the
+    // person to it; the focus key lets the shell's keeper find it again when
+    // a reload rebuilds it.
+    if (this.notice) {
+      const note = successNote(d, this.notice);
+      note.tabIndex = -1;
+      note.dataset.focusKey = 'inv-notice';
+      root.append(note);
+      this.result = note;
+    }
+    if (this.error) {
+      const alert = this.alert();
+      alert.tabIndex = -1;
+      alert.dataset.focusKey = 'inv-alert';
+      root.append(alert);
+      this.result = alert;
+    }
 
     root.append(this.runForm());
     root.append(this.recentSection());
@@ -220,7 +271,7 @@ export class InvoiceView {
     return this.chip;
   }
 
-  /** A failed run or collection, above the panel whose primary retries it. */
+  /** A failed run, above the panel whose primary retries it. */
   private alert(): HTMLElement {
     const d = this.o.doc;
     if (this.offline) {
@@ -388,12 +439,12 @@ export class InvoiceView {
           cell: (inv) => bnMonth(inv.billingPeriod), width: 'minmax(0, 1.2fr)' },
         // Amounts printed exactly as the server sent them: decimal strings.
         { key: 'total', header: 'মোট', mobile: 'meta', numeric: true,
-          cell: (inv) => formatBdt(inv.totalAmount), width: 'minmax(0, 1.2fr)' },
+          cell: (inv) => this.figure('মোট', inv.totalAmount), width: 'minmax(0, 1.2fr)' },
         // The balance, not just the total. Without it a clerk who has just
         // taken ৳600 against a ৳1,500 bill sees the row unchanged and cannot
         // tell whether the money registered — the total never moves.
         { key: 'due', header: 'বকেয়া', mobile: 'meta', numeric: true,
-          cell: (inv) => formatBdt(inv.balanceAmount), width: 'minmax(0, 1.2fr)' },
+          cell: (inv) => this.figure('বকেয়া', inv.balanceAmount), width: 'minmax(0, 1.2fr)' },
         { key: 'state', header: 'অবস্থা', mobile: 'status', width: '130px',
           cell: (inv) => statusBadge(d, {
             state: Number(inv.balanceAmount) <= 0 ? 'paid'
@@ -416,12 +467,29 @@ export class InvoiceView {
             : button(d, {
               label: 'আদায় লিখুন', size: 'sm', variant: 'secondary',
               disabled: this.busy,
-              onClick: () => { void this.openCollect(inv); },
+              onClick: () => this.openCollect(inv),
             })),
         }] : []),
       ],
     }));
     return wrap;
+  }
+
+  /**
+   * One money figure with its word (finding 34).
+   *
+   * On a phone both amounts share the row's meta line with no header row
+   * above them, and "৳ 1,500.00 · ৳ 900.00" on a part-paid bill reads as
+   * "900 paid". The word is for the eye: `aria-hidden`, because the list
+   * already gives a screen reader the column name as a hidden prefix. The
+   * desktop table hides it — its column header says it (`.inv-amt-word`
+   * rule in app.css). Same pattern as fees-view and ledger-view.
+   */
+  private figure(word: string, amount: string): HTMLElement {
+    const d = this.o.doc;
+    return el(d, 'span', { className: 'inv-amt' },
+      el(d, 'span', { className: 'inv-amt-word', text: `${word} `, attrs: { 'aria-hidden': 'true' } }),
+      el(d, 'span', { className: 'n', text: formatBdt(amount) }));
   }
 
   /* ------------------------------------------------------------ payment */
@@ -433,26 +501,86 @@ export class InvoiceView {
    * the list is a snapshot and somebody else may have collected since it was
    * drawn, so the balance shown here — and the balance the save is checked
    * against — is read fresh.
+   *
+   * The sheet opens at the tap and loads inside itself (finding 31). It used
+   * to fetch first and open after, so a slow counter connection showed
+   * nothing at all, and a failed fetch was written to the PAGE's error slot:
+   * drawn above the viewport, pushing the list the clerk was reading down,
+   * with focus dropped to <body> and a retry that reloaded the list instead
+   * of the bill. Loading, the failure and its retry now all happen where the
+   * tap happened.
    */
-  private async openCollect(inv: InvoiceRow): Promise<void> {
+  private openCollect(inv: InvoiceRow): void {
     const d = this.o.doc;
-    let data: {
-      invoice: { invoiceNo: string; studentBn: string; balanceAmount: number; totalAmount: number };
-      methods: { code: string; labelBn: string }[];
-      receipts: { receiptNo: string; amount: number; methodBn: string }[];
-    };
-    try {
-      const res = await this.o.auth.authedFetch(
-        `/api/v1/finance/payments?invoiceId=${encodeURIComponent(inv.id)}`);
-      if (!res.ok) throw new Error(String(res.status));
-      data = await res.json() as typeof data;
-    } catch {
-      this.error = 'বিলের তথ্য আনা যায়নি।';
-      this.offline = false;
-      this.render();
-      return;
-    }
+    let handle: OverlayHandle;
+    /** Set once the bill has loaded; the primary does nothing before that. */
+    let submit: (() => Promise<void>) | null = null;
+    const cancel = button(d, {
+      label: 'বাতিল', variant: 'secondary', onClick: () => handle.close(),
+    });
+    const save = button(d, {
+      label: 'জমা নিন ও রসিদ দিন', variant: 'primary', disabled: true,
+      onClick: () => { void submit?.(); },
+    });
+    handle = openDrawer(d, {
+      title: 'আদায় লিখুন',
+      body: skeleton(d, 3),
+      actions: [cancel, save],
+      className: 'inv-pay-sheet',
+    });
 
+    const fill = async (retry: boolean): Promise<void> => {
+      if (retry) {
+        submit = null;
+        save.hidden = false;
+        // The retry replaces the button that was pressed. Hold focus on the
+        // sheet meanwhile, never on the page behind the scrim.
+        if (handle.el.querySelector('.ui-dialog-body')?.contains(d.activeElement)) handle.el.focus();
+        setOverlayBody(handle, skeleton(d, 3));
+      }
+
+      let data: CollectData | null = null;
+      let problem = 'বিলের তথ্য আনা যায়নি — সংযোগ পেলে আবার চেষ্টা করুন।';
+      let refused = false;
+      try {
+        const res = await this.o.auth.authedFetch(
+          `/api/v1/finance/payments?invoiceId=${encodeURIComponent(inv.id)}`);
+        if (res.ok) {
+          data = await res.json() as CollectData;
+        } else {
+          const out = await res.json().catch(() => ({})) as { message?: unknown; error?: unknown };
+          problem = serverMessage(out, res.status, 'বিলের তথ্য আনা যায়নি।', 'বিলের তথ্য');
+          refused = res.status === 401 || res.status === 403;
+        }
+      } catch { /* `problem` already says it */ }
+
+      // Closed while it loaded: there is nothing left to fill.
+      if (!handle.el.isConnected) return;
+      const waiting = d.activeElement === handle.el || focusIsLost(d);
+      if (!data) {
+        // Nothing can be saved against a bill that did not load.
+        save.hidden = true;
+        const err = errorState(d, problem, refused ? undefined : () => void fill(true));
+        setOverlayBody(handle, err);
+        if (waiting) (err.querySelector<HTMLElement>('button') ?? handle.el).focus();
+        return;
+      }
+      const pay = this.payForm(inv, data, save, handle);
+      setOverlayBody(handle, pay.body);
+      submit = pay.submit;
+      save.disabled = false;
+      // After a retry, where the sheet itself held focus: its first control,
+      // as when it first opened.
+      if (waiting) handle.el.querySelector<HTMLElement>('button:not([disabled])')?.focus();
+    };
+    void fill(false);
+  }
+
+  /** The payment form for a loaded bill, and what its primary does. */
+  private payForm(
+    inv: InvoiceRow, data: CollectData, save: HTMLButtonElement, handle: OverlayHandle,
+  ): { body: HTMLElement; submit: () => Promise<void> } {
+    const d = this.o.doc;
     const form = el(d, 'div', { className: 'inv-pay' });
     const errLine = el(d, 'p', {
       className: 'ui-field-error', attrs: { role: 'alert', hidden: 'hidden' },
@@ -521,62 +649,68 @@ export class InvoiceView {
             ...numText(d, `${r.receiptNo} — ${formatBdt(String(r.amount))} (${r.methodBn})`)))));
     }
 
-    let handle: OverlayHandle;
-    const cancel = button(d, {
-      label: 'বাতিল', variant: 'secondary', onClick: () => handle.close(),
-    });
-    const save = button(d, {
-      label: 'জমা নিন ও রসিদ দিন', variant: 'primary',
-      onClick: async () => {
-        errLine.setAttribute('hidden', 'hidden');
-        setBusy(save, true);
-        let msg = '';
-        let issued: { receiptNo?: string; ledgerPosted?: boolean } = {};
-        try {
-          const res = await this.o.auth.authedFetch('/api/v1/finance/payments', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              invoiceId: inv.id,
-              amount: Number(amount.input.value),
-              method: methodCode,
-              reference: reference.input.value.trim() || undefined,
-            }),
-          });
-          const out = await res.json().catch(() => ({})) as
-            { message?: string; receiptNo?: string; ledgerPosted?: boolean };
-          if (!res.ok) msg = out.message ?? 'টাকা জমা নেওয়া যায়নি।';
-          else issued = out;
-        } catch {
-          msg = 'সংযোগ নেই — টাকা জমা নেওয়া হয়নি।';
-        }
-        setBusy(save, false);
-        // A refusal keeps the drawer open with the amount intact: the server
-        // names the balance when it refuses an overpayment, and the clerk
-        // needs the figure they typed still in front of them (B-60).
-        if (msg) {
-          clear(errLine);
-          append(errLine, ...numText(d, msg));
-          errLine.removeAttribute('hidden');
-          announce(d, msg, true);
-          return;
-        }
-        handle.close();
-        await this.load();
-        this.notice = `রসিদ ${issued.receiptNo ?? ''} দেওয়া হয়েছে।`
-          // Honest when the books were skipped: the receipt is valid, the
-          // ledger row is not there, and an accountant should know now rather
-          // than at reconciliation.
-          + (issued.ledgerPosted === false
-            ? ' হিসাবের খাতা এখনো তৈরি হয়নি — লেজারে ওঠেনি।' : '');
-        this.render();
-      },
-    });
-    handle = openDrawer(d, {
-      title: 'আদায় লিখুন',
-      body: form,
-      actions: [cancel, save],
-      className: 'inv-pay-sheet',
-    });
+    const submit = async (): Promise<void> => {
+      errLine.setAttribute('hidden', 'hidden');
+      // Finding 28. The field is type=text inputmode=numeric on purpose, so a
+      // Bangla keyboard types ৫০০ and the sheet itself writes the balance as
+      // "1,250". `Number()` made both NaN, JSON wrote NaN as null, and the
+      // server refused "zero" while the field plainly showed ৫০০.
+      const taka = parseUserNumber(amount.input.value);
+      if (taka === null || taka <= 0) {
+        setFieldError(amount.root, taka === null
+          ? 'টাকার অঙ্ক সংখ্যায় লিখুন।'
+          : 'টাকার অঙ্ক শূন্যের বেশি হতে হবে।');
+        amount.input.focus();
+        return;
+      }
+      clearFieldError(amount.root);
+      setBusy(save, true);
+      let msg = '';
+      let issued: { receiptNo?: string; ledgerPosted?: boolean } = {};
+      try {
+        const res = await this.o.auth.authedFetch('/api/v1/finance/payments', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            invoiceId: inv.id,
+            amount: taka,
+            method: methodCode,
+            reference: reference.input.value.trim() || undefined,
+          }),
+        });
+        const out = await res.json().catch(() => ({})) as
+          { message?: string; receiptNo?: string; ledgerPosted?: boolean };
+        if (!res.ok) msg = out.message ?? 'টাকা জমা নেওয়া যায়নি।';
+        else issued = out;
+      } catch {
+        msg = 'সংযোগ নেই — টাকা জমা নেওয়া হয়নি।';
+      }
+      setBusy(save, false);
+      // A refusal keeps the drawer open with the amount intact: the server
+      // names the balance when it refuses an overpayment, and the clerk
+      // needs the figure they typed still in front of them (B-60).
+      if (msg) {
+        clear(errLine);
+        append(errLine, ...numText(d, msg));
+        errLine.removeAttribute('hidden');
+        announce(d, msg, true);
+        return;
+      }
+      handle.close();
+      // The receipt number is what the clerk hands the payer. It is set
+      // before the reload so the reload's first paint already carries it, and
+      // brought into view there (finding 31) rather than after the list.
+      this.notice = `রসিদ ${issued.receiptNo ?? ''} দেওয়া হয়েছে।`
+        // Honest when the books were skipped: the receipt is valid, the
+        // ledger row is not there, and an accountant should know now rather
+        // than at reconciliation.
+        + (issued.ledgerPosted === false
+          ? ' হিসাবের খাতা এখনো তৈরি হয়নি — লেজারে ওঠেনি।' : '');
+      const reloading = this.load();
+      this.reveal();
+      await reloading;
+      this.reveal();
+    };
+    return { body: form, submit };
   }
 }

@@ -542,7 +542,8 @@ describe('SMS notice settings', () => {
     const input = root().querySelector('[name="noticeMaxChars"]') as HTMLInputElement;
     assert.equal(input.getAttribute('min'), '70');
     assert.equal(input.getAttribute('max'), '480');
-    assert.equal(input.value, '180');
+    // A count of letters, not an identifier: shown in Bangla digits beside "প্রস্তাবিত (১৮০)" (R6, UX sweep 43). Still the server's number.
+    assert.equal(input.value, bnNum(180));
     assert.equal(input.getAttribute('inputmode'), 'numeric');
   });
 
@@ -564,13 +565,19 @@ describe('SMS notice settings', () => {
   });
 
   test('an out-of-range value cannot be saved', async () => {
-    new AdminSettingsView({ root: root(), doc: doc(), auth: fakeAuth({ '/api/v1/ops/settings': settings }) as never, canManage: true, canManageGuardians: true });
+    const auth = fakeAuth({ '/api/v1/ops/settings': settings });
+    new AdminSettingsView({ root: root(), doc: doc(), auth: auth as never, canManage: true, canManageGuardians: true });
     await settle();
     const input = root().querySelector('[name="noticeMaxChars"]') as HTMLInputElement;
     input.value = '9000';
     input.dispatchEvent(new dom.window.Event('input'));
-    const save = [...root().querySelectorAll('button')].find((b) => b.textContent?.includes('সংরক্ষণ'))!;
-    assert.equal((save as HTMLButtonElement).disabled, true);
+    const save = [...root().querySelectorAll('button')].find((b) => b.textContent?.includes('সংরক্ষণ'))! as HTMLButtonElement;
+    /* UX sweep 43: save is not greyed out for a refused value — a disabled submit said nothing about why and swallowed Enter. Pressing it is refused by the submit handler instead, at the field, and nothing is sent. */
+    save.click();
+    await settle();
+    assert.equal(auth.calls.filter((c) => c.init?.method === 'PUT').length, 0, 'an out-of-range value is never sent');
+    assert.equal(input.getAttribute('aria-invalid'), 'true', 'and the field says why');
+    assert.match(text(), new RegExp(`${bnNum(70)} থেকে ${bnNum(480)} এর মধ্যে`));
   });
 
   test('the policy is stated: SMS is an alert, the app holds the notice', async () => {

@@ -28,8 +28,8 @@
 import {
   pageHeader, sectionHeading, card, button, buttonRow, dataTable, statusBadge,
   statRow, statCard, field, setFieldError, clearFieldError, tabs, openDrawer,
-  listSkeleton, permissionState, humanError, list, listItem, avatar, numText,
-  el, append, type OverlayHandle, type Field, type Child,
+  listSkeleton, permissionState, permissionMessage, humanError, list, listItem, avatar,
+  numText, el, append, focusIsLost, type OverlayHandle, type Field, type Child,
 } from './ui/index.ts';
 import {
   emptyState, errorState, successNote, confirmDialog, bnDate, bnDateTime,
@@ -391,6 +391,56 @@ export function isDenied(code: string): boolean {
 }
 
 /**
+ * What a refusal means HERE, and the way out.
+ *
+ * The console holds nothing but a pasted token and key, so a refusal is
+ * always about those two — and the one thing that helps is "সেশন শেষ" and
+ * a fresh pair. B-30's canonical sentence stays the title; this is the line
+ * under it. Without it the card said only "এই কাজটি করার অনুমতি আপনার
+ * নেই।", and an operator who had mistyped the key was never told so.
+ */
+export const REFUSAL_HINT =
+  'টোকেন বা কী গ্রহণ করা হয়নি। "সেশন শেষ" চেপে সঠিক টোকেন ও কী দিয়ে আবার প্রবেশ করুন।';
+
+/**
+ * The console's refusal state (§7 denied), announced.
+ *
+ * `permissionState` is a `note`, which is right for the app's page-load
+ * refusals: the shell moves focus into every new page. The console swaps a
+ * whole screen for this card in place, and a note there is never heard — so
+ * this one card is an alert. The shared component is left as it is.
+ */
+export function refusalState(doc: Document): HTMLElement {
+  const state = permissionState(doc, { message: `${permissionMessage()} ${REFUSAL_HINT}` });
+  state.setAttribute('role', 'alert');
+  return state;
+}
+
+/**
+ * Make a page's name the place focus goes when the page changes.
+ *
+ * `tabindex="-1"` so it can take focus without becoming a Tab stop, and a
+ * stable `data-focus-key` so the console's focus keeper finds the name again
+ * when a load redraws the page — the words change ("প্রতিষ্ঠান" while a school
+ * loads, then its name), the place does not.
+ */
+export function titleTarget(scope: ParentNode): HTMLElement | null {
+  const h = scope.querySelector<HTMLElement>('h1');
+  if (!h) return null;
+  h.setAttribute('tabindex', '-1');
+  h.setAttribute('data-focus-key', 'plat-title');
+  return h;
+}
+
+/** Move focus to the page's name. True when it took it. */
+export function focusTitle(scope: ParentNode): boolean {
+  const h = titleTarget(scope);
+  if (!h) return false;
+  h.focus();
+  return h.ownerDocument.activeElement === h;
+}
+
+/**
  * The sentence an error state shows (§7 error: plain Bangla).
  *
  * The server's own words when it wrote them for a person — platform-svc's
@@ -440,7 +490,11 @@ function fleetState(t: TenantOverview): { state: string; label: string } {
   return OPS_BN[t.opsState] ?? { label: t.opsState, state: 'draft' };
 }
 
-/** A zeroed summary: an honest ০ before the server answers, never a page's count. */
+/**
+ * A zeroed summary, for the type only. render() draws no section until a load
+ * has come back (see `loaded`), so the figures on screen are always the
+ * server's: never ০ standing in for a load that failed, never a page's count.
+ */
 const ZERO_SUMMARY: FleetSummary = {
   total: 0, attention: { critical: 0, warning: 0, info: 0 },
   access: { full: 0, readOnly: 0, none: 0 },
@@ -488,6 +542,16 @@ export class PlatformOpsView {
   private queueRows: TenantOverview[] = [];
   private operators: OperatorRow[] = [];
   private busy = false;
+  /**
+   * Has a load ever come back?
+   *
+   * Until one has, nothing under the bar is real: `summary` is null and the
+   * lists are empty because nothing was READ, not because nothing exists. A
+   * failed first load drawn as if it had loaded said "সব ঠিক আছে — কোনো
+   * প্রতিষ্ঠানে বকেয়া নেই…" under the error card, and "কোনো প্ল্যান নেই" with a
+   * button to make one.
+   */
+  private loaded = false;
 
   constructor(options: OpsViewOptions) {
     this.o = options;
@@ -512,8 +576,23 @@ export class PlatformOpsView {
   }
 
   // ── data ─────────────────────────────────────────────────────────────
-  private async load(): Promise<void> {
-    this.loading = true; this.error = ''; this.errorCode = ''; this.render();
+  /**
+   * `results`: only the results change — a search typed into the institutions
+   * list. The page, and the field being typed into, stay exactly as they are
+   * while the query runs and after it answers; only the table and the pager
+   * are repainted. A full redraw here took the search box off the page for
+   * the length of the request (focus went to the whole console, and whatever
+   * was typed meanwhile went nowhere) and rebuilt it afterwards, which ends a
+   * Bangla keyboard's composition mid-word.
+   */
+  private async load(results = false): Promise<void> {
+    const seq = ++this.loadSeq;
+    const inPlace = results && this.showsResults() && !this.error;
+    if (inPlace) {
+      this.tableHost?.setAttribute('aria-busy', 'true');
+    } else {
+      this.loading = true; this.error = ''; this.errorCode = ''; this.render();
+    }
     try {
       // The page, the fleet-wide counts, the catalogue and the audit feed.
       // `/overview` is gone from this path: it returned every school on every
@@ -543,6 +622,9 @@ export class PlatformOpsView {
         this.o.call<{ operators: OperatorRow[] }>('/operators')
           .catch(() => ({ operators: [] })),
       ]);
+      // A later load has started (the next search, a হালনাগাদ): its answer
+      // is the one the screen shows, whichever comes back first.
+      if (seq !== this.loadSeq) return;
       this.rows = list.tenants;
       this.page = list.page;
       this.summary = sum;
@@ -551,12 +633,49 @@ export class PlatformOpsView {
       this.services = cat.services;
       this.feed = feed.entries;
       this.operators = ops.operators;
+      this.loaded = true;
     } catch (err) {
+      if (seq !== this.loadSeq) return;
       this.error = plainError(err, 'তালিকা আনা যায়নি।');
       this.errorCode = errorCodeOf(err);
     }
     this.loading = false;
+    this.tableHost?.removeAttribute('aria-busy');
+    if (inPlace && !this.error && this.showsResults()) {
+      this.repaintTable();
+      const pager = this.pager();
+      this.pagerEl?.replaceWith(pager);
+      this.pagerEl = pager;
+      return;
+    }
+    const ours = this.holdsFocus();
     this.render();
+    if (ours) this.titleIfLost();
+  }
+
+  /**
+   * Is keyboard focus this view's to look after? On something inside it, or
+   * parked by the console's focus keeper (platform.ts) because the control
+   * that had it was redrawn away — "আবার চেষ্টা করুন" is gone the moment the
+   * retry starts. Focus on <body> is not ours: the person put it there.
+   */
+  private holdsFocus(): boolean {
+    const d = this.o.doc;
+    const a = d.activeElement;
+    if (!a || a === d.body || a === d.documentElement) return false;
+    return this.o.root.contains(a) || focusIsLost(d);
+  }
+
+  /**
+   * After a redraw, and after the focus keeper has had its turn (its observer
+   * runs first — it was queued by the redraw): if focus still has nowhere to
+   * be, give it the page's name. Never leave it on <body> or on the whole
+   * console, where the next Tab starts again at the top of the sidebar.
+   */
+  private titleIfLost(): void {
+    queueMicrotask(() => {
+      if (focusIsLost(this.o.doc)) focusTitle(this.o.root);
+    });
   }
 
   /**
@@ -603,8 +722,10 @@ export class PlatformOpsView {
     this.render();
     // The re-render replaced the name that had focus; put it back, unless the
     // operator has already moved on to something that is still on the page.
+    // `focusIsLost`, not "is it <body>": in the console a focus keeper parks
+    // lost focus on its container, and that is lost too.
     const active = this.o.doc.activeElement;
-    if (focus && (!active || active === this.o.doc.body || !active.isConnected)) {
+    if (focus && (focusIsLost(this.o.doc) || !active?.isConnected)) {
       this.o.root.querySelector<HTMLElement>('.plat-bar h1')?.focus();
     }
   }
@@ -652,7 +773,10 @@ export class PlatformOpsView {
     if (this.openId) { this.renderDetail(root); return; }
 
     root.append(this.bar());
-    if (this.flash(root, () => { void this.load(); })) return;
+    // A refusal, or a failure before anything was ever read: the error card
+    // (with its retry) is the whole screen. Drawing the section under it would
+    // turn "nothing loaded" into "০ schools, nothing overdue, no plans".
+    if (this.flash(root, () => { void this.load(); }) || (this.error && !this.loaded)) return;
     if (this.loading) { root.append(platBand(d, 'plat-loading', listSkeleton(d, 5))); return; }
 
     if (this.tab === 'dashboard') this.renderDashboard(root);
@@ -667,6 +791,14 @@ export class PlatformOpsView {
    * count it used to carry is the first figure on the dashboard.
    */
   private bar(): HTMLElement {
+    const head = this.barFor();
+    // The section's name is where a nav press, a sign-in or a lost focus
+    // lands (platform.ts, titleIfLost).
+    titleTarget(head);
+    return head;
+  }
+
+  private barFor(): HTMLElement {
     const d = this.o.doc;
     if (this.tab === 'dashboard') {
       return pageHeader(d, {
@@ -716,8 +848,8 @@ export class PlatformOpsView {
     if (this.notice) root.append(platBand(d, 'plat-flash', successNote(d, this.notice)));
     if (!this.error) return false;
     if (isDenied(this.errorCode)) {
-      // B-30's canonical refusal, and no retry.
-      root.append(platBand(d, 'plat-flash', permissionState(d)));
+      // B-30's canonical refusal, no retry, and what to do about it.
+      root.append(platBand(d, 'plat-flash', refusalState(d)));
       return true;
     }
     root.append(platBand(d, 'plat-flash', errorState(d, this.error, retry)));
@@ -1312,7 +1444,7 @@ export class PlatformOpsView {
         if (this.searchTimer !== null) clearTimeout(this.searchTimer);
         this.searchTimer = setTimeout(() => {
           this.page.page = 1;
-          void this.load();
+          void this.load(true);
         }, 250) as unknown as number;
       },
     });
@@ -1346,6 +1478,8 @@ export class PlatformOpsView {
     sortRow.append(button(d, {
       label: this.page.dir === 'desc' ? '↓ বড় থেকে ছোট' : '↑ ছোট থেকে বড়',
       variant: 'ghost',
+      // Its words flip with the order; the focus keeper still knows it.
+      attrs: { 'data-focus-key': 'plat-sort-dir' },
       onClick: () => {
         this.page.dir = this.page.dir === 'desc' ? 'asc' : 'desc';
         this.page.page = 1;
@@ -1358,7 +1492,8 @@ export class PlatformOpsView {
     root.append(host);
     this.tableHost = host;
     this.repaintTable();
-    root.append(this.pager());
+    this.pagerEl = this.pager();
+    root.append(this.pagerEl);
   }
 
   /**
@@ -1404,8 +1539,19 @@ export class PlatformOpsView {
   }
 
   private tableHost: HTMLElement | null = null;
+  /** The pager on screen, so a search's answer can replace just it. */
+  private pagerEl: HTMLElement | null = null;
 
   private searchTimer: number | null = null;
+  /** Which load is the latest; an older one's answer is dropped. */
+  private loadSeq = 0;
+
+  /** The institutions list is on screen, drawn from loaded rows (see load). */
+  private showsResults(): boolean {
+    const host = this.tableHost;
+    return this.tab === 'institutions' && !this.openId && !this.loading
+      && host !== null && this.o.root.contains(host);
+  }
 
   /**
    * The page the server drew, unfiltered.
@@ -1519,7 +1665,7 @@ export class PlatformOpsView {
       ] : [],
     });
     // The page's name takes focus when a school is opened (openDetail).
-    head.querySelector('h1')?.setAttribute('tabindex', '-1');
+    titleTarget(head);
     root.append(head);
 
     if (this.flash(root, () => { void this.openDetail(id); })) return;

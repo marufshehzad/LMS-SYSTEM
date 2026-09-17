@@ -18,7 +18,7 @@ import { Auth } from './auth.ts';
 // `/demo.js`, and only when a demo visitor asks for it.
 import type { DemoAuth as DemoAuthClass } from './demo.ts';
 import { LoginView } from './login-view.ts';
-import { Shell, type ShellRoute } from './shell.ts';
+import { Shell, type ShellRoute, autoFlush } from './shell.ts';
 import { RosterView } from './roster-view.ts';
 import { RoutineView } from './routine-view.ts';
 import { MarksView } from './marks-view.ts';
@@ -489,6 +489,7 @@ async function main() {
     // Set once the shell exists (below): the engine is built first because the
     // routes need it, and the banner it reports to is built from those routes.
     let reportQueue: ((st: { pending: number; inflight: number }) => void) | null = null;
+    let flusher: ReturnType<typeof autoFlush> | null = null;
     const engine = new SyncEngine({
       deviceId: deviceId('d'),
       tenantId: auth.tenantId || 'demo',
@@ -497,8 +498,19 @@ async function main() {
       transport,
       onProgress: (st) => reportQueue?.(st),
     });
-    navigator.serviceWorker?.addEventListener('message', (e) => {
+    const onSwMessage = (e: MessageEvent) => {
       if ((e.data as { type?: string })?.type === 'outbox-flush') void engine.flush();
+    };
+    navigator.serviceWorker?.addEventListener('message', onSwMessage);
+    // Queued work leaves by itself: at boot, when the connection returns and
+    // when the app comes back to the foreground, with a retry while anything
+    // is still waiting. Before this the only automatic trigger was the
+    // service-worker message above, for a Background Sync nothing registered,
+    // so a register saved offline waited for the teacher's next save.
+    flusher = autoFlush({
+      flush: () => engine.flush(),
+      state: () => engine.state(),
+      doc: document,
     });
 
     const routes: ShellRoute[] = [
@@ -541,7 +553,12 @@ async function main() {
             return;
           }
           const { primary, secondary } = dashboardFor(auth.role);
-          const learner = ['student', 'guardian'].includes(auth.role);
+          // Only a student has a "what should I study next" list, and the
+          // student returned above. A guardian was handed it too, and their
+          // home opened with a child's to-do list in a student's voice,
+          // leading into student screens (and in production read against the
+          // guardian's own id). Their home starts with the child card instead.
+          const learner = auth.role === 'student';
           new HomeView({
             root: container,
             doc: document,
@@ -601,12 +618,25 @@ async function main() {
             (location.hash.split('?')[1] ?? '')).get('subjectId') ?? undefined;
           new LearnView({ root: container, doc: document, auth, outbox: engine, subjectId });
         },
+        queuesOffline: true,
       },
       {
         path: 'attendance',
         labelBn: 'হাজিরা',
         glyph: 'check-square',
         unmount: () => { attendanceScreen?.destroy(); attendanceScreen = null; },
+        queuesOffline: true,
+        // A register marked but not submitted exists only on this screen.
+        // Leaving (a tab, the bell, Android back) used to throw it away
+        // without a word. The screen answers whether it holds such marks.
+        hasUnsavedChanges: () => Boolean(
+          (attendanceScreen as { hasUnsavedChanges?: () => boolean } | null)
+            ?.hasUnsavedChanges?.()),
+        unsavedPrompt: {
+          title: 'হাজিরা জমা দেওয়া হয়নি',
+          body: 'হাজিরা এখনো জমা দেওয়া হয়নি। এখন চলে গেলে চিহ্নগুলো হারিয়ে যাবে।',
+          confirmLabel: 'বাদ দিন',
+        },
         mount: (container) => {
           // P3. The screen now asks the SERVER which sections this teacher
           // has and loads the roster itself, instead of reading a cache that
@@ -638,7 +668,10 @@ async function main() {
         labelBn: 'রুটিন',
         glyph: 'clock',
         hidden: true,
-        mount: (container) => { new RoutineView({ root: container, doc: document, auth }); },
+        // The instance is kept so unmount can release what the view holds
+        // (its `online` listener) once the view has a destroy().
+        mount: (container) => { routineView = new RoutineView({ root: container, doc: document, auth }); },
+        unmount: () => { destroyView(routineView); routineView = null; },
       },
       {
         path: 'roster',
@@ -654,6 +687,7 @@ async function main() {
         mount: (container) => {
           new MarksView({ root: container, doc: document, auth, outbox: engine });
         },
+        queuesOffline: true,
       },
       {
         path: 'more',
@@ -730,7 +764,14 @@ async function main() {
         labelBn: 'বেতন',
         glyph: 'wallet',
         hidden: true,
-        mount: (container) => { new FeesView({ root: container, doc: document, auth }); },
+        mount: (container) => {
+          // `?studentId=` is the child a guardian tapped ফি পরিশোধ করুন on.
+          const studentId = new URLSearchParams(
+            (location.hash.split('?')[1] ?? '')).get('studentId') ?? undefined;
+          const options = { root: container, doc: document, auth, studentId };
+          feesView = new FeesView(options);
+        },
+        unmount: () => { destroyView(feesView); feesView = null; },
       },
       {
         path: 'substitute',
@@ -773,7 +814,11 @@ async function main() {
         mount: (container) => {
           new GuardianView({
             root: container, doc: document, auth,
-            onOpenFees: () => { location.hash = '#/fees'; },
+            // The child travels with the link, as it does for results: a
+            // parent of two must land on the fees of the child they tapped.
+            onOpenFees: (studentId) => {
+              location.hash = `#/fees?studentId=${encodeURIComponent(studentId)}`;
+            },
             // The child's id travels with the link: the results API reads the
             // caller's own id when none is given, and a guardian has none.
             onOpenResults: (studentId) => {
@@ -868,8 +913,10 @@ async function main() {
         glyph: 'clipboard',
         hidden: true,
         mount: (container) => {
-          new AssignmentsView({ root: container, doc: document, auth, outbox: engine });
+          assignmentsView = new AssignmentsView({ root: container, doc: document, auth, outbox: engine });
         },
+        unmount: () => { destroyView(assignmentsView); assignmentsView = null; },
+        queuesOffline: true,
       },
       {
         path: 'results',
@@ -879,8 +926,9 @@ async function main() {
         mount: (container) => {
           const studentId = new URLSearchParams(
             (location.hash.split('?')[1] ?? '')).get('studentId') ?? undefined;
-          new ResultsView({ root: container, doc: document, auth, studentId });
+          resultsView = new ResultsView({ root: container, doc: document, auth, studentId });
         },
+        unmount: () => { destroyView(resultsView); resultsView = null; },
       },
       // ── R-3: the management surface ───────────────────────────────
       // Every route stays REGISTERED for every role, as the comment on
@@ -1309,6 +1357,15 @@ async function main() {
     // `pending + inflight` is what has not landed on the server yet; conflicts
     // and failures are not "waiting", and the outbox screen owns those.
     reportQueue = (st) => { built.setPending(st.pending + st.inflight); };
+    // Every change also reaches the automatic flush, which arms its retry
+    // and asks for a Background Sync while anything is waiting.
+    const paintQueue = reportQueue;
+    reportQueue = (st) => { paintQueue(st); flusher?.progress(st); };
+    built.onDestroy(() => {
+      flusher?.stop();
+      flusher = null;
+      navigator.serviceWorker?.removeEventListener('message', onSwMessage);
+    });
     void engine.state().then(reportQueue).catch(() => { /* no store yet: the figure stays hidden */ });
     return built;
   }
@@ -1324,6 +1381,15 @@ async function main() {
   // listeners. Without it, navigating away and back stacks one pair of
   // online/offline handlers per visit.
   let attendanceScreen: AttendanceScreen | null = null;
+  // Same reason, for the screens that listen for the connection coming back.
+  let routineView: RoutineView | null = null;
+  let feesView: FeesView | null = null;
+  let assignmentsView: AssignmentsView | null = null;
+  let resultsView: ResultsView | null = null;
+  /** `destroy()` when the view has one; a view without it holds nothing. */
+  function destroyView(view: object | null): void {
+    (view as { destroy?: () => void } | null)?.destroy?.();
+  }
 
   /**
    * Pull the unread count and paint the badge.

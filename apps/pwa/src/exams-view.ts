@@ -160,6 +160,13 @@ export class ExamsView {
   private busy = false;
   private yearId = '';
   private search = '';
+  /**
+   * The register card and the search/year strip at its top. Typing rebuilds
+   * only what follows the strip (see renderList). Both null whenever the last
+   * render drew no register.
+   */
+  private register: HTMLElement | null = null;
+  private strip: HTMLElement | null = null;
 
   // Declared and assigned rather than a `private readonly o` parameter
   // property: Node's type-stripping test runner rejects those outright, so a
@@ -270,6 +277,8 @@ export class ExamsView {
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';
+    this.register = null;
+    this.strip = null;
 
     // The drawn bar: the title and ONE small primary, nothing else. It appears
     // exactly when the old in-page create button did — after load, for a role
@@ -315,9 +324,32 @@ export class ExamsView {
 
     // One frame, as drawn: strip → register → footer note. The empty state
     // sits inside it too, under the strip, so another year can still be picked.
-    const register = el(d, 'div', { className: 'card exams-register' });
-    register.append(this.controls(tree));
-    root.append(register);
+    this.register = el(d, 'div', { className: 'card exams-register' });
+    this.strip = this.controls(tree);
+    this.register.append(this.strip);
+    root.append(this.register);
+    this.renderList();
+  }
+
+  /**
+   * Everything in the register after the strip — the only part of the screen
+   * the search changes.
+   *
+   * Typing rebuilds this and nothing else. It used to rebuild the whole
+   * screen, so the search box was replaced under the first letter: focus fell
+   * to <body>, a phone closed its keyboard, and a Bangla keyboard's
+   * composition was cut off — "অর্ধ" came out as "অ". The table, the empty
+   * state and the note stay direct children of the card, where the stylesheet
+   * expects them (`.exams-register>.ui-data`).
+   */
+  private renderList(): void {
+    const d = this.o.doc;
+    const register = this.register;
+    const strip = this.strip;
+    const data = this.data;
+    const tree = this.tree;
+    if (!register || !strip || !data || !tree?.year) return;
+    while (strip.nextSibling) strip.nextSibling.remove();
 
     const rows = this.visible();
     if (rows.length === 0) {
@@ -420,7 +452,9 @@ export class ExamsView {
     const search = field(d, {
       label: 'খুঁজুন', name: 'q', kind: 'search', value: this.search,
       placeholder: 'পরীক্ষার নাম বা ধরন',
-      onInput: (v) => { this.search = v; this.render(); },
+      // The list only, never render(): the box itself must survive the
+      // keystroke (see renderList).
+      onInput: (v) => { this.search = v; this.renderList(); },
     });
     // The year select shows "২০২৬ (চলতি)"; an <option> cannot hold a span, so
     // the control carries the numeral face (`is-num`: `.ui-input` would

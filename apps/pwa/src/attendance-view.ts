@@ -28,10 +28,10 @@
 import {
   AttendanceGrid, type Student, type GridEntry, type AttendanceStatus,
 } from '../../../packages/ui-core/src/attendance-grid.ts';
-import { formatCount, formatDayMonth, formatIdentifier } from '../../../packages/ui-core/src/format.ts';
+import { formatCount, formatDayMonth, formatIdentifier, formatTime } from '../../../packages/ui-core/src/format.ts';
 import {
   el, append, icon, uid, button, badge, numText, progress, openOverlay, onClickBusy, announce,
-  type OverlayHandle, type BadgeTone,
+  focusIsLost, type OverlayHandle, type BadgeTone,
 } from './ui/index.ts';
 
 export interface SaveResult {
@@ -55,7 +55,11 @@ export interface OutboxLike {
     payload: unknown;
   }): Promise<{ opId: string }>;
   flush(): Promise<unknown>;
-  state(): Promise<{ pending: number; failed: number; conflicts: number; lastSyncAt?: number }>;
+  state(): Promise<{
+    pending: number; failed: number; conflicts: number; lastSyncAt?: number;
+    /** Ops being sent right now (the sync engine reports them apart from pending). */
+    inflight?: number;
+  }>;
 }
 
 export interface AttendanceViewOptions {
@@ -91,6 +95,12 @@ export interface AttendanceViewOptions {
    * No caller wires a draft store today (out of scope, R3).
    */
   initial?: Record<string, AttendanceStatus>;
+  /**
+   * The saved register's delivery changed (for instance it reached the server
+   * in a background flush). The screen repaints its sync line, so the line
+   * above never still says "১টি অপেক্ষমাণ" under a footer that says sent.
+   */
+  onDeliveryChange?: () => void;
 }
 
 /** `save()` with nobody marked. An empty register would count as "taken". */
@@ -100,6 +110,14 @@ export class NothingMarkedError extends Error {
 }
 
 type Shown = AttendanceStatus | 'unset';
+
+/**
+ * Where a saved register stands, as far as the queue can say: "sending" while
+ * this view's own flush runs, "waiting" while it is still queued after that,
+ * then "sent", "failed" (parked by the engine) or "unknown" (the queue could
+ * not be read before the enqueue, so a parked op cannot be attributed).
+ */
+type Delivery = 'sending' | 'sent' | 'waiting' | 'failed' | 'unknown';
 
 /** The one rule: an untouched student is unset, whatever the grid defaults to. */
 const shown = (e: GridEntry): Shown => (e.touched ? e.status : 'unset');
@@ -129,7 +147,21 @@ const SPOKEN_EN: Record<Shown, string> = {
 /** Counts are Bangla (R6). */
 const bn = (n: number): string => formatCount(n, 'bn');
 
+/** The device's wall-clock time of a save, as the teacher's phone shows it: `১০:৪২`. */
+const clock = (ms: number): string => {
+  const t = new Date(ms);
+  return formatTime(`${t.getHours()}:${t.getMinutes()}`, 'bn');
+};
+
 const UNDO_SECONDS = 5;
+
+/**
+ * How often a saved-but-not-yet-sent register re-reads the queue. The shell's
+ * auto-flush sends it in the background (on reconnect, on return to the app,
+ * every 30 s) without telling this view, so without a re-read the footer would
+ * keep saying "এখনো পাঠানো হয়নি" after it arrived. One count read.
+ */
+const SAVED_RECHECK_MS = 10_000;
 
 /**
  * A click with `detail === 0` came from the keyboard (Space/Enter on a native
@@ -190,6 +222,29 @@ export class AttendanceView {
    */
   private keyToggled: string | null = null;
   private sheet: OverlayHandle | null = null;
+  /**
+   * The register as last saved (its marks, and when), or null before any
+   * save. While the marks on screen still equal these, the footer says so and
+   * offers no "দেখে জমা দিন": the same register sent twice is a second op in
+   * the queue and the same SMS sentence again, for nothing.
+   */
+  private saved: {
+    key: string; at: number;
+    /**
+     * Failed + conflicted ops in the queue just before this register was
+     * enqueued, or null if the queue could not be read. The engine parks
+     * those ops for good (nothing in the app retries or discards them), so an
+     * old one says nothing about this register: only growth past this count
+     * does.
+     */
+    parkedBefore: number | null;
+  } | null = null;
+  /** Whether that saved register has left the device, as far as the queue says. */
+  private delivery: Delivery = 'sending';
+  /** This view's own flush for the latest save has not settled yet. */
+  private flushing = false;
+  private savedText: HTMLElement | null = null;
+  private recheckTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: AttendanceViewOptions) {
     this.o = options;
@@ -258,9 +313,21 @@ export class AttendanceView {
       className: 'att-undo', attrs: { role: 'status', 'aria-live': 'polite' },
     });
     this.undoEl.hidden = true;
-    // WCAG 2.2.1: the countdown pauses while the toast is being used.
-    this.undoEl.addEventListener('mouseenter', () => { this.undoHover = true; });
-    this.undoEl.addEventListener('mouseleave', () => { this.undoHover = false; });
+    // WCAG 2.2.1: the countdown pauses while the toast is being used — a mouse
+    // resting on it, or focus inside it. Pointer events, not mouse events: a
+    // finger's tap fires a compatibility `mouseenter` and never the matching
+    // `mouseleave`, so touching the toast's text froze the countdown and left
+    // the toast over the last rows until the next tap somewhere else.
+    const win = d.defaultView as (Window & typeof globalThis) | null;
+    if (win && typeof win.PointerEvent === 'function') {
+      this.undoEl.addEventListener('pointerenter', (ev) => {
+        if ((ev as PointerEvent).pointerType === 'mouse') this.undoHover = true;
+      });
+      this.undoEl.addEventListener('pointerleave', () => { this.undoHover = false; });
+    } else {
+      this.undoEl.addEventListener('mouseenter', () => { this.undoHover = true; });
+      this.undoEl.addEventListener('mouseleave', () => { this.undoHover = false; });
+    }
     this.undoEl.addEventListener('focusin', () => { this.undoFocus = true; });
     this.undoEl.addEventListener('focusout', (ev) => {
       const next = (ev as FocusEvent).relatedTarget as Node | null;
@@ -387,6 +454,7 @@ export class AttendanceView {
   /* ----------------------------------------------------------- updates */
 
   private onGridChange(): void {
+    if (this.isSaved()) this.guardRaised = false;
     for (const e of this.grid.entriesInOrder()) {
       const r = this.rows.get(e.studentId);
       if (!r) continue;
@@ -420,6 +488,29 @@ export class AttendanceView {
     return t;
   }
 
+  /** The marks a save would send, as one comparable string. Unmarked students are not in it. */
+  private marksKey(): string {
+    return this.grid.entriesInOrder()
+      .filter((e) => e.touched)
+      .map((e) => `${e.studentId}:${e.status}`)
+      .join('|');
+  }
+
+  /** The marks on screen are exactly the register last saved. */
+  private isSaved(): boolean {
+    return this.saved !== null && this.saved.key === this.marksKey();
+  }
+
+  /**
+   * Marks on screen that no save holds: leaving now would lose them. Nobody
+   * marked is nothing to lose, and a register changed and then changed back
+   * to what was saved has nothing unsaved either.
+   */
+  hasUnsavedChanges(): boolean {
+    const key = this.marksKey();
+    return key !== '' && key !== this.saved?.key;
+  }
+
   /**
    * With everyone marked, "all present" could only erase exceptions — so it
    * is disabled. aria-disabled, not `disabled`: the teacher's focus is on this
@@ -447,8 +538,11 @@ export class AttendanceView {
   private paintFooter(): void {
     const d = this.o.doc;
     const t = this.tally();
+    const saved = this.isSaved();
+    if (saved) this.guardRaised = false;
     if (this.guardRaised && t.unmarked === 0) this.guardRaised = false;
-    const key = this.guardRaised ? (t.marked > 0 ? 'blocked-anyway' : 'blocked') : 'ready';
+    const key = saved ? 'saved'
+      : this.guardRaised ? (t.marked > 0 ? 'blocked-anyway' : 'blocked') : 'ready';
 
     if (key === this.footerKey) {
       // Same controls: update the numbers in place so a focused button survives.
@@ -465,9 +559,25 @@ export class AttendanceView {
     this.footerBody.textContent = '';
     this.guardText = null;
     this.goBtn = null;
-    let focusTarget: HTMLButtonElement;
+    this.savedText = null;
+    let focusTarget: HTMLElement;
 
-    if (!this.guardRaised) {
+    if (saved) {
+      // After a submit the register used to look exactly like one never
+      // submitted: the toast went after four seconds and the same primary
+      // stayed, one tap from sending it again. The footer now says, for as
+      // long as the marks are unchanged, that this register is saved, when,
+      // and whether it has left the device. Changing any mark brings
+      // "দেখে জমা দিন" back.
+      this.footer.dataset.state = 'saved';
+      this.savedText = el(d, 'p', {
+        className: 'att-saved-text',
+        attrs: { tabindex: '-1', 'aria-live': 'polite', 'data-focus-key': 'att-saved' },
+      });
+      this.paintSavedText();
+      focusTarget = this.savedText;
+      append(this.footerBody, this.savedText);
+    } else if (!this.guardRaised) {
       this.footer.dataset.state = 'ready';
       focusTarget = button(d, {
         label: 'দেখে জমা দিন', variant: 'primary', block: true,
@@ -505,6 +615,116 @@ export class AttendanceView {
 
   private guardSentence(unmarked: number): string {
     return `${bn(unmarked)} জনকে এখনো চিহ্নিত করা হয়নি — খালি রেখে জমা দিলে তারা কোনো হিসাবেই থাকবে না।`;
+  }
+
+  /**
+   * The saved footer's words. "জমা হয়েছে" only once nothing is waiting in the
+   * queue (pending or in flight) and no op has been parked (failed or in
+   * conflict) since this register was enqueued. Until then it says what is
+   * certainly true: saved on this device. (The queue is the teacher's whole
+   * outbox, so another unsent op keeps this at "not yet sent": it can be
+   * late to say "sent", never early.)
+   */
+  private paintSavedText(): void {
+    const node = this.savedText;
+    const s = this.saved;
+    if (!node || !s) return;
+    const d = this.o.doc;
+    const t = this.tally();
+    const time = clock(s.at);
+    const head = this.delivery === 'sent'
+      ? `হাজিরা জমা হয়েছে · ${time}`
+      : this.delivery === 'failed'
+        ? `হাজিরা এই যন্ত্রে সংরক্ষিত · ${time} — পাঠানো যায়নি`
+        : this.delivery === 'waiting'
+          ? `হাজিরা এই যন্ত্রে সংরক্ষিত · ${time} — এখনো পাঠানো হয়নি`
+          // The queue cannot say which way it went: only what is certain.
+          : this.delivery === 'unknown'
+            ? `হাজিরা এই যন্ত্রে সংরক্ষিত · ${time}`
+            : `হাজিরা সংরক্ষিত · ${time} — পাঠানো হচ্ছে`;
+    const parts = [`${bn(t.present)} জন উপস্থিত`];
+    if (t.absent) parts.push(`${bn(t.absent)} জন আসেনি`);
+    if (t.late) parts.push(`${bn(t.late)} জন দেরিতে`);
+    if (t.excused) parts.push(`${bn(t.excused)} জন ছুটিতে`);
+    if (t.unmarked) parts.push(`${bn(t.unmarked)} জন চিহ্নিত হয়নি`);
+    // For the stylesheet: an --ok rule beside the words once it has arrived.
+    node.dataset.delivery = this.delivery;
+    node.textContent = '';
+    append(node,
+      el(d, 'span', { className: 'att-saved-head' }, ...numText(d, head)),
+      el(d, 'span', { className: 'att-saved-tally' }, ...numText(d, parts.join(' · '))));
+  }
+
+  /**
+   * Re-read the queue and say whether the saved register has left the device.
+   * The view calls it when its own flush settles; the screen calls it each
+   * time it repaints its sync line (connectivity, retry). Before this view's
+   * flush has settled a non-empty queue is still "sending", not "not sent".
+   *
+   * The queue reports counts only, so the verdict is read from them:
+   *   · anything pending or in flight: not yet — read again in 10 s;
+   *   · nothing waiting, and no more parked (failed or conflicted) ops than
+   *     just before the enqueue: it arrived;
+   *   · nothing waiting, and more parked ops than before: it was refused and
+   *     the engine parked it.
+   * The engine never removes a parked op by itself, and nothing in the app
+   * retries or discards one. Comparing with the whole count instead would let
+   * one old refusal, from any screen, make every later register read "not
+   * sent" forever — and keep reading the queue every 10 s to say so.
+   * A verdict is final: the queue is not read again for this register.
+   */
+  async refreshSaved(): Promise<void> {
+    const saved = this.saved;
+    const decided = () => this.delivery === 'sent' || this.delivery === 'failed'
+      || this.delivery === 'unknown';
+    if (!saved || decided()) return;
+    let s: Awaited<ReturnType<OutboxLike['state']>>;
+    try { s = await this.o.outbox.state(); } catch { return; }
+    if (this.saved !== saved || decided()) return;
+    const waiting = (s.pending ?? 0) + (s.inflight ?? 0);
+    const parked = (s.failed ?? 0) + (s.conflicts ?? 0);
+    let next: Delivery;
+    if (waiting > 0) {
+      this.scheduleRecheck();
+      next = this.flushing ? this.delivery : 'waiting';
+    } else if (parked === 0 || (saved.parkedBefore !== null && parked <= saved.parkedBefore)) {
+      next = 'sent';
+    } else {
+      // More parked ops than before. Counts cannot name the op, so another of
+      // this teacher's ops refused in the same window would read the same;
+      // that is rare, and this line never says "arrived" for a refusal.
+      // With no count from before the enqueue, it cannot tell at all.
+      next = saved.parkedBefore === null ? 'unknown' : 'failed';
+    }
+    if (next === this.delivery) return;
+    this.delivery = next;
+    this.paintSavedText();
+    this.o.onDeliveryChange?.();
+  }
+
+  /** Read the queue again later, while this register is on screen and still waiting in it. */
+  private scheduleRecheck(): void {
+    if (this.recheckTimer !== null) return;
+    const t = setTimeout(() => {
+      this.recheckTimer = null;
+      if (!this.footer.isConnected) return;
+      void this.refreshSaved();
+    }, SAVED_RECHECK_MS);
+    // Never what keeps a test process (or a closing page) alive.
+    (t as { unref?: () => void }).unref?.();
+    this.recheckTimer = t;
+  }
+
+  /**
+   * Focus the saved line, if this register has one. The screen's "আবার পাঠান"
+   * sits in a sync line that disappears once the queue empties, taking focus
+   * with it; the saved line — now reading "জমা হয়েছে" — is where it belongs.
+   */
+  focusSaved(): boolean {
+    const node = this.savedText;
+    if (!node?.isConnected) return false;
+    node.focus({ preventScroll: true });
+    return this.o.doc.activeElement === node;
   }
 
   /** The chip: queued-op count and last sync. Never blocks anything. */
@@ -548,8 +768,11 @@ export class AttendanceView {
     if (e.touched && e.status === status) return;   // a re-tap records nothing
     this.grid.set(studentId, status);
     this.closeRow(studentId);
-    this.focusHit(studentId);
+    // The toast first, THEN the scroll: the root scroll-padding that clears
+    // the toast only applies while it is shown. Scrolled the other way round,
+    // the row just marked landed 22px under its own toast.
     this.showUndo(`${this.nameOf(e)} — ${CHIP[status][0]}`, { kind: 'single', studentId }, keyboard);
+    this.focusHit(studentId);
   }
 
   private toggleRow(studentId: string): void {
@@ -565,6 +788,12 @@ export class AttendanceView {
     r.hit.setAttribute('aria-expanded', 'true');
     r.row.classList.add('is-open');
     this.openId = studentId;
+    // A tap on a row low on the screen opened its three buttons under the
+    // sticky footer and nothing moved: the tap seemed to do nothing, and the
+    // next tap landed on "দেখে জমা দিন". 'nearest' scrolls only when the
+    // buttons are covered, and only as far as the root scroll-padding this
+    // screen sets for the footer, the tab bar and the undo toast.
+    if (typeof r.row.scrollIntoView === 'function') r.row.scrollIntoView({ block: 'nearest' });
   }
 
   private closeRow(studentId: string): void {
@@ -733,7 +962,14 @@ export class AttendanceView {
       className: 'att-confirm',
       body,
       actions: [back, submit],
-      onClose: () => { this.sheet = null; },
+      onClose: () => {
+        this.sheet = null;
+        // A save replaced the sheet's opener ("দেখে জমা দিন") with the saved
+        // line, so the overlay's own focus return had nothing to land on.
+        if (this.footerKey === 'saved' && this.savedText?.isConnected && focusIsLost(d)) {
+          this.savedText.focus({ preventScroll: true });
+        }
+      },
     });
     this.sheet = handle;
   }
@@ -842,6 +1078,9 @@ export class AttendanceView {
   async save(): Promise<SaveResult> {
     const marked = new Set(this.grid.entriesInOrder().filter((e) => e.touched).map((e) => e.studentId));
     if (marked.size === 0) throw new NothingMarkedError();
+    // What is being sent, taken with the payload: the footer's "saved" state
+    // compares the screen against THIS, not against marks made during the wait.
+    const key = this.marksKey();
 
     const sessionId = this.o.newId();
     const full = this.grid.toPayload({
@@ -854,21 +1093,39 @@ export class AttendanceView {
     });
     const payload = { ...full, records: full.records.filter((r) => marked.has(r.studentId)) };
 
+    // The parked (failed or conflicted) ops already in the queue, so a later
+    // read can tell this register's refusal from an old one (refreshSaved).
+    let parkedBefore: number | null = null;
+    try {
+      const before = await this.o.outbox.state();
+      parkedBefore = (before.failed ?? 0) + (before.conflicts ?? 0);
+    } catch { /* unreadable: the footer will not claim either way */ }
+
     const op = await this.o.outbox.enqueue({
       entity: 'attendance_session',
       opId: sessionId,           // op id IS the session id — one row, one op
       payload,
     });
 
-    this.grid.markSaved((this.o.now ?? Date.now)());
+    const at = (this.o.now ?? Date.now)();
+    this.grid.markSaved(at);
     // markSaved empties the grid's undo stack, so the window is closed.
     this.hideUndo();
+    const saved = { key, at, parkedBefore };
+    this.saved = saved;
+    this.delivery = 'sending';
+    this.flushing = true;
+    this.guardRaised = false;
+    this.paintProgress();
+    this.paintFooter();
 
     // Fire-and-forget from the UI's perspective. A rejection here is normal
     // offline and must not surface as an unhandled rejection or an error toast.
     const flushed = Promise.resolve(this.o.outbox.flush())
       .catch(() => {})
-      .then(() => this.paintChip());
+      .then(() => { if (this.saved === saved) this.flushing = false; })
+      .then(() => this.paintChip())
+      .then(() => this.refreshSaved());
 
     await this.paintChip();
 

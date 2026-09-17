@@ -25,7 +25,9 @@
  *   2 empty          · this module — no sections, or a section with no students
  *   3 loaded         · AttendanceView's register (path খ: rows start unset)
  *   4 saving         · the confirm sheet's "জমা দিন" busy state (`onClickBusy`)
- *   5 saved          · this module's toast, in words: on the device vs sending
+ *   5 saved          · this module's toast, in words: on the device vs sending;
+ *                      then the register's footer, for as long as the marks
+ *                      are unchanged (saved, when, the tally, sent or not)
  *   6 offline        · the shell banner + an explicit line in the status strip
  *   7 queued         · the sync line, with the count
  *   8 syncing        · the sync line, while a flush is in flight
@@ -39,8 +41,8 @@
  * Section and subject: the picker strip. How many are marked, and how many are
  * left: the register's progress strip (only students the teacher marked).
  * The date: the confirm sheet, which every submit passes through. Whether
- * saved or only queued locally: the toast and the sync line. In words;
- * colour never carries any of them alone.
+ * saved or only queued locally: the toast, the register's saved footer and
+ * the sync line. In words; colour never carries any of them alone.
  */
 import type { Auth } from './auth.ts';
 import type {
@@ -51,7 +53,8 @@ import type { Student } from '../../../packages/ui-core/src/attendance-grid.ts';
 import { AttendanceView, type OutboxLike } from './attendance-view.ts';
 import {
   el, append, icon, button, pageHeader, field, emptyState, errorState,
-  permissionState, listSkeleton, humanError, announce, toast, badge,
+  permissionState, listSkeleton, humanError, announce, toast, badge, confirmOverlay,
+  focusIsLost, permissionMessageWithContact, type OverlayHandle,
 } from './ui/index.ts';
 import { formatCount } from '../../../packages/ui-core/src/format.ts';
 
@@ -115,6 +118,20 @@ export class AttendanceScreen {
   private statusHost!: HTMLElement;
   private busy = false;
   private onConnectivity?: () => void;
+  /**
+   * The page header and the picker strip outlive a render. The section select
+   * used to be rebuilt by every render — twice per section change (loading,
+   * then ready) — so the control a person was using vanished under them: one
+   * ArrowDown switched the section and dropped focus to <body>.
+   */
+  private headerEl: HTMLElement | null = null;
+  private regEl: HTMLElement | null = null;
+  private pickersEl: HTMLElement | null = null;
+  private sectionSelect: HTMLSelectElement | null = null;
+  /** The section list the picker strip was built from. */
+  private pickersFor = '';
+  /** The "discard these marks?" question, while it is open. */
+  private switchAsk: OverlayHandle | null = null;
 
   constructor(options: AttendanceScreenOptions) {
     this.o = options;
@@ -133,6 +150,16 @@ export class AttendanceScreen {
       removeEventListener('online', this.onConnectivity);
       removeEventListener('offline', this.onConnectivity);
     }
+  }
+
+  /**
+   * A register with marks that no save holds. The shell asks this before a
+   * tab, the bell or Android back leaves the route; the section picker asks
+   * it before switching. Nothing marked, or nothing changed since the last
+   * save, is nothing to lose.
+   */
+  hasUnsavedChanges(): boolean {
+    return this.view?.hasUnsavedChanges() ?? false;
   }
 
   /* ── data ───────────────────────────────────────────────────────────── */
@@ -173,19 +200,28 @@ export class AttendanceScreen {
     this.phase = 'loading';
     this.render();
 
+    // This section's cached roster, or none. Keeping the previous section's
+    // children here drew them under the new section's name whenever the new
+    // one had no cache and the fetch failed — and a save would have sent them.
     const cached = read<RosterStudent[]>(rosterCache(sectionId));
-    if (cached?.length) this.roster = cached;
+    this.roster = cached?.length ? cached : [];
 
     try {
       const res = await this.o.auth.authedFetch(
         `/api/v1/academics/roster?sectionId=${encodeURIComponent(sectionId)}`);
+      // A later choice owns the screen now. With focus kept on the select,
+      // quick arrow presses overlap these fetches, and a late answer must not
+      // draw its roster under another section's label.
+      if (sectionId !== this.sectionId) return;
       if (res.status === 403) { this.phase = 'denied'; this.render(); return; }
       if (!res.ok) throw new Status(res.status);
       const body = (await res.json()) as { roster: RosterStudent[] };
+      if (sectionId !== this.sectionId) return;
       this.roster = body.roster ?? [];
       write(rosterCache(sectionId), this.roster);
       safeSet(LAST_SECTION_KEY, sectionId);
     } catch (err) {
+      if (sectionId !== this.sectionId) return;
       if (!this.roster.length) {
         this.phase = 'error';
         this.errText = humanError(navigator.onLine ? null : 'offline',
@@ -208,23 +244,52 @@ export class AttendanceScreen {
   private render(): void {
     const d = this.o.doc;
     const root = this.o.root;
-    root.textContent = '';
     this.view = null;
-
-    // §02 draws no page title on a phone; the h1 stays in the DOM (visually
-    // hidden below 1024px by .att-page-header) for the heading outline.
-    append(root, pageHeader(d, { title: 'হাজিরা', className: 'att-page-header' }));
 
     // The register: one full-bleed column of strips. The picker strip stays
     // above every state but "denied", so a teacher can always leave a section
     // that has no students or failed to load.
-    const reg = el(d, 'div', { className: 'att-register' });
-    if (this.sections.length && this.phase !== 'denied') {
-      append(reg, el(d, 'div', { className: 'att-pickers' },
-        this.sectionPicker(),
-        this.o.subjectBn ? this.subjectPicker() : null));
-      append(root, reg);
+    const showPickers = this.sections.length > 0 && this.phase !== 'denied';
+    const pickersFor = showPickers
+      ? JSON.stringify(this.sections.map((s) => [s.id, sectionLabel(s)]))
+      : '';
+    const keep = showPickers && pickersFor === this.pickersFor
+      && this.headerEl?.parentNode === root
+      && this.regEl?.parentNode === root
+      && this.pickersEl?.parentNode === this.regEl;
+
+    if (keep) {
+      // Same sections: keep the header and the picker strip — with the select
+      // the person may be using — and replace only what sits below them.
+      for (const n of [...root.childNodes]) {
+        if (n !== this.headerEl && n !== this.regEl) n.remove();
+      }
+      for (const n of [...this.regEl!.childNodes]) {
+        if (n !== this.pickersEl) n.remove();
+      }
+      if (this.sectionSelect && this.sectionId && this.sectionSelect.value !== this.sectionId) {
+        this.sectionSelect.value = this.sectionId;
+      }
+    } else {
+      root.textContent = '';
+      // §02 draws no page title on a phone; the h1 stays in the DOM (visually
+      // hidden below 1024px by .att-page-header) for the heading outline.
+      this.headerEl = pageHeader(d, { title: 'হাজিরা', className: 'att-page-header' });
+      append(root, this.headerEl);
+      this.regEl = el(d, 'div', { className: 'att-register' });
+      this.pickersEl = null;
+      this.sectionSelect = null;
+      this.pickersFor = '';
+      if (showPickers) {
+        this.pickersEl = el(d, 'div', { className: 'att-pickers' },
+          this.sectionPicker(),
+          this.o.subjectBn ? this.subjectPicker() : null);
+        append(this.regEl, this.pickersEl);
+        append(root, this.regEl);
+        this.pickersFor = pickersFor;
+      }
     }
+    const reg = this.regEl!;
 
     switch (this.phase) {
       case 'loading':
@@ -232,10 +297,10 @@ export class AttendanceScreen {
         return;
 
       case 'denied':
-        append(root, permissionState(d, {
-          message: 'এই সেকশনের হাজিরা নেওয়ার অনুমতি আপনার নেই।',
-          contact: 'প্রধান শিক্ষক',
-        }));
+        // The canonical refusal (lead decision 4). The screen's own sentence
+        // went through permissionState's contact line, which printed
+        // "প্রধান শিক্ষক-এর" instead of "প্রধান শিক্ষকের".
+        append(root, permissionState(d, { message: permissionMessageWithContact() }));
         return;
 
       case 'error':
@@ -287,9 +352,12 @@ export class AttendanceScreen {
       now: this.o.now,
       embedded: true,
       onConfirm: () => this.submit(),
+      // The register reached the server in a background flush: the sync line
+      // must not still count it as waiting under a footer that says sent.
+      onDeliveryChange: () => { void this.paintSync(); },
     });
 
-    this.paintStatus();
+    void this.paintStatus();
   }
 
   private sectionPicker(): HTMLElement {
@@ -299,12 +367,41 @@ export class AttendanceScreen {
       kind: 'select',
       value: this.sectionId ?? '',
       options: this.sections.map((x) => ({ value: x.id, label: sectionLabel(x) })),
-      onChange: (v) => {
-        this.sectionId = v;
-        void this.loadRoster(v);
-      },
+      onChange: (v) => this.chooseSection(v),
     });
+    this.sectionSelect = f.input as HTMLSelectElement;
     return f.root;
+  }
+
+  /**
+   * A section chosen in the picker. Switching loads another roster and builds
+   * a fresh register, so marks not yet submitted would be gone — silently,
+   * and on desktop from a single ArrowDown on the focused select. With such
+   * marks on screen the select goes back to the current section and the
+   * teacher is asked first; "বাতিল" keeps the register, "বাদ দিন" switches.
+   */
+  private chooseSection(v: string): void {
+    if (v === this.sectionId) return;
+    if (!this.hasUnsavedChanges()) { this.switchSection(v); return; }
+    if (this.sectionSelect && this.sectionId) this.sectionSelect.value = this.sectionId;
+    // One question at a time. A dialog closed from outside (a route change
+    // closes every overlay) calls neither answer, so ask the DOM, not the flag.
+    if (this.switchAsk?.el.isConnected) return;
+    this.switchAsk = confirmOverlay(this.o.doc, {
+      title: 'হাজিরা জমা দেওয়া হয়নি',
+      body: 'এই সেকশনের হাজিরা এখনো জমা দেওয়া হয়নি। সেকশন বদলালে চিহ্নগুলো হারিয়ে যাবে।',
+      confirmLabel: 'বাদ দিন',
+      danger: true,
+      // Focus returns to the select (the dialog's opener), which the switch
+      // keeps in place.
+      onConfirm: () => { this.switchAsk = null; this.switchSection(v); },
+      onCancel: () => { this.switchAsk = null; },
+    });
+  }
+
+  private switchSection(v: string): void {
+    this.sectionId = v;
+    void this.loadRoster(v);
   }
 
   /**
@@ -344,7 +441,7 @@ export class AttendanceScreen {
       const view = this.view;
       const result = await view.save();
       view.closeConfirm();
-      this.paintStatus();
+      void this.paintStatus();
       const message = navigator.onLine
         ? 'হাজিরা সংরক্ষিত — জমা হচ্ছে'
         : 'হাজিরা এই যন্ত্রে সংরক্ষিত — সংযোগ পেলে নিজেই জমা হবে';
@@ -374,8 +471,8 @@ export class AttendanceScreen {
    * the date in the confirm sheet, and how many are marked in the register's
    * own progress strip — which counts only students the teacher marked.
    */
-  private paintStatus(): void {
-    if (!this.statusHost) return;
+  private paintStatus(): Promise<void> {
+    if (!this.statusHost) return Promise.resolve();
     const d = this.o.doc;
     this.statusHost.textContent = '';
 
@@ -386,7 +483,10 @@ export class AttendanceScreen {
           text: 'এখন অফলাইন — জমা দিলে এই যন্ত্রে থাকবে, সংযোগ পেলে নিজেই পাঠানো হবে।',
         })));
     }
-    void this.paintSync();
+    // The register's own "saved" footer says whether it has left the device;
+    // it re-reads the queue whenever the sync line does.
+    void this.view?.refreshSaved();
+    return this.paintSync();
   }
 
   /**
@@ -415,14 +515,32 @@ export class AttendanceScreen {
       className: 'att-sync-text',
       text: s.failed
         ? 'কিছু হাজিরা সার্ভারে পৌঁছায়নি। তথ্য এই যন্ত্রে নিরাপদ আছে।'
-        : 'হাজিরা এই যন্ত্রে জমা আছে, পাঠানো হচ্ছে।',
+        // Offline nothing is being sent, and the line said it was.
+        : navigator.onLine
+          ? 'হাজিরা এই যন্ত্রে জমা আছে, পাঠানো হচ্ছে।'
+          : 'হাজিরা এই যন্ত্রে জমা আছে, সংযোগ পেলে পাঠানো হবে।',
     }));
     append(line, button(d, {
       label: 'আবার পাঠান', variant: 'secondary', size: 'sm', glyph: 'refresh',
       onClick: async () => {
         announce(d, 'আবার পাঠানোর চেষ্টা হচ্ছে');
         try { await this.o.outbox.flush(); } catch { /* stays queued */ }
-        this.paintStatus();
+        if (!navigator.onLine) {
+          // Offline the line comes back reading exactly as before, so the
+          // press looked like it did nothing. Say what happened.
+          toast(d, {
+            message: 'ইন্টারনেট নেই — হাজিরা এই যন্ত্রে নিরাপদ আছে, সংযোগ পেলে নিজেই পাঠানো হবে।',
+            tone: 'info',
+          });
+        }
+        await this.paintStatus();
+        // The queue emptied, so this line and its button are gone and focus
+        // went with them. The register's saved line now says it arrived.
+        // (While the line is still there the shell's focus keeper puts focus
+        // back on its new "আবার পাঠান".)
+        if (focusIsLost(d) && !this.statusHost?.querySelector('.att-sync-line')) {
+          this.view?.focusSaved();
+        }
       },
     }));
     append(host, line);

@@ -5778,3 +5778,150 @@ input[type="radio"]:focus-visible { outline: 2px solid var(--accent); outline-of
 .session-ended .session-ended-title { margin: 0 0 10px; font-size: var(--text-h2); line-height: var(--lh-h2); font-weight: 700; letter-spacing: normal; }
 .session-ended .session-ended-text { margin: 0 0 var(--space-6); font-size: var(--text-body); line-height: 1.65; color: var(--ink-2); }
 .session-ended .session-ended-queue { margin: 0 0 22px; }
+
+/* ═══ [5] lead — UX sweep fixes: shell, money figures, marks, profile tabs, attendance end ═══
+   Fixes from the real-browser sweep (confirmed findings 16, 59, 48, 25, 33,
+   7, 36, 50). Each rule is scoped to the defect it closes and says why. Later
+   in the sheet on purpose: same-specificity rules here replace earlier ones
+   without rewriting those sections. */
+
+/* 16, 59 — focus must never park behind the sticky topbar or the fixed tab
+   bar (WCAG 2.4.11). Chrome scrolls a newly focused control only to the
+   viewport edge; scroll-padding moves that edge inside the bars. Values are
+   the bar heights (topbar 56 / 64 at desktop, tab bar 58 + its 2px rule) plus
+   room for the 2px focus ring. The attendance register's own
+   `:root:has(.att-register…)` rules are more specific and keep winning. */
+@media (max-width:1023.98px) {
+:root { scroll-padding-top: 64px; scroll-padding-bottom: calc(68px + env(safe-area-inset-bottom, 0px)); }
+}
+@media (min-width:1024px) {
+:root { scroll-padding-top: 72px; scroll-padding-bottom: 8px; }
+}
+/* the marks sheet's save bar is sticky above the tab bar below 1024 (98–117px
+   tall), so a focused mark box must clear it too */
+@media (max-width:1023.98px) {
+:root:has(.marks-savebar) { scroll-padding-bottom: calc(68px + env(safe-area-inset-bottom, 0px) + 128px); }
+}
+
+/* 48 — the entrance animation must not leave a transform behind. With fill
+   mode `both` the finished `rise` keeps `transform:none` computed as an
+   identity matrix, which makes every screen root the containing block for
+   its position:fixed children (the attendance undo toast landed at the card's
+   foot, below the fold). `backwards` still starts from the `from` frame and
+   lets go when the animation ends. */
+.shell-view > * { animation-fill-mode: backwards; }
+
+/* 25, 33 (and minor 35) — a money figure is read as one number, so it stays
+   on one line. formatBdt's "৳ 12,50,000.00" does not fit a half-width phone
+   stat cell at 26px; the band's figures step down with the viewport instead
+   of breaking (16px at 320, 18.75px at 375, the sheet's 26px from 520px up).
+   The earlier `overflow-wrap:anywhere` on these bands allowed "30,000.0 / 0". */
+.ph-band .ui-stat-value,
+.ledger-stats .ui-stat-value,
+.ward-stats .ui-stat-value { white-space: nowrap; overflow-wrap: normal; font-size: clamp(16px, 5vw, 26px); }
+/* the ledger's mismatch sentence: a figure wrapped in .ledger-fig keeps its ৳ */
+.ledger-mismatch-text .ledger-fig { white-space: nowrap; }
+
+/* 7 — marks sheet on phones. The 560px min-width handed all spare width to
+   the frozen name column (206px of a 278px scroller), leaving no mark box in
+   view. Below 1024 the table shrinks to content, the name column settles at
+   its 112px minimum (long words break rather than widen it), and the
+   scroller's scroll-padding keeps a focused box clear of the frozen 48px roll
+   + 112px name columns when Tab / the keyboard's "next" moves along a row. */
+@media (max-width:1023.98px) {
+.marks-table { min-width: 0; }
+.marks-table .marks-col-name,
+.marks-table .marks-name { overflow-wrap: anywhere; }
+.marks-sheet > .ui-table-scroll { scroll-padding-left: 164px; }
+}
+
+/* 36 — the student profile's six tabs are wider than a phone card, and a
+   scrolled strip hid ফি and নথি with no hint. Below 1024 the tabs lay out in
+   as many equal columns as fit (3 + 3 on a phone, one row on a tablet), so no
+   tab is ever off-screen. */
+@media (max-width:1023.98px) {
+.ui-tabs.stu-tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); overflow-x: visible; }
+.stu-tabs .ui-tab { justify-content: center; padding: 0 var(--space-2); white-space: normal; text-align: center; }
+}
+
+/* 50 — at the end of the register the last rows must be able to scroll above
+   the undo toast, which floats ~80px above the sticky footer below 1024.
+   Permanent (not only while the toast shows) so the list never jumps when
+   the toast hides. 84px matches the toast allowance in the scroll-padding
+   rules above. */
+@media (max-width:1023.98px) {
+.att-list { padding-bottom: 84px; }
+}
+
+/* minor 89 — the account menu clips overflow, so the item's outside ring was
+   cut to a line that read as a divider. Draw it inside. */
+.shell-menu-item:focus-visible { outline-offset: -2px; }
+
+/* minor 16/80 — আরও row descriptions carry the warning half of the sentence
+   ("… প্রকাশের পর নম্বর অপরিবর্তনীয়"); an ellipsis cut it off on phones. */
+.more-list .ui-list-sub { overflow: visible; text-overflow: clip; white-space: normal; }
+
+/* ═══ [4] Ata Ekta — ux fixes from the browser sweep ═══════════════════════════════════════════
+   Rules the redesign's units needed that the one stylesheet is silent on.
+   Merged by script: a declaration the ata-ekta section already sets for the
+   same selector was refused (the sheet wins), as was any raw hex.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ux-fix:infra-js (finding 60, CSS half) is not repeated here: the [5] lead
+   section above already sets :root scroll-padding-top to 64px below 1024 and
+   72px from 1024 up, which clears the 56/64px topbar with room for the ring. */
+
+/* ── ux-fix:practice ── */
+.prac-input-error+.prac-actions { margin-top: var(--space-3); }
+.prac-input.is-error,
+.prac-input.is-error:focus { border-color: var(--danger); padding: 0 11px; }
+
+/* ── ux-fix:results ── */
+.result-child-switch { margin-bottom: var(--space-3); }
+.result-child-id { margin: 0 0 var(--space-3); }
+
+/* ── ux-fix:invoices ── */
+.inv-table .ui-table .inv-amt-word { display: none; }
+
+/* ── ux-fix:assignments ── */
+.sub-grade-error { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-2); }
+.sub-grade-error>.ui-field-error { margin: 0; flex: 1 1 12em; min-width: 0; }
+.sub-grade-saved { margin: var(--space-3) 0 0; }
+
+/* ── ux-fix:documents ── */
+.doc-steps .doc-child { margin-bottom: var(--space-4); }
+.doc-actions .doc-invalid { flex-basis: 100%; margin: 0; }
+
+/* ── ux-fix:guardian-fees ── */
+.fees-sheet.is-family>.fees-kids { border: 0; border-radius: 0; border-bottom: 1px solid var(--line); }
+.fees-sheet.is-family>.fees-kids .ui-list-hit { padding: 14px; }
+.fees-sheet.is-family>.fees-kids .ui-list-title { font-size: var(--text-body); font-weight: 600; }
+.fees-sheet.is-family>.fees-kids .fees-kid-owed { font-size: 16px; font-weight: 700; white-space: nowrap; }
+.fees-sheet.is-family>.fees-kid-head { padding: 10px 14px; font-size: var(--text-body); line-height: var(--lh-small); font-weight: 600; color: var(--ink); background: var(--surface); border-bottom: 1px solid var(--line); }
+.fees-sheet.is-family>.ui-data+.fees-kid-head { border-top: 1px solid var(--line); }
+
+/* ── ux-fix:students ── */
+@media all {
+.stu-money { white-space: nowrap; }
+}
+@media all {
+.stu-pair { display: inline-block; }
+}
+
+/* ── ux-fix:export ── */
+.export-files .export-result { padding: 0 14px var(--space-3) calc(14px + 19px + var(--space-3)); }
+.export-files .export-result>.ui-state { padding: var(--space-3) var(--space-4); }
+.export-files .export-result>.ui-success-note { margin: 0; }
+
+/* ── ux-fix:attendance ── */
+.att-footer[data-state="saved"] .att-saved-text { margin: 0; min-height: 46px; display: flex; flex-direction: column; justify-content: center; font-size: var(--text-small); line-height: var(--lh-small); color: var(--ink); }
+.att-saved-text .att-saved-head { font-weight: 700; }
+.att-saved-text .att-saved-tally { color: var(--ink-2); }
+.att-footer[data-state="saved"]:has(.att-saved-text[data-delivery="sent"]) { border-top-color: var(--ok); }
+.att-footer[data-state="saved"]:has(.att-saved-text[data-delivery="failed"]) { border-top-color: var(--danger); }
+@media (max-width:1023.98px) {
+:root:has(.att-footer[data-state]) .ui-toast-host { bottom: calc(60px + env(safe-area-inset-bottom, 0px) + 80px + var(--space-2)); }
+}
+@media (max-width:1023.98px) {
+:root:has(.att-footer[data-state="blocked"]) .ui-toast-host { bottom: calc(60px + env(safe-area-inset-bottom, 0px) + 150px + var(--space-2)); }
+}

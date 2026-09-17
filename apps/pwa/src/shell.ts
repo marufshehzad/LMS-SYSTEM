@@ -36,7 +36,8 @@ import { iconSvg } from './icon.ts';
 import { formatCount } from '../../../packages/ui-core/src/format.ts';
 import { navFor, crumbFor, type RoleNav } from './ui/nav.ts';
 import { roleLabel } from './ui/roles.ts';
-import { append, numClass, numText } from './ui/dom.ts';
+import { append, numClass, numText, keepFocusWithin } from './ui/dom.ts';
+import { closeAllOverlays, confirmOverlay, type OverlayHandle } from './ui/overlay.ts';
 
 export interface ShellRoute {
   path: string;       // hash fragment without '#/', e.g. 'attendance'
@@ -59,6 +60,24 @@ export interface ShellRoute {
    * P9-5. A guard nobody asks is the same defect as a lock nobody can set.
    */
   guardLeave?: (resume: () => void) => boolean;
+  /**
+   * The simple form of `guardLeave`, for a route that only needs to say
+   * whether leaving now would lose work. When it returns true the shell holds
+   * the navigation and asks with `confirmOverlay` (Cancel keeps the person
+   * where they are; the danger button lets the navigation through). Ignored
+   * when the route also has `guardLeave`, which stays in full control.
+   */
+  hasUnsavedChanges?: () => boolean;
+  /** The words of that question. Each part falls back to a generic sentence. */
+  unsavedPrompt?: { title?: string; body?: string; confirmLabel?: string };
+  /**
+   * This screen keeps working offline: what it saves goes to the outbox and
+   * is sent when the connection returns (attendance, marks, assignments,
+   * learn, practice). Only these routes get the offline banner's promise
+   * that work is being kept on the device; every other route is told the
+   * truth, that saving needs a connection.
+   */
+  queuesOffline?: boolean;
   /**
    * Routable but not on the tab bar — reached from the আরও (More) menu, the
    * desktop sidebar or a deep link. Keeps the bar at 5 tabs while the app has
@@ -121,6 +140,15 @@ export class Shell {
   private inboxCounts: { row: HTMLElement; count: HTMLElement; labelBn: string }[] = [];
   /** The queued-work count inside the offline banner (§7 offline state). */
   private pendingEl: HTMLElement | null = null;
+  /** The offline banner's sentence, which depends on the route (queuesOffline). */
+  private offlineTextEl: HTMLElement | null = null;
+  /** keepFocusWithin on the view, re-armed for each route. */
+  private stopFocusKeeper: (() => void) | null = null;
+  /** The shell's own unsaved-work question, while it is on screen. */
+  private unsavedAsk: OverlayHandle | null = null;
+  /** Page nodes hidden from readers while the phone account sheet is open. */
+  private sheetHidden: Array<[Element, string | null]> = [];
+  private teardowns: Array<() => void> = [];
   private navEls = new Map<string, HTMLElement[]>();
   private crumbEl: HTMLElement | null = null;
   private profileMenu: HTMLElement | null = null;
@@ -242,9 +270,23 @@ export class Shell {
     this.setText(el, n === 0 ? '' : `${formatCount(n, 'bn')}টি অপেক্ষমাণ`);
   }
 
+  /**
+   * Run `fn` when the shell is destroyed: for something the caller wired for
+   * the shell's lifetime (the outbox's automatic flush, a service-worker
+   * listener), so a logout does not leave it running for the next person.
+   */
+  onDestroy(fn: () => void): void {
+    this.teardowns.push(fn);
+  }
+
   /** Call when the shell itself is being torn down (e.g. on logout). */
   destroy(): void {
     removeEventListener('hashchange', this.onHashChange);
+    this.stopFocusKeeper?.();
+    this.stopFocusKeeper = null;
+    for (const fn of this.teardowns.splice(0)) {
+      try { fn(); } catch { /* one failed teardown must not stop the next */ }
+    }
     if (this.onConnectivity) {
       removeEventListener('online', this.onConnectivity);
       removeEventListener('offline', this.onConnectivity);
@@ -323,7 +365,7 @@ export class Shell {
     skip.textContent = 'মূল অংশে যান';
     skip.addEventListener('click', (e) => {
       e.preventDefault();
-      this.viewEl.focus();
+      this.skipToMain();
     });
 
     this.viewEl = d.createElement('main');
@@ -351,6 +393,28 @@ export class Shell {
 
     this.applyRail();
     this.wireDismissal();
+  }
+
+  /**
+   * The skip link's target, brought into view as well as focused.
+   *
+   * A plain `focus()` lets the browser scroll main's top edge to y=0, under
+   * the sticky topbar, so the page h1 and the next Tab stop are hidden behind
+   * it. Focus without scrolling, then scroll so main starts just below the
+   * topbar, and only when it is not already on screen there.
+   */
+  private skipToMain(): void {
+    const view = this.viewEl;
+    view.focus({ preventScroll: true });
+    try {
+      const bar = this.shellEl.querySelector('.shell-topbar');
+      const offset = bar ? bar.getBoundingClientRect().height : 0;
+      const top = view.getBoundingClientRect().top;
+      const viewport = typeof innerHeight === 'number' ? innerHeight : 0;
+      if (top < offset || (viewport > 0 && top > viewport - offset)) {
+        scrollTo({ top: Math.max(0, top + (scrollY || 0) - offset) });
+      }
+    } catch { /* no layout (jsdom): focus alone */ }
   }
 
   /* ── desktop sidebar ────────────────────────────────────────────────── */
@@ -659,7 +723,16 @@ export class Shell {
     const d = this.o.doc;
     const menu = d.createElement('div');
     menu.className = 'shell-menu';
-    menu.setAttribute('role', 'menu');
+    // Below 1024px this is a bottom sheet over a dimmed page: a modal dialog,
+    // not a dropdown menu. Its focus is trapped (onDocKey) and the page
+    // behind it is hidden from readers, as every overlay does.
+    const sheet = this.isSheet();
+    if (sheet) {
+      menu.setAttribute('role', 'dialog');
+      menu.setAttribute('aria-modal', 'true');
+    } else {
+      menu.setAttribute('role', 'menu');
+    }
     menu.setAttribute('aria-label', 'অ্যাকাউন্ট');
 
     const head = d.createElement('div');
@@ -683,7 +756,7 @@ export class Shell {
     const logout = d.createElement('button');
     logout.type = 'button';
     logout.className = 'shell-menu-item shell-logout';
-    logout.setAttribute('role', 'menuitem');
+    if (!sheet) logout.setAttribute('role', 'menuitem');
     const lg = d.createElement('span');
     lg.setAttribute('aria-hidden', 'true');
     lg.className = 'shell-menu-glyph';
@@ -697,18 +770,55 @@ export class Shell {
     anchor.setAttribute('aria-expanded', 'true');
     anchor.after(menu);
     this.profileMenu = menu;
+    if (sheet) this.hidePageBehind(menu);
     // Focus the first control so the menu is usable from the keyboard the
     // instant it opens; Escape and an outside click both close it.
     menu.querySelector<HTMLElement>('button')?.focus();
   }
 
-  private closeProfile(): void {
-    if (!this.profileMenu) return;
-    const anchor = this.profileMenu.previousElementSibling as HTMLElement | null;
-    this.profileMenu.remove();
+  /**
+   * Close the account menu.
+   *
+   * Focus goes back to the menu's button only when it would otherwise be lost
+   * (it was inside the menu: Escape, লগ আউট; or on nothing) or when the menu
+   * was the phone's modal sheet. On the desktop dropdown a click into a
+   * search box has already put focus there by the time this runs; pulling it
+   * back to the button made the next letters vanish and turned a Space into
+   * "open the menu again, on লগ আউট".
+   */
+  private closeProfile(restoreFocus?: boolean): void {
+    const menu = this.profileMenu;
+    if (!menu) return;
+    const anchor = menu.previousElementSibling as HTMLElement | null;
+    const d = this.o.doc;
+    const a = d.activeElement;
+    const restore = restoreFocus ?? (this.sheetHidden.length > 0 || this.isSheet()
+      || !a || a === d.body || a === d.documentElement || menu.contains(a));
+    menu.remove();
     this.profileMenu = null;
+    this.showPageBehind();
     for (const b of this.profileBtns) b.setAttribute('aria-expanded', 'false');
-    anchor?.focus();
+    if (restore) anchor?.focus();
+  }
+
+  /** aria-hidden on everything beside the sheet's ancestor chain, recorded. */
+  private hidePageBehind(menu: HTMLElement): void {
+    const d = this.o.doc;
+    this.showPageBehind();
+    for (let n: Element = menu; n !== d.body && n.parentElement; n = n.parentElement) {
+      for (const sib of Array.from(n.parentElement.children)) {
+        if (sib === n || sib.tagName === 'SCRIPT') continue;
+        this.sheetHidden.push([sib, sib.getAttribute('aria-hidden')]);
+        sib.setAttribute('aria-hidden', 'true');
+      }
+    }
+  }
+
+  private showPageBehind(): void {
+    for (const [node, prev] of this.sheetHidden.splice(0)) {
+      if (prev === null) node.removeAttribute('aria-hidden');
+      else node.setAttribute('aria-hidden', prev);
+    }
   }
 
   /**
@@ -753,6 +863,8 @@ export class Shell {
       const t = e.target as Node;
       if (this.profileMenu.contains(t)) return;
       if (this.profileBtns.some((b) => b.contains(t))) return;
+      // A keyboard cannot reach a control outside the sheet any more (Tab is
+      // trapped in onDocKey), so what lands here is a tap on the dim area.
       if (this.isSheet()) {
         e.preventDefault();
         e.stopPropagation();
@@ -760,10 +872,35 @@ export class Shell {
       this.closeProfile();
     };
     this.onDocKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && this.profileMenu) {
+      const menu = this.profileMenu;
+      if (!menu) return;
+      if (e.key === 'Escape') {
         e.preventDefault();
-        this.closeProfile();
+        this.closeProfile(true);
+        return;
       }
+      if (e.key !== 'Tab') return;
+      if (this.sheetHidden.length > 0 || this.isSheet()) {
+        // The phone sheet is modal: Tab and Shift+Tab cycle inside it.
+        const items = [...menu.querySelectorAll<HTMLElement>('button:not([disabled]), a[href]')];
+        e.preventDefault();
+        if (!items.length) return;
+        const i = items.indexOf(d.activeElement as HTMLElement);
+        const next = i < 0 ? 0
+          : (i + (e.shiftKey ? -1 : 1) + items.length) % items.length;
+        items[next].focus();
+        return;
+      }
+      // The desktop dropdown: Tab leaves it, and it closes behind the person
+      // without pulling focus back (the WAI-ARIA menu button pattern). When
+      // focus is inside the menu it is first put on the menu's button, so a
+      // Tab carries on from there rather than from a removed node; Shift+Tab
+      // lands on that button itself.
+      if (menu.contains(d.activeElement)) {
+        (menu.previousElementSibling as HTMLElement | null)?.focus();
+        if (e.shiftKey) e.preventDefault();
+      }
+      this.closeProfile(false);
     };
     d.addEventListener('click', this.onDocPointer, true);
     d.addEventListener('keydown', this.onDocKey);
@@ -862,8 +999,11 @@ export class Shell {
     icon.setAttribute('aria-hidden', 'true');
     icon.innerHTML = iconSvg('wifi-off');
     const text = d.createElement('span');
-    // 01 Shell §খ, verbatim.
-    text.textContent = 'ইন্টারনেট নেই — কাজ চালিয়ে যান, সব এই যন্ত্রে জমা থাকছে';
+    // 01 Shell §খ's sentence, but only where it is true: set per route by
+    // paintOfflineText.
+    text.className = 'offline-text';
+    this.offlineTextEl = text;
+    this.paintOfflineText(null);
     // §7: the offline state names how much is waiting. Hidden until the
     // outbox's owner reports a count through `setPending`.
     const pending = d.createElement('span');
@@ -878,6 +1018,45 @@ export class Shell {
     return banner;
   }
 
+  /**
+   * The banner's promise depends on the screen. 01 Shell §খ's "keep working,
+   * everything is kept on this device" is true only where saving goes to the
+   * outbox; on finance, notices, settings and the rest a save simply fails
+   * offline, and inviting the accountant to keep entering money work there
+   * was a false promise.
+   */
+  private paintOfflineText(route: ShellRoute | null): void {
+    const text = this.offlineTextEl;
+    if (!text) return;
+    // A route table that marks no route at all has not been told about the
+    // flag (a test, a preview): it keeps the sentence it always had, the same
+    // way a shell with no `role` keeps route order for its tabs.
+    const told = this.o.routes.some((r) => r.queuesOffline !== undefined);
+    text.textContent = !told || route?.queuesOffline
+      ? 'ইন্টারনেট নেই — কাজ চালিয়ে যান, সব এই যন্ত্রে জমা থাকছে'
+      : 'ইন্টারনেট নেই — এই পাতার কাজ সংরক্ষণ করতে সংযোগ লাগবে';
+  }
+
+  /**
+   * The shell's own leave question, for a route that declares
+   * `hasUnsavedChanges`. Returns true when the navigation is held.
+   */
+  private askBeforeLeaving(leaving: ShellRoute, resume: () => void): boolean {
+    // Already asking: a second back press waits for the answer to the first.
+    if (this.unsavedAsk) return true;
+    if (!leaving.hasUnsavedChanges?.()) return false;
+    const p = leaving.unsavedPrompt ?? {};
+    this.unsavedAsk = confirmOverlay(this.o.doc, {
+      title: p.title ?? 'জমা দেওয়া হয়নি',
+      body: p.body ?? 'এই পাতার কাজ এখনো জমা দেওয়া হয়নি। এখন চলে গেলে সেগুলো হারিয়ে যাবে।',
+      confirmLabel: p.confirmLabel ?? 'বাদ দিন',
+      danger: true,
+      onConfirm: () => { this.unsavedAsk = null; resume(); },
+      onCancel: () => { this.unsavedAsk = null; },
+    });
+    return true;
+  }
+
   /* ── routing ────────────────────────────────────────────────────────── */
 
   private async renderRoute(): Promise<void> {
@@ -889,18 +1068,29 @@ export class Shell {
     // somewhere they are not, and the back button lands somewhere neither of
     // us expects.
     const leaving = this.currentRoute;
-    if (!this.bypassGuard && leaving?.guardLeave) {
-      const held = leaving.guardLeave(() => {
+    if (!this.bypassGuard && leaving && (leaving.guardLeave || leaving.hasUnsavedChanges)) {
+      const resume = () => {
         this.bypassGuard = true;
         location.hash = `#/${path}`;
-      });
+      };
+      const held = leaving.guardLeave
+        ? leaving.guardLeave(resume)
+        : this.askBeforeLeaving(leaving, resume);
       if (held) { location.hash = `#/${leaving.path}`; return; }
     }
     this.bypassGuard = false;
 
     this.closeProfile();
+    // An overlay lives on <body>, outside every route: without this a sheet
+    // opened on one page stays over the next after Android back. After the
+    // guard, so a leave question survives the hash being put back.
+    closeAllOverlays();
+    this.unsavedAsk = null;
+    this.stopFocusKeeper?.();
+    this.stopFocusKeeper = null;
     this.currentRoute?.unmount?.();
     this.currentRoute = this.route(path) ?? null;
+    this.paintOfflineText(this.currentRoute);
 
     for (const [p, els] of this.navEls) {
       const active = p === path;
@@ -912,6 +1102,9 @@ export class Shell {
     this.paintCrumb(path);
 
     this.viewEl.textContent = '';
+    // Armed after the old page is gone and before the new one mounts, so an
+    // identity from the previous page is never matched against this one.
+    this.stopFocusKeeper = keepFocusWithin(this.viewEl);
     if (!this.currentRoute) return;
     await this.currentRoute.mount(this.viewEl);
 
@@ -957,6 +1150,96 @@ export class Shell {
       crumb.append(el);
     });
   }
+}
+
+/**
+ * Send queued offline work by itself when there is a connection to send it on.
+ *
+ * The toasts promise "সংযোগ পেলে নিজেই জমা হবে", and before this nothing
+ * kept the promise: the only automatic trigger was a service-worker message
+ * for a Background Sync tag nobody registered, so a register saved in a dead
+ * zone waited for the teacher's next save. The outbox is flushed:
+ *   - once now (a queue left from an earlier session, drained at boot);
+ *   - on `online`;
+ *   - when the app comes back to the foreground (`visibilitychange` →
+ *     visible), which is when a phone that was pocketed offline is next used;
+ *   - and, while anything is still waiting and the device says it is online,
+ *     again after `retryMs`. `online` can fire before the network truly works
+ *     (a captive portal, a 2G link coming up), that flush fails and backs
+ *     off, and without a retry nothing would try again. The engine only
+ *     claims ops whose backoff has passed, so the retry costs nothing when
+ *     there is nothing due. One timer at a time.
+ *
+ * `progress` is to be called with the engine's state on every change (its
+ * `onProgress`): it arms the retry and asks the service worker for a
+ * Background Sync, so Chrome can also send while the app is closed.
+ * The flush function never throws (SyncEngine.flush), but a rejection is
+ * swallowed here anyway: this runs from event listeners.
+ */
+export interface AutoFlush {
+  progress(st: { pending: number; inflight?: number }): void;
+  /** Flush now if online. Also what the listeners call. */
+  kick(): void;
+  stop(): void;
+}
+
+export function autoFlush(o: {
+  flush: () => Promise<unknown>;
+  state: () => Promise<{ pending: number; inflight?: number }>;
+  doc?: Document;
+  retryMs?: number;
+  /** Background Sync registration; defaults to the service worker's. */
+  registerSync?: () => void;
+}): AutoFlush {
+  const retryMs = o.retryMs ?? 30_000;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let stopped = false;
+  let syncAsked = false;
+
+  const online = () => typeof navigator === 'undefined' || navigator.onLine !== false;
+
+  const registerSync = o.registerSync ?? (() => {
+    try {
+      void navigator.serviceWorker?.ready
+        .then((r) => (r as unknown as { sync?: { register(tag: string): Promise<void> } })
+          .sync?.register('outbox-flush'))
+        .catch(() => { /* no Background Sync: the listeners here still send */ });
+    } catch { /* no service worker */ }
+  });
+
+  const api: AutoFlush = {
+    kick() {
+      if (stopped || !online()) return;
+      void o.flush()
+        .catch(() => undefined)
+        .then(() => (stopped ? null : o.state()))
+        .then((st) => { if (st) api.progress(st); })
+        .catch(() => { /* no store: nothing to retry */ });
+    },
+    progress(st) {
+      if (stopped) return;
+      const waiting = st.pending > 0;
+      if (!waiting) { syncAsked = false; return; }
+      if (!syncAsked) { syncAsked = true; registerSync(); }
+      if (timer === null && online()) {
+        timer = setTimeout(() => { timer = null; api.kick(); }, retryMs);
+      }
+    },
+    stop() {
+      stopped = true;
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      removeEventListener('online', onOnline);
+      o.doc?.removeEventListener('visibilitychange', onVisible);
+    },
+  };
+
+  const onOnline = () => api.kick();
+  const onVisible = () => { if (o.doc?.visibilityState === 'visible') api.kick(); };
+  addEventListener('online', onOnline);
+  o.doc?.addEventListener('visibilitychange', onVisible);
+  api.kick();
+  return api;
 }
 
 /**

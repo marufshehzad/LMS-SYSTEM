@@ -200,6 +200,16 @@ export class SubstituteView {
       subtitle: 'অনুপস্থিতির দিনে ফাঁকা ও বিষয়-মিল শিক্ষক খুঁজুন',
     }));
 
+    // A refusal is the whole page. A date control above it would only fetch
+    // the same refusal for another day: the server refuses the reader, not
+    // the date.
+    if (this.noticeKind === 'loadDenied') {
+      root.append(permissionState(d, {
+        message: permissionMessage('রুটিন'), contact: 'প্রধান শিক্ষক',
+      }));
+      return;
+    }
+
     // A labelled field. This was a bare `<input type=date>` with no name of
     // any kind, on the screen whose entire question is which day. field()
     // sets a date control in the numeral face (`n is-num`).
@@ -223,14 +233,9 @@ export class SubstituteView {
       return;
     }
 
-    // Denied and failed are states of their own. A failed load does not
-    // know whether the day has classes, so it never also says it has none.
-    if (this.noticeKind === 'loadDenied') {
-      root.append(permissionState(d, {
-        message: permissionMessage('রুটিন'), contact: 'প্রধান শিক্ষক',
-      }));
-      return;
-    }
+    // Failed is a state of its own (denied returned above). A failed load
+    // does not know whether the day has classes, so it never also says it
+    // has none. It keeps the date control: another day may well load.
     if (this.noticeKind === 'loadError') {
       root.append(errorState(d, this.notice, () => { void this.loadSlots(); }));
       return;
@@ -313,8 +318,10 @@ export class SubstituteView {
       append(body, this.candidateList(d));
     }
 
-    if (this.drawer) setOverlayBody(this.drawer, body);
-    else {
+    if (this.drawer) {
+      setOverlayBody(this.drawer, body);
+      this.keepFocusInDrawer(this.drawer);
+    } else {
       this.drawer = openDrawer(d, {
         // The period as the design's block names it: time · section · subject.
         title: [formatTime(sl.startsAt.slice(0, 5), 'bn'), sl.sectionLabel, sl.subjectBn]
@@ -330,6 +337,28 @@ export class SubstituteView {
         },
       });
     }
+  }
+
+  /**
+   * Focus stays inside the open drawer when its body is swapped.
+   *
+   * Assigning, or retrying a failed search, replaces the body while the
+   * drawer stays open. That removes the control that had focus (নির্ধারণ,
+   * আবার চেষ্টা করুন), and the browser drops focus to <body>. That is
+   * outside the dialog. The overlay's Tab trap only wraps at the dialog's
+   * first and last items, so from <body> the next Tab walked into the page
+   * behind the scrim, which is aria-hidden. The shell's focus keeper does not
+   * step in while an overlay is open, so the screen does it here: the dialog's
+   * first control, as the overlay picks on open. That is ✕, where the trap
+   * holds in both directions.
+   */
+  private keepFocusInDrawer(drawer: OverlayHandle): void {
+    const d = this.o.doc;
+    if (drawer.el.contains(d.activeElement)) return;
+    const first = drawer.el.querySelector<HTMLElement>(
+      'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
+    );
+    (first ?? drawer.el).focus();
   }
 
   /**

@@ -49,10 +49,11 @@ import {
   onBrandFill,
 } from '../../../packages/ui-core/src/branding.ts';
 import { brandedLetterhead } from '../../../packages/ui-core/src/branded-doc.ts';
+import { toLatinDigits } from '../../../packages/ui-core/src/format.ts';
 import { applyBranding, cacheBranding, cachedBranding } from './branding.ts';
 import {
   serverMessage, pageHeader, button, setBusy, field, setFieldError, clearFieldError,
-  el, append, icon, uid, numText, hasDigit, successNote, skeleton,
+  el, append, icon, uid, numText, hasDigit, successNote, skeleton, focusIsLost,
   type Field,
 } from './ui/index.ts';
 import { bnNum } from './view-states.ts';
@@ -88,7 +89,9 @@ const HEX6 = /^#[0-9a-f]{6}$/i;
 
 const FIELD_LABELS_BN: Record<string, string> = {
   nameBn: 'প্রতিষ্ঠানের নাম',
-  nameEn: 'Institution name (English)',
+  // Bangla, like every other label on this screen (the users form says
+  // "নাম (ইংরেজি)"). An English label with no lang was read by a Bangla voice.
+  nameEn: 'প্রতিষ্ঠানের নাম (ইংরেজি)',
   shortName: 'সংক্ষিপ্ত নাম',
   logoUrl: 'লোগো',
   faviconUrl: 'ফেভিকন',
@@ -129,6 +132,66 @@ const FIELD_HINTS_BN: Partial<Record<string, string>> = {
 };
 
 const READ_ONLY_SUB = 'আপনি শুধু দেখতে পারবেন — পরিবর্তনের অনুমতি প্রধান শিক্ষক বা আইটি প্রশাসকের।';
+
+const ASSET_FIELDS: ReadonlySet<string> = new Set<AssetField>(
+  ['logoUrl', 'faviconUrl', 'watermarkUrl', 'signatureUrl'],
+);
+const BANGLA = /[ঀ-৿]/;
+
+/** An own property only: the key can come from a server body ("constructor"). */
+function own<T>(table: Readonly<Record<string, T>>, key: string): T | undefined {
+  return Object.prototype.hasOwnProperty.call(table, key) ? table[key] : undefined;
+}
+
+/**
+ * A BrandingError, said in Bangla beside the field it belongs to.
+ *
+ * ui-core writes its messages in English on purpose: they are also the API's
+ * error text (ops-svc sends `err.message` with a 400), and an API message is
+ * written for a log. This screen showed that text unchanged, so a head teacher
+ * who typed a website without https:// read "website must be a full https://
+ * address" — the field key and the fix both in English. The sentence is chosen
+ * here by FIELD, which ui-core and the server both report reliably. A length
+ * error is told apart from a format error on the same field by measuring the
+ * value that was checked the way ui-core's text() does; the English wording is
+ * only a second signal, so rewording it upstream cannot break this. A message
+ * that is already Bangla (this screen's own "ছবিটি খুব বড়") is kept as it is.
+ */
+export function brandingErrorBn(fieldKey: string, message: string, value?: unknown): string {
+  if (BANGLA.test(message)) return message;
+  const label = own(FIELD_LABELS_BN, fieldKey);
+  const limit = own(LIMITS as Readonly<Record<string, number>>, fieldKey);
+  const measured = typeof value === 'string'
+    ? (ASSET_FIELDS.has(fieldKey) ? value : value.replace(/[\u0000-\u001f\u007f]/g, '')).trim().length
+    : 0;
+  const tooLong = limit !== undefined
+    && (measured > limit || /characters or fewer|exceeds/i.test(message));
+
+  if (label && ASSET_FIELDS.has(fieldKey)) {
+    return tooLong
+      ? `${label} ছবিটি খুব বড় — ছোট ছবি ব্যবহার করুন।`
+      : `${label} হিসেবে PNG, JPEG বা WebP ছবি দিন।`;
+  }
+  if (label && tooLong) {
+    return `${label} সর্বোচ্চ ${bnNum(limit)} অক্ষরের হতে পারে।`;
+  }
+  switch (fieldKey) {
+    case 'nameBn': return 'প্রতিষ্ঠানের নাম দিন — বাংলায় বা ইংরেজিতে, অন্তত একটি।';
+    case 'email': return 'ইমেইল ঠিকানাটি সঠিক নয় — @ চিহ্নসহ পুরো ঠিকানা লিখুন।';
+    case 'phone': return 'ফোন নম্বরটি সঠিক নয় — অঙ্ক দিয়ে পুরো নম্বরটি লিখুন।';
+    case 'website': return 'ওয়েবসাইটের পুরো ঠিকানা দিন — শুরুতে https:// থাকতে হবে।';
+    case 'primaryColor':
+    case 'accentColor':
+      return `${label} হেক্স কোডে লিখুন, যেমন #1A73E8 — অথবা পাশের রঙের ঘর থেকে বেছে নিন।`;
+    case 'branding': return 'প্রতিষ্ঠানের পরিচয় সংরক্ষণ করা যায়নি — ঘরগুলো দেখে আবার চেষ্টা করুন।';
+    default: return label ? `${label} সঠিক নয়।` : 'মানটি সঠিক নয়।';
+  }
+}
+
+/** The value a field had in the object that was validated, for brandingErrorBn. */
+function valueOf(b: Branding, fieldKey: string): unknown {
+  return own(b as unknown as Record<string, unknown>, fieldKey);
+}
 
 function isOffline(): boolean {
   return typeof navigator !== 'undefined' && navigator.onLine === false;
@@ -289,7 +352,7 @@ export class BrandingView {
       this.fieldError = {
         field,
         message: err instanceof BrandingError
-          ? err.message
+          ? brandingErrorBn(err.field, err.message)
           : 'ছবিটি পড়া যায়নি। অন্য একটি ছবি চেষ্টা করুন।',
       };
       this.focusError = true;
@@ -306,11 +369,15 @@ export class BrandingView {
     // Local check first: a field error belongs beside its input, and a
     // round-trip to learn the colour is malformed is a round-trip wasted.
     let candidate: Branding;
+    const input = this.forParse();
     try {
-      candidate = parseBranding(this.draft, this.saved);
+      candidate = parseBranding(input, this.saved);
     } catch (err) {
       if (err instanceof BrandingError) {
-        this.fieldError = { field: err.field, message: err.message };
+        this.fieldError = {
+          field: err.field,
+          message: brandingErrorBn(err.field, err.message, valueOf(input, err.field)),
+        };
         this.focusError = true;
         this.render();
         return;
@@ -320,6 +387,7 @@ export class BrandingView {
 
     this.busy = true;
     this.render();
+    let saved = false;
     try {
       const res = await this.o.auth.authedFetch('/api/v1/ops/branding', {
         method: 'PUT',
@@ -334,7 +402,14 @@ export class BrandingView {
           this.notice = 'পরিচয় পরিবর্তনের অনুমতি আপনার নেই।';
           this.noticeKind = 'error';
         } else if (body.field) {
-          this.fieldError = { field: body.field, message: body.message ?? 'মানটি সঠিক নয়।' };
+          // The server runs the same parseBranding, so its 400 carries the
+          // same English sentence; it is said in Bangla the same way.
+          const key = String(body.field);
+          this.fieldError = {
+            field: key,
+            message: brandingErrorBn(key, typeof body.message === 'string' ? body.message : '',
+              valueOf(candidate, key)),
+          };
           this.focusError = true;
         } else {
           this.notice = serverMessage(body, res.status, 'সংরক্ষণ করা যায়নি। আবার চেষ্টা করুন।', 'প্রতিষ্ঠানের পরিচয়');
@@ -355,6 +430,7 @@ export class BrandingView {
       applyBranding(this.o.doc, this.saved, { tenantKey: this.tenantKey() });
       this.notice = 'সংরক্ষিত হয়েছে।';
       this.noticeKind = 'ok';
+      saved = true;
     } catch {
       // Offline is a caution, not an error (Foundations §04): the draft is
       // intact and the same button saves it once the connection is back.
@@ -363,6 +439,7 @@ export class BrandingView {
     } finally {
       this.busy = false;
       this.render();
+      if (saved) this.focusOutcome();
     }
   }
 
@@ -372,6 +449,38 @@ export class BrandingView {
     this.notice = 'পরিবর্তন বাতিল করা হয়েছে।';
     this.noticeKind = 'ok';
     this.render();
+    this.focusOutcome();
+  }
+
+  /**
+   * After a save or a cancel that worked, focus goes to the note saying so.
+   *
+   * Both leave nothing to save, so the rebuilt সংরক্ষণ and বাতিল come back
+   * DISABLED: the shell's focus keeper waits for them rather than parking on
+   * one, and focus stayed on <body>. The next Tab started from the top of the
+   * page, and a screen reader heard nothing, because a live region inserted
+   * already holding its text is often not announced. Only when focus is
+   * actually lost: someone who clicked into a field during a slow save keeps
+   * their place. A microtask later, so the keeper — whose MutationObserver
+   * callback was queued by the render — has put that field back first.
+   */
+  private focusOutcome(): void {
+    queueMicrotask(() => {
+      const note = this.o.root.querySelector<HTMLElement>('.ui-success-note');
+      if (!note || !this.o.root.isConnected || !focusIsLost(this.o.doc)) return;
+      note.tabIndex = -1;
+      note.focus();
+    });
+  }
+
+  /**
+   * The draft as it is validated and sent. A phone number typed on a Bangla
+   * keyboard arrives in Bangla digits, and ui-core's phone rule (Latin digits
+   * only) refused a correct number as invalid. Identifiers are stored Latin;
+   * format.ts: input accepts both numeral systems and normalises to Latin.
+   */
+  private forParse(): Branding {
+    return { ...this.draft, phone: toLatinDigits(this.draft.phone) };
   }
 
   // ── Rendering ─────────────────────────────────────────────────────────
@@ -424,6 +533,9 @@ export class BrandingView {
       helper: FIELD_HINTS_BN[key],
       placeholder: opts.placeholder,
       disabled: this.readOnly,
+      // ui-core's cap, enforced while typing, so the length error is one a
+      // person rarely meets rather than one they meet after pressing save.
+      attrs: { maxlength: own(LIMITS as Readonly<Record<string, number>>, key) },
       className: 'brand-row',
       onInput: (value) => {
         this.draft[key] = value as Branding[typeof key];
@@ -602,7 +714,7 @@ export class BrandingView {
   /** The draft as it can safely be drawn: a half-typed colour must not throw. */
   private safeDraft(): Branding {
     try {
-      return parseBranding(this.draft, this.saved);
+      return parseBranding(this.forParse(), this.saved);
     } catch {
       return this.saved;
     }

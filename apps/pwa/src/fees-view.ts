@@ -42,10 +42,11 @@ import { refuseUnlessOk, isDenied } from './http-status.ts';
 import {
   permissionState, deniedMessage, deniedContact, pageHeader, dataTable, statusBadge,
   openDrawer, setOverlayBody, listSkeleton, errorState, announce, el, append, icon, uid,
-  numText, type OverlayHandle, type Column,
+  numText, list, listItem, type OverlayHandle, type Column,
 } from './ui/index.ts';
 import type { EmptyOptions } from './view-states.ts';
 import { bnDate, bnMonth } from './view-states.ts';
+import { CACHE_KEY as WARD_CACHE_KEY, type WardSummary } from './guardian-view.ts';
 
 interface InvoiceLine {
   descriptionBn: string;
@@ -59,8 +60,9 @@ interface Invoice {
   invoiceNo: string;
   /**
    * The API has always returned it. Optional because a cache written before
-   * this field was read does not carry it. Only ever COUNTED (how many
-   * children owe) — a uuid is never shown.
+   * this field was read does not carry it. Counted (how many children owe)
+   * and, for a guardian, used to put each bill under its child's name — a
+   * uuid is never shown.
    */
   studentId?: string;
   billingPeriod: string | null;
@@ -167,7 +169,33 @@ export interface FeesViewOptions {
   root: HTMLElement;
   doc: Document;
   auth: Auth;
+  /**
+   * The child a guardian pressed ফি পরিশোধ করুন for (`#/fees?studentId=…`).
+   * That child's bills come first. Never shown: it is only compared.
+   */
+  studentId?: string;
 }
+
+/**
+ * One of a guardian's children and their bills (04 Guardian §04).
+ *
+ * The invoices endpoint returns a studentId and no name, so the name comes
+ * from the guardian's ward list — the same list the আমার সন্তান screen reads,
+ * so both screens name a child the same way.
+ */
+interface Kid {
+  studentId: string;
+  nameBn: string;
+  /** '' when the ward list could not be read. */
+  sectionLabel: string;
+  rows: Invoice[];
+}
+
+/** The guardian's children, without a child's home payload. */
+const WARD_ENDPOINT = '/api/v1/academics/ward';
+
+/** Paisa, so a sum of balances is exact. */
+const paisa = (amount: string): number => Math.round(Number(amount) * 100);
 
 export class FeesView {
   private readonly o: FeesViewOptions;
@@ -197,10 +225,43 @@ export class FeesView {
   /** The office table and chips, so a filter swaps rows without a repaint. */
   private rowsEl: HTMLElement | null = null;
   private chips: HTMLButtonElement[] = [];
+  /**
+   * A guardian's children, for naming whose bill is whose. From the আমার
+   * সন্তান cache first, then from the ward endpoint.
+   */
+  private wards: WardSummary[] = [];
+  /** 'done' once the ward list came from the server; a failure may try again. */
+  private wardsState: 'idle' | 'loading' | 'done' = 'idle';
+  /** An invoice fetch is on its way, so reconnecting does not start a second. */
+  private fetching = false;
+  private destroyed = false;
+  private onOnline: (() => void) | null = null;
 
   constructor(options: FeesViewOptions) {
     this.o = options;
     void this.init();
+    // The offline banner says the list is the last saved one. When the
+    // connection comes back, fetch it again so the banner goes and the list
+    // is current — without a skeleton, and only while it is showing cached
+    // data. An open drawer still waiting for its receipts gets them too.
+    const win = options.doc.defaultView;
+    if (win) {
+      this.onOnline = () => {
+        if (this.destroyed) return;
+        if (this.offline) void this.fetchInvoices();
+        if (this.wardsState === 'idle' && this.invoices.length) void this.loadWards();
+        const open = this.expanded;
+        if (open && this.drawer && !this.receipts.has(open)) void this.loadReceipts(open, this.drawer);
+      };
+      win.addEventListener('online', this.onOnline);
+    }
+  }
+
+  /** The route's unmount (app.ts): stop listening, and never paint again. */
+  destroy(): void {
+    this.destroyed = true;
+    if (this.onOnline) this.o.doc.defaultView?.removeEventListener('online', this.onOnline);
+    this.onOnline = null;
   }
 
   private async init(): Promise<void> {
@@ -211,8 +272,58 @@ export class FeesView {
         this.loading = false;
       }
     } catch { /* cache is a nicety */ }
+    if (this.o.auth.role === 'guardian') {
+      // Names as the আমার সন্তান screen last saved them, so a bill is under
+      // its child's name even offline; the server's list replaces them below.
+      try {
+        const raw = localStorage.getItem(WARD_CACHE_KEY);
+        const wards = raw ? (JSON.parse(raw) as { wards?: unknown }).wards : null;
+        if (Array.isArray(wards)) this.wards = wards as WardSummary[];
+      } catch { /* cache is a nicety */ }
+      void this.loadWards();
+    }
     this.render();
+    await this.fetchInvoices();
+  }
 
+  /**
+   * The guardian's children, so each bill can be put under a name. A failure
+   * keeps what the cache had — the bills still show, grouped by child.
+   */
+  private async loadWards(): Promise<void> {
+    if (this.o.auth.role !== 'guardian' || this.wardsState !== 'idle') return;
+    this.wardsState = 'loading';
+    try {
+      const res = await this.o.auth.authedFetch(WARD_ENDPOINT);
+      if (!res.ok) throw new Error(String(res.status));
+      const body = (await res.json()) as { wards?: WardSummary[] };
+      if (!Array.isArray(body.wards)) throw new Error('no wards');
+      const before = this.wardsKey();
+      this.wards = body.wards;
+      this.wardsState = 'done';
+      // Repaint only when a name changed and there are bills to put it on.
+      if (this.wardsKey() !== before && !this.loading && this.invoices.length) this.render();
+    } catch {
+      this.wardsState = 'idle';
+    }
+  }
+
+  private wardsKey(): string {
+    return JSON.stringify(this.wards.map((w) => [w.studentId, w.nameBn, w.sectionLabel]));
+  }
+
+  /** GET the invoices, then paint. Shared by the first load and a reconnect. */
+  private async fetchInvoices(): Promise<void> {
+    if (this.fetching) return;
+    this.fetching = true;
+    try {
+      await this.fetchInvoicesOnce();
+    } finally {
+      this.fetching = false;
+    }
+  }
+
+  private async fetchInvoicesOnce(): Promise<void> {
     try {
       const res = await this.o.auth.authedFetch('/api/v1/finance/invoices');
       await refuseUnlessOk(res);
@@ -248,6 +359,27 @@ export class FeesView {
   }
 
   /**
+   * One invoice's receipts, filled into its open drawer in place. Re-rendering
+   * the whole screen would close the drawer under the reader's finger.
+   * Offline it fails quietly — the lines still show — and a reconnect asks again.
+   */
+  private async loadReceipts(invoiceId: string, handle: OverlayHandle): Promise<void> {
+    try {
+      const res = await this.o.auth.authedFetch(
+        `/api/v1/finance/receipts?invoiceId=${encodeURIComponent(invoiceId)}`,
+      );
+      if (res.ok) {
+        const body = (await res.json()) as { receipts: Receipt[] };
+        this.receipts.set(invoiceId, body.receipts);
+        const inv = this.invoices.find((i) => i.id === invoiceId);
+        if (inv && this.expanded === invoiceId && this.drawer === handle) {
+          setOverlayBody(handle, this.detail(inv));
+        }
+      }
+    } catch { /* offline — the lines still show; only receipts are missing */ }
+  }
+
+  /**
    * Open one invoice.
    *
    * A DRAWER, not an inline expansion. The list is now a table, and a table
@@ -260,29 +392,23 @@ export class FeesView {
     this.expanded = invoiceId;
     const inv = this.invoices.find((i) => i.id === invoiceId);
     if (!inv) return;
+    // Whose bill, first: two children billed the same month otherwise open
+    // two drawers with the same title (04 Guardian §04). The invoice number
+    // is then in the drawer's facts.
+    const kid = this.kidOf(inv);
+    const when = inv.billingPeriod ? bnMonth(inv.billingPeriod) : null;
     // The title's figures are put in the numeral face by openDrawer itself.
     const handle = openDrawer(this.o.doc, {
-      title: inv.billingPeriod
-        ? `${inv.invoiceNo} · ${bnMonth(inv.billingPeriod)}`
-        : inv.invoiceNo,
+      title: kid
+        ? `${kid.nameBn} · ${when ?? inv.invoiceNo}`
+        : when ? `${inv.invoiceNo} · ${when}` : inv.invoiceNo,
       body: this.detail(inv),
-      onClose: () => { this.expanded = null; },
+      onClose: () => {
+        if (this.drawer === handle) { this.expanded = null; this.drawer = null; }
+      },
     });
     this.drawer = handle;
-    if (!this.receipts.has(invoiceId)) {
-      try {
-        const res = await this.o.auth.authedFetch(
-          `/api/v1/finance/receipts?invoiceId=${encodeURIComponent(invoiceId)}`,
-        );
-        if (res.ok) {
-          const body = (await res.json()) as { receipts: Receipt[] };
-          this.receipts.set(invoiceId, body.receipts);
-          // Re-fill the drawer in place. Re-rendering the whole screen would
-          // close it under the reader's finger.
-          if (this.expanded === invoiceId) setOverlayBody(handle, this.detail(inv));
-        }
-      } catch { /* offline — the lines still show; only receipts are missing */ }
-    }
+    if (!this.receipts.has(invoiceId)) await this.loadReceipts(invoiceId, handle);
   }
 
   /** A money figure: one element, wholly in the numeral face (R6). */
@@ -298,6 +424,10 @@ export class FeesView {
     const d = this.o.doc;
     const host = el(d, 'div', { className: 'ui-card-form' });
 
+    // A visible name over each card. On a phone both tables become cards and
+    // their captions are for a screen reader only, so the receipt read as an
+    // unlabelled "RCP-… / বিকাশ / ৳ 1,250.00" (the desk table has headers).
+    append(host, el(d, 'h3', { className: 'label fees-detail-head', text: 'খাতওয়ারি হিসাব' }));
     append(host, dataTable(d, {
       caption: `${inv.invoiceNo} — খাতওয়ারি`,
       rows: inv.lines,
@@ -315,6 +445,13 @@ export class FeesView {
     }));
 
     const dl = el(d, 'dl', { className: 'ui-facts' });
+    // Under a child's name the drawer's title no longer carries the invoice
+    // number, and it is what a guardian reads out to the school office.
+    if (this.kidOf(inv)) {
+      append(dl,
+        el(d, 'dt', { className: 'ui-facts-key', text: 'ইনভয়েস' }),
+        el(d, 'dd', { className: 'ui-facts-val n', text: inv.invoiceNo }));
+    }
     append(dl,
       el(d, 'dt', { className: 'ui-facts-key', text: 'মোট' }),
       el(d, 'dd', { className: 'ui-facts-val n', text: money(inv.totalAmount) }),
@@ -329,6 +466,7 @@ export class FeesView {
 
     const receipts = this.receipts.get(inv.id);
     if (receipts && receipts.length > 0) {
+      append(host, el(d, 'h3', { className: 'label fees-detail-head', text: 'রসিদ' }));
       append(host, dataTable(d, {
         caption: `${inv.invoiceNo} — রসিদ`,
         rows: receipts,
@@ -367,7 +505,7 @@ export class FeesView {
     const d = this.o.doc;
     const open = this.invoices.filter(owes);
     if (!open.length) return null;
-    const owedPaisa = open.reduce((s, i) => s + Math.round(Number(i.balanceAmount) * 100), 0);
+    const owedPaisa = open.reduce((s, i) => s + paisa(i.balanceAmount), 0);
     const children = new Set(open.map((i) => i.studentId).filter(Boolean)).size;
     const multi = children > 1;
     const earliest = open.map((i) => i.dueOn).filter(Boolean)
@@ -388,6 +526,82 @@ export class FeesView {
   }
 
   /**
+   * A guardian's bills, child by child — or `null` when there is nothing to
+   * tell apart: a student (their own bills), one child, or bills that do not
+   * say whose they are.
+   *
+   * Named whenever the guardian has more than one child, even if only one of
+   * them has bills: a parent of two must never wonder whose list this is.
+   * Order: the child whose ফি পরিশোধ করুন was pressed, then the ward list's
+   * order, then anyone the list does not know.
+   */
+  private kids(): Kid[] | null {
+    if (this.o.auth.role !== 'guardian' || !this.invoices.length) return null;
+    if (this.invoices.some((i) => !i.studentId)) return null;
+    const bills = new Map<string, Invoice[]>();
+    for (const inv of this.invoices) {
+      const id = inv.studentId as string;
+      const rows = bills.get(id);
+      if (rows) rows.push(inv); else bills.set(id, [inv]);
+    }
+    if (bills.size < 2 && this.wards.length < 2) return null;
+
+    const ward = (id: string) => this.wards.find((w) => w.studentId === id);
+    const order: string[] = [];
+    const add = (id: string) => { if (!order.includes(id)) order.push(id); };
+    const tapped = this.o.studentId;
+    // The tapped child leads even with no bill: their heading then says so,
+    // instead of the page quietly showing a brother's bills.
+    if (tapped && (bills.has(tapped) || ward(tapped))) add(tapped);
+    for (const w of this.wards) if (bills.has(w.studentId)) add(w.studentId);
+    for (const id of bills.keys()) add(id);
+
+    return order.map((id, i) => {
+      const w = ward(id);
+      return {
+        studentId: id,
+        // No ward list (offline, never opened আমার সন্তান): still two
+        // different headings, never two identical lists.
+        nameBn: w?.nameBn ?? `সন্তান ${formatCount(i + 1, 'bn')}`,
+        sectionLabel: w?.sectionLabel ?? '',
+        rows: bills.get(id) ?? [],
+      };
+    });
+  }
+
+  /** The child an invoice is under, when the bills are shown child by child. */
+  private kidOf(inv: Invoice): Kid | null {
+    return this.kids()?.find((k) => k.studentId === inv.studentId) ?? null;
+  }
+
+  /**
+   * 04 Guardian §04's rows under the total: each child, and what that child
+   * owes. The hero's sum is only readable next to its parts — and these are
+   * the figures the child's panel on আমার সন্তান showed a tap ago.
+   */
+  private kidDues(kids: Kid[] | null): HTMLElement | null {
+    if (!kids || !this.invoices.some(owes)) return null;
+    const d = this.o.doc;
+    const rows = kids.filter((k) => k.rows.length).map((k) => {
+      const owed = k.rows.filter(owes).reduce((s, i) => s + paisa(i.balanceAmount), 0);
+      return listItem(d, {
+        title: k.nameBn,
+        subtitle: k.sectionLabel || undefined,
+        // A figure in --danger beside the word বকেয়া in the hero above; a
+        // child who owes nothing is told so in words, not by a missing row.
+        status: owed > 0
+          ? el(d, 'span', { className: 'n fees-kid-owed', text: money(owed / 100) })
+          : 'বকেয়া নেই',
+        statusTone: owed > 0 ? 'danger' : undefined,
+        className: 'fees-kid',
+      });
+    });
+    const ul = list(d, 'সন্তান অনুযায়ী বকেয়া', ...rows);
+    ul.classList.add('fees-kids');
+    return ul;
+  }
+
+  /**
    * The invoice table and its phone list, from one column set.
    *
    * On a phone the two audiences want different rows (13 Responsive ০১):
@@ -400,8 +614,16 @@ export class FeesView {
    * staff" — a teacher reading many families' rows needs the invoice number
    * as the row's name just as an accountant does.
    */
-  private table(office: boolean, rows: Invoice[], empty: EmptyOptions): HTMLElement {
+  private table(office: boolean, rows: Invoice[], empty: EmptyOptions, kid?: Kid): HTMLElement {
     const d = this.o.doc;
+    // Under a child's heading, a phone row's spoken name carries the child
+    // too: a screen reader moving row to row does not re-read the heading,
+    // and "আগস্ট ২০২৬, ৳ 1,250.00" is the same for both children. The table
+    // names the child in its caption, and its row button by invoice number.
+    const whose = kid
+      ? el(d, 'span', { className: 'fees-list-only' },
+        el(d, 'span', { className: 'ui-sr-only', text: ` — ${kid.nameBn}` }))
+      : null;
     const columns: Array<Column<Invoice>> = [
       { key: 'no', header: 'ইনভয়েস', mobile: office ? 'title' : 'hidden',
         cell: (inv) => inv.invoiceNo, width: 'minmax(0, 1.6fr)' },
@@ -410,11 +632,14 @@ export class FeesView {
       // the invoice column is hidden, and by a dash in the table's মাস column.
       { key: 'period', header: 'মাস', mobile: office ? 'subtitle' : 'title',
         width: 'minmax(0, 1.2fr)',
-        cell: (inv) => (inv.billingPeriod
-          ? bnMonth(inv.billingPeriod)
-          : el(d, 'span', {},
-            el(d, 'span', { className: 'fees-list-only', text: inv.invoiceNo }),
-            el(d, 'span', { className: 'fees-table-only', text: '—' }))) },
+        cell: (inv) => {
+          const month = inv.billingPeriod
+            ? bnMonth(inv.billingPeriod)
+            : el(d, 'span', {},
+              el(d, 'span', { className: 'fees-list-only', text: inv.invoiceNo }),
+              el(d, 'span', { className: 'fees-table-only', text: '—' }));
+          return whose ? el(d, 'span', {}, month, whose.cloneNode(true)) : month;
+        } },
       { key: 'total', header: 'মোট', numeric: true, mobile: office ? 'hidden' : 'status',
         cell: (inv) => this.figure(inv.totalAmount), width: 'minmax(0, 1fr)' },
       { key: 'paid', header: 'জমা', numeric: true, mobile: 'hidden',
@@ -450,7 +675,7 @@ export class FeesView {
         } },
     ];
     return dataTable(d, {
-      caption: 'ইনভয়েসের তালিকা',
+      caption: kid ? `${kid.nameBn} — ইনভয়েসের তালিকা` : 'ইনভয়েসের তালিকা',
       rows,
       rowKey: (inv) => inv.id,
       onRowClick: (inv) => { void this.toggle(inv.id); },
@@ -474,16 +699,40 @@ export class FeesView {
                    'হিসাবরক্ষক সবার ইনভয়েস দেখতে পান।' };
   }
 
-  /** FAMILY: the due hero, then the months — one panel (03 §05, 04 §04). */
+  /**
+   * FAMILY: the due hero, then the months — one panel (03 §05, 04 §04).
+   *
+   * A guardian of more than one child gets 04 Guardian §04: under the total,
+   * one row per child with what that child owes, and each child's months
+   * under that child's name. Without it two children billed the same month
+   * were two identical rows, and nothing on the screen said whose was whose.
+   */
   private familySheet(): HTMLElement {
     const d = this.o.doc;
-    return el(d, 'div', { className: 'fees-sheet is-family' },
+    const kids = this.kids();
+    const sheet = el(d, 'div', { className: 'fees-sheet is-family' },
       this.dueSummary(),
+      this.kidDues(kids),
       // 03 Student §05's eyebrow bar over the rows. A real h2, so heading
       // navigation reaches the list. Not "আগের রসিদ": the rows are every
       // invoice, owed ones included, and that heading would say otherwise.
-      el(d, 'h2', { className: 'label fees-list-head', text: 'ইনভয়েস ও রসিদ' }),
-      this.table(false, this.invoices, this.noInvoices()));
+      el(d, 'h2', { className: 'label fees-list-head', text: 'ইনভয়েস ও রসিদ' }));
+    if (!kids) {
+      append(sheet, this.table(false, this.invoices, this.noInvoices()));
+      return sheet;
+    }
+    for (const k of kids) {
+      // Straight into the sheet, no wrapper: the sheet's borderless table
+      // rules are written for a .ui-data that is its direct child.
+      append(sheet,
+        el(d, 'h3', { className: 'fees-kid-head' },
+          ...numText(d, k.sectionLabel ? `${k.nameBn} · ${k.sectionLabel}` : k.nameBn)),
+        this.table(false, k.rows, {
+          glyph: 'wallet', message: 'এই সন্তানের কোনো ইনভয়েস পাওয়া যায়নি।',
+          detail: 'বিল নিয়ে প্রশ্ন থাকলে বিদ্যালয়ের অফিসে যোগাযোগ করুন।',
+        }, k));
+    }
+    return sheet;
   }
 
   /** OFFICE: the status filter over the table (07 Finance §03). */
@@ -533,6 +782,8 @@ export class FeesView {
   }
 
   private render(): void {
+    // Unmounted: a late answer must not paint over the screen that replaced this one.
+    if (this.destroyed) return;
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';

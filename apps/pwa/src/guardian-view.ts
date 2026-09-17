@@ -127,6 +127,17 @@ export class GuardianView {
   private error = false;
   /** The HTTP status behind `error`, so a 403 can say so. */
   private errStatus: number | undefined;
+  /**
+   * Which load is the current one. Every load takes a new number, and an
+   * answer that comes back under an old number is dropped. Without it, two
+   * quick presses of ArrowRight (child 1 → 2 → 3) on a slow line ended on
+   * child 2: its answer landed after child 3's and put child 2 back.
+   */
+  private ticket = 0;
+  /** The page header of the last paint: gone from the root once the route changes. */
+  private marker: HTMLElement | null = null;
+  private destroyed = false;
+  private onOnline: (() => void) | null = null;
 
   constructor(options: GuardianViewOptions) {
     this.o = options;
@@ -142,6 +153,32 @@ export class GuardianView {
     }
     this.render();
     void this.load();
+    // The offline banner says "সংযোগ পেলে নিজেই হালনাগাদ হবে", so when the
+    // connection comes back the screen fetches again and the banner goes.
+    // Only while it is showing cached data: a current screen is not reloaded.
+    const win = options.doc.defaultView;
+    if (win) {
+      this.onOnline = () => {
+        // The route table does not unmount this view, so a listener from a
+        // page the guardian has left cleans itself up instead of painting
+        // over whatever screen is there now.
+        if (!this.mounted()) { this.destroy(); return; }
+        if (this.offline) void this.load();
+      };
+      win.addEventListener('online', this.onOnline);
+    }
+  }
+
+  /** Stop listening for the connection and never paint again. */
+  destroy(): void {
+    this.destroyed = true;
+    if (this.onOnline) this.o.doc.defaultView?.removeEventListener('online', this.onOnline);
+    this.onOnline = null;
+  }
+
+  /** Still the page in the root: not destroyed, and not replaced by another route. */
+  private mounted(): boolean {
+    return !this.destroyed && !!this.marker && this.o.root.contains(this.marker);
   }
 
   private readCache(): { wards: WardSummary[]; home: WardHome | null } | null {
@@ -155,11 +192,17 @@ export class GuardianView {
 
   private async load(studentId?: string): Promise<void> {
     const target = studentId ?? this.selected;
+    const ticket = ++this.ticket;
+    // A later load (another child chosen, a retry) supersedes this one, and a
+    // page the guardian has left is not painted.
+    const current = () => ticket === this.ticket && this.mounted();
     try {
       const res = await this.o.auth.authedFetch(
         target ? `${ENDPOINT}?studentId=${encodeURIComponent(target)}` : ENDPOINT);
+      if (!current()) return;
       if (!res.ok) throw new HttpStatus(res.status);
       const body = (await res.json()) as { wards: WardSummary[]; student: WardHome | null };
+      if (!current()) return;
       this.wards = body.wards;
       this.home = body.student;
       this.offline = false;
@@ -181,6 +224,7 @@ export class GuardianView {
         localStorage.setItem(CACHE_KEY, JSON.stringify({ wards: this.wards, home: this.home }));
       } catch { /* quota */ }
     } catch (err) {
+      if (!current()) return;
       const status = err instanceof HttpStatus ? err.status : undefined;
       this.errStatus = status;
       // Cached data plus a banner beats an error page: last week's
@@ -192,13 +236,17 @@ export class GuardianView {
       else if (this.home) this.offline = true;
       else this.error = true;
     } finally {
-      this.loading = false;
-      this.render();
+      // The nested load for the first child has already painted, and a
+      // superseded one must not paint the child the guardian moved away from.
+      if (current()) {
+        this.loading = false;
+        this.render();
+      }
     }
   }
 
   private select(studentId: string): void {
-    if (studentId === this.selected) return;
+    if (studentId === this.selected || this.destroyed) return;
     this.selected = studentId;
     this.home = null;
     this.loading = true;
@@ -208,6 +256,7 @@ export class GuardianView {
 
   // ── rendering ───────────────────────────────────────────────────────
   private render(): void {
+    if (this.destroyed) return;
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';
@@ -215,21 +264,30 @@ export class GuardianView {
 
     // The page names itself the way the guardian's other tabs (ফলাফল, বেতন)
     // do, so moving between them does not change what the top of a page is.
-    append(root, pageHeader(d, {
+    this.marker = pageHeader(d, {
       title: 'আমার সন্তান',
       subtitle: 'আজকের হাজিরা, ফলাফল ও বকেয়া ফি — এক নজরে।',
-    }));
+    });
+    append(root, this.marker);
 
     // The selector first and always, even mid-load: §9.1 calls it "the single
     // most-used control here", and it is what the guardian opened the app to
     // use. It renders nothing at all for a single child — a control with one
     // option teaches people their tap did nothing.
+    //
+    // Every paint rebuilds it. Focus on a child tab (arrow keys, a tap) comes
+    // back to the same child's tab through the shell's keepFocusWithin, which
+    // knows a tab by its name and its data-id. The four-plus button's name
+    // changes with the child it shows, so it carries a stable focus key.
     const switcher = childSelector(d, {
       children: this.wards.map(toChildOption),
       selectedId: this.selected,
       onSelect: (id) => this.select(id),
     });
     switcher?.classList.add('ward-switch');
+    if (switcher?.classList.contains('ui-child-button')) {
+      switcher.setAttribute('data-focus-key', 'ward-child-picker');
+    }
     append(root, switcher);
 
     if (this.error) {

@@ -29,7 +29,7 @@ import { hasIcon } from './icon.ts';
 import {
   el, append, icon, lang, numClass, numText, pageHeader, badge, statusBadge, button, setBusy,
   emptyState, errorState, permissionState, permissionMessageWithContact, toast, field,
-  listSkeleton,
+  listSkeleton, focusIsLost, uid,
 } from './ui/index.ts';
 
 export interface ExamSubjectOption {
@@ -197,23 +197,42 @@ export class MarksView {
     }
   }
 
+  /**
+   * The newest sheet request. The picker keeps keyboard focus across its
+   * re-render (the shell's keepFocusWithin), so ArrowDown on a closed select
+   * steps through several subjects in a second, one request each, and their
+   * replies can land in any order. Only the reply to the CURRENT choice may
+   * paint; an older one would put another subject's marks under this
+   * subject's name, and a save would send them as this subject's.
+   */
+  private sheetRequest = 0;
+
   private async loadSheet(examSubjectId: string): Promise<void> {
+    const request = ++this.sheetRequest;
     this.loading = true;
     this.sheetFailed = false;
     this.dirty.clear();
-    const cached = this.cacheGet<MarksResponse>(MARKS_CACHE_PREFIX + examSubjectId);
-    if (cached) this.sheet = cached;
+    // This subject's cached copy, or nothing (the skeleton). Keeping the
+    // previous subject's sheet while this one loads showed its rows as this
+    // subject's, and offline with no cache it stayed there under "সর্বশেষ
+    // সংরক্ষিত নম্বর" instead of the error state.
+    this.sheet = this.cacheGet<MarksResponse>(MARKS_CACHE_PREFIX + examSubjectId);
     this.render();
     try {
       const res = await this.o.auth.authedFetch(
         `/api/v1/academics/marks?examSubjectId=${encodeURIComponent(examSubjectId)}`,
       );
+      if (request !== this.sheetRequest) return;
       if (!res.ok) throw new HttpStatus(res.status);
-      this.sheet = (await res.json()) as MarksResponse;
+      const body = (await res.json()) as MarksResponse;
+      if (request !== this.sheetRequest) return;
+      this.sheet = body;
       this.offline = false;
       this.denied = false;
       this.cacheSet(MARKS_CACHE_PREFIX + examSubjectId, this.sheet);
     } catch (err) {
+      // A newer choice owns the screen now; its own request paints it.
+      if (request !== this.sheetRequest) return;
       const status = err instanceof HttpStatus ? err.status : undefined;
       this.denied = status === 403;
       if (this.denied) this.sheet = null;
@@ -245,6 +264,11 @@ export class MarksView {
     const sel = this.selected;
     const sheet = this.sheet;
     if (!sel || !sheet || this.dirty.size === 0) return;
+
+    // Which copy was pressed, when it holds focus (Enter or Space, or a tap on
+    // Android). The render below deletes it; see focusAfterSave.
+    const d = this.o.doc;
+    const pressed = this.saveButtons.find((b) => b === d.activeElement) ?? null;
 
     this.saving = true;
     this.paintSaveBar();
@@ -298,7 +322,48 @@ export class MarksView {
     } finally {
       this.saving = false;
     }
+    // Still there when the enqueue finished: on the pressed copy, or dropped
+    // by a browser that blurs a disabled control. Not if the person has since
+    // moved on to a mark box — that focus is theirs, and the shell's keeper
+    // follows it through the render.
+    const copy = pressed && (d.activeElement === pressed || focusIsLost(d))
+      ? pressed.dataset.focusKey ?? null
+      : null;
     this.render();
+    if (copy) this.focusAfterSave(copy);
+  }
+
+  /**
+   * render() deleted the focused "সব সংরক্ষণ", so focus fell to <body> and
+   * the next Tab began again at the top of the page (finding 67).
+   *
+   * - The save failed: the marks are still pending and the new copy is
+   *   enabled. The shell's keepFocusWithin puts focus back on that copy, and
+   *   this leaves it alone.
+   * - It worked: the new copy is disabled (nothing left to save) and cannot
+   *   take focus. Focus goes where the person was, onto the text that says
+   *   what happened. Beside the phone's footer button that is the footer
+   *   note ("সংরক্ষিত", "৪ সারি এই যন্ত্রে জমা — ইন্টারনেট এলে যাবে"). The
+   *   desktop copy sits in the page header, so focus goes to the page
+   *   heading: the next Tab reaches the exam picker, not the end of the
+   *   sheet, and the toast announces the save.
+   */
+  private focusAfterSave(copy: string): void {
+    const d = this.o.doc;
+    if (!focusIsLost(d)) return;
+    const again = this.saveButtons.find((b) => b.dataset.focusKey === copy);
+    if (!again || !again.disabled) return;
+    const target = copy === 'marks-save-bottom'
+      ? this.noteEl
+      : this.o.root.querySelector<HTMLElement>('h1');
+    if (!target) return;
+    if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+    // The note is in the phone's sticky save bar, which sits inside the page's
+    // scroll-padding-bottom (app.css `:root:has(.marks-savebar)`). A scrolling
+    // focus would jump the sheet under the teacher's thumb although the note
+    // is on screen, right beside the button just pressed. The heading may
+    // scroll: it is where the desktop copy was.
+    target.focus(copy === 'marks-save-bottom' ? { preventScroll: true } : undefined);
   }
 
   private markDirty(studentId: string, change: Partial<MarkRow>): void {
@@ -327,6 +392,7 @@ export class MarksView {
     const existing = cell?.querySelector<HTMLElement>('.marks-error') ?? null;
     if (max === null) {
       input.removeAttribute('aria-invalid');
+      input.removeAttribute('aria-describedby');
       existing?.remove();
       return;
     }
@@ -334,6 +400,10 @@ export class MarksView {
     const err = existing ?? this.o.doc.createElement('span');
     err.className = 'marks-error';
     err.setAttribute('role', 'alert');
+    // Tied to its box, so returning to it reads why it is invalid (minor 14):
+    // the alert is spoken once, as it appears, and never again.
+    if (!err.id) err.id = uid('marks-err');
+    input.setAttribute('aria-describedby', err.id);
     err.textContent = '';
     append(err, ...numText(this.o.doc, `সর্বোচ্চ ${formatCount(max, 'bn')} — সংরক্ষণ হয়নি`));
     if (!existing) cell?.append(err);
@@ -415,6 +485,9 @@ export class MarksView {
       className,
       disabled: this.dirty.size === 0,
       busy: this.saving,
+      // Stable across renders while its label swaps to "সংরক্ষণ হচ্ছে…",
+      // and tells the two copies apart (see focusAfterSave).
+      attrs: { 'data-focus-key': className },
       onClick: () => { void this.save(); },
     });
     this.saveButtons.push(btn);
@@ -495,7 +568,10 @@ export class MarksView {
       value: this.selected?.subject.examSubjectId ?? '',
       helper: 'নম্বর দেওয়া অফলাইনেও কাজ করে — সংযোগ পেলে নিজেই জমা হবে।',
       options: [
-        { value: '', label: 'পরীক্ষা ও বিষয় নির্বাচন করুন' },
+        // Once a subject is chosen the prompt cannot be chosen back: onChange
+        // ignores '', so ArrowUp onto it left the select reading "নির্বাচন
+        // করুন" over a sheet that was still open and still saved.
+        { value: '', label: 'পরীক্ষা ও বিষয় নির্বাচন করুন', disabled: !!this.selected },
         ...options,
       ],
       onChange: (v) => {
@@ -612,6 +688,13 @@ export class MarksView {
 
     const tbody = el(d, 'tbody');
     for (const row of sheet.marks) {
+      // What the boxes show is what a save would send: the sheet with this
+      // student's pending change over it. A save that failed keeps the change
+      // pending and redraws (its toast says "ঘরের নম্বরগুলো ঠিক আছে"), and a
+      // slow reload redraws after the teacher typed into the cached copy.
+      // Drawn from `row` alone, both emptied the boxes the teacher had just
+      // filled while the change stayed queued to go out unseen.
+      const shown: MarkRow = { ...row, ...this.dirty.get(row.studentId) };
       const name = row.fullName.bn || row.fullName.en || '—';
       // A roll number is an identifier: Latin, padded as the register is.
       const roll = formatIdentifier(String(row.rollNo).padStart(2, '0'));
@@ -622,7 +705,7 @@ export class MarksView {
 
       const rowInputs: HTMLInputElement[] = [];
       for (const comp of components) {
-        const v = row[comp.key];
+        const v = shown[comp.key];
         // type="text" + inputmode: the value is shown in Bangla digits, and
         // parseUserNumber reads either system back (type="number" can hold
         // neither ৪২ nor a mis-keyed value — it silently empties).
@@ -636,7 +719,7 @@ export class MarksView {
           },
         });
         input.value = v === null || v === undefined ? '' : toBanglaDigits(v);
-        input.disabled = this.readOnly || row.isAbsent;
+        input.disabled = this.readOnly || shown.isAbsent;
         input.addEventListener('input', () => {
           const raw = input.value.trim();
           if (raw === '') {
@@ -672,7 +755,7 @@ export class MarksView {
       const cb = el(d, 'input', {
         attrs: { type: 'checkbox', 'aria-label': `${name} — অনুপস্থিত` },
       });
-      cb.checked = row.isAbsent;
+      cb.checked = shown.isAbsent;
       cb.disabled = this.readOnly;
       cb.addEventListener('change', () => {
         this.markDirty(row.studentId, { isAbsent: cb.checked });

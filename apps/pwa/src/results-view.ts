@@ -32,8 +32,10 @@ import { bnDate } from './view-states.ts';
 import {
   permissionState, deniedMessage, deniedContact, pageHeader, field, statusBadge,
   listSkeleton, emptyState, errorState, dataTable, sectionHeading,
+  childSelector, childIdentity,
   el, icon, uid, numText, numClass, type Column,
 } from './ui/index.ts';
+import { CACHE_KEY as WARD_CACHE_KEY, toChildOption, type WardSummary } from './guardian-view.ts';
 
 interface SubjectRow {
   subjectBn: string;
@@ -66,6 +68,35 @@ interface Result {
 }
 
 const CACHE_KEY = 'shikhon_results_cache';
+/** The guardian's children. The same read আমার সন্তান makes. */
+const WARD_ENDPOINT = '/api/v1/academics/ward';
+
+/** One cache per child; the unkeyed one is a student's own. */
+const cacheKeyFor = (studentId: string | undefined): string =>
+  (studentId ? `${CACHE_KEY}_${studentId}` : CACHE_KEY);
+
+interface WardCache { wards: WardSummary[]; home: { studentId?: string } | null }
+
+/** What আমার সন্তান last saved: the children, and the one last chosen. */
+function readWardCache(): WardCache | null {
+  try {
+    const raw = localStorage.getItem(WARD_CACHE_KEY);
+    const p = raw ? (JSON.parse(raw) as Partial<WardCache>) : null;
+    if (!p || !Array.isArray(p.wards)) return null;
+    return { wards: p.wards, home: p.home ?? null };
+  } catch { return null; }
+}
+
+/**
+ * The child a guardian means when the link names none: the one they last
+ * chose on আমার সন্তান, as long as that child is still theirs, else the first.
+ */
+function rememberedChild(cached: WardCache | null): string | undefined {
+  if (!cached) return undefined;
+  const last = cached.home?.studentId;
+  if (last && cached.wards.some((w) => w.studentId === last)) return last;
+  return cached.wards[0]?.studentId;
+}
 
 const bn = (n: number | string | null | undefined): string =>
   n === null || n === undefined || n === '' ? '—' : formatCount(Number(n), 'bn');
@@ -108,13 +139,39 @@ export interface ResultsViewOptions {
    * the caller's own id when none is given — a guardian has no results of
    * their own, so without this the screen said "nothing published" to every
    * parent. Absent for a student reading their own.
+   *
+   * Also absent when a guardian comes in through the ফলাফল tab, the sidebar,
+   * the home card or আরও, which all link to plain `#/results`. The view then
+   * picks the child itself (the one last chosen on আমার সন্তান, else the
+   * first ward) and never asks the API without an id on a guardian's behalf.
    */
   studentId?: string;
 }
 
 export class ResultsView {
   private readonly o: ResultsViewOptions;
-  private readonly cacheKey: string;
+  private cacheKey: string;
+  /**
+   * A guardian reads a CHILD's sheet, and the brief's rule for that persona
+   * is "never make a parent wonder which child they are viewing".
+   */
+  private readonly guardian: boolean;
+  /** Whose sheet is on screen. A guardian can change it on this page. */
+  private studentId: string | undefined;
+  /** The guardian's children, from আমার সন্তান's cache or the ward read. */
+  private wards: WardSummary[] = [];
+  /** The ward read came back empty: no child is linked to this guardian. */
+  private noWards = false;
+  /**
+   * Bumped by every load and by destroy(). An answer that arrives for an
+   * earlier load (the other child, or a page already left) is dropped rather
+   * than painted over whatever is on screen now.
+   */
+  private seq = 0;
+  private destroyed = false;
+  /** What sits under the page header. An exam change rebuilds only these. */
+  private bodyNodes: HTMLElement[] = [];
+  private readonly onOnline: () => void;
   private results: Result[] = [];
   private selected: string | null = null;
   private loading = true;
@@ -136,15 +193,44 @@ export class ResultsView {
 
   constructor(options: ResultsViewOptions) {
     this.o = options;
+    this.guardian = options.auth.role === 'guardian';
+    this.studentId = options.studentId;
+    if (this.guardian) {
+      const cached = readWardCache();
+      this.wards = cached?.wards ?? [];
+      if (!this.studentId) {
+        this.studentId = rememberedChild(cached);
+        if (this.studentId) this.rememberChild(this.studentId);
+      }
+    }
     // One cache per child: a guardian with two children must never be shown
     // the other child's marks while the network is slow. Still `shikhon_`
     // prefixed, so logout's purge clears every one of them.
-    this.cacheKey = options.studentId ? `${CACHE_KEY}_${options.studentId}` : CACHE_KEY;
-    this.results = this.readCache();
+    this.cacheKey = cacheKeyFor(this.studentId);
+    // A guardian whose child is not known yet has nothing to paint: the
+    // unkeyed cache is a student's own sheet, never a child's.
+    this.results = this.guardian && !this.studentId ? [] : this.readCache();
     this.selected = this.results[0]?.examId ?? null;
     this.loading = this.results.length === 0;
+    // The screen's own "অফলাইন" must not outlive the outage. The shell hides
+    // its banner when the connection returns; this one only goes when the
+    // read succeeds, so read again. A screen that is already current is left
+    // alone, so it does not flash a skeleton.
+    this.onOnline = () => {
+      if (this.destroyed) return;
+      if (this.failed) this.retry();
+      else if (this.offline) void this.load();
+    };
+    this.o.doc.defaultView?.addEventListener('online', this.onOnline);
     this.render();
     void this.load();
+  }
+
+  /** The shell's unmount (app.ts). Nothing from this page paints after it. */
+  destroy(): void {
+    this.destroyed = true;
+    this.seq++;
+    this.o.doc.defaultView?.removeEventListener('online', this.onOnline);
   }
 
   private readCache(): Result[] {
@@ -156,11 +242,37 @@ export class ResultsView {
   }
 
   private async load(): Promise<void> {
+    const seq = ++this.seq;
+    const current = () => seq === this.seq;
     try {
-      const who = this.o.studentId ? `?studentId=${encodeURIComponent(this.o.studentId)}` : '';
+      if (this.guardian && !this.studentId) {
+        // No child in the link and none remembered on this device. Never the
+        // bare endpoint: for a guardian it reads their own id, finds nothing,
+        // and tells a parent their child's published result does not exist.
+        const wards = await this.fetchWards();
+        if (!current()) return;
+        if (wards.length === 0) { this.noWards = true; this.results = []; return; }
+        this.noWards = false;
+        this.useChild(wards[0].studentId);
+        this.loading = this.results.length === 0;
+        this.render();
+      } else if (this.guardian && !this.wardOf(this.studentId)) {
+        // The link names a child this device has no name for. Fetch the list
+        // beside the marks, so the sheet can say whose it is; the marks do
+        // not wait for it, and a failure only leaves the sheet unnamed.
+        const id = this.studentId;
+        this.fetchWards().then(
+          () => { if (!this.destroyed && this.studentId === id) this.render(); },
+          () => { /* unnamed, not wrong */ });
+      }
+
+      const id = this.studentId;
+      const who = id ? `?studentId=${encodeURIComponent(id)}` : '';
       const res = await this.o.auth.authedFetch(`/api/v1/academics/results${who}`);
+      if (!current()) return;
       await refuseUnlessOk(res);
       const body = (await res.json()) as { results?: Result[] };
+      if (!current()) return;
       this.results = body.results ?? [];
       this.selected = this.selected && this.results.some((r) => r.examId === this.selected)
         ? this.selected
@@ -169,6 +281,7 @@ export class ResultsView {
       this.failed = false;
       try { localStorage.setItem(this.cacheKey, JSON.stringify(this.results)); } catch { /* quota */ }
     } catch (err) {
+      if (!current()) return;
       if (isDenied(err)) {
         this.denied = true;
         this.deniedErr = err; this.results = []; this.offline = false;
@@ -178,9 +291,63 @@ export class ResultsView {
       if (this.results.length > 0) this.offline = true;
       else this.failed = true;
     } finally {
-      this.loading = false;
-      this.render();
+      if (current()) {
+        this.loading = false;
+        this.render();
+      }
     }
+  }
+
+  /** The guardian's children. Throws like any other read, for load()'s catch. */
+  private async fetchWards(): Promise<WardSummary[]> {
+    const res = await this.o.auth.authedFetch(WARD_ENDPOINT);
+    await refuseUnlessOk(res);
+    const body = (await res.json()) as { wards?: WardSummary[] };
+    this.wards = Array.isArray(body.wards) ? body.wards : [];
+    return this.wards;
+  }
+
+  private wardOf(studentId: string | undefined): WardSummary | undefined {
+    return studentId ? this.wards.find((w) => w.studentId === studentId) : undefined;
+  }
+
+  /** Point the screen at one child: its id, its own cache, its first exam. */
+  private useChild(studentId: string): void {
+    this.studentId = studentId;
+    this.cacheKey = cacheKeyFor(studentId);
+    this.results = this.readCache();
+    this.selected = this.results[0]?.examId ?? null;
+    this.rememberChild(studentId);
+  }
+
+  /** The child strip's choice. Whatever the previous child's read returns is dropped. */
+  private selectChild(studentId: string): void {
+    if (studentId === this.studentId) return;
+    this.useChild(studentId);
+    this.offline = false;
+    this.failed = false;
+    this.loading = this.results.length === 0;
+    this.render();
+    void this.load();
+  }
+
+  /**
+   * Put the child in the address, as মার্কশিট দেখুন does, so a reload stays
+   * on the child on screen. `replaceState`, not a hash change: the route is
+   * the same, so the shell would not remount anyway, and one history entry
+   * per tap would make Android back walk through children instead of leaving.
+   */
+  private rememberChild(studentId: string): void {
+    const w = this.o.doc.defaultView;
+    try {
+      if (!w) return;
+      const [path, query = ''] = w.location.hash.split('?');
+      if (path !== '#/results') return;
+      const params = new URLSearchParams(query);
+      if (params.get('studentId') === studentId) return;
+      params.set('studentId', studentId);
+      w.history.replaceState(w.history.state, '', `${path}?${params.toString()}`);
+    } catch { /* a sandboxed frame may refuse; the screen is right either way */ }
   }
 
   /** The error state's "আবার চেষ্টা করুন": the same read, run again. */
@@ -210,7 +377,7 @@ export class ResultsView {
           value: this.selected ?? undefined,
           className: 'exam-select-field',
           options: this.results.map((r) => ({ value: r.examId, label: r.examNameBn })),
-          onChange: (v) => { this.selected = v; this.render(); },
+          onChange: (v) => this.selectExam(v),
         })
       : null;
 
@@ -219,6 +386,7 @@ export class ResultsView {
       subtitle: 'প্রকাশিত পরীক্ষার ফলাফল ও মার্কশিট',
       actions: picker ? [picker.root] : undefined,
     }));
+    this.bodyNodes = [];
 
     // B-30. A refusal outranks the offline banner, the skeleton and the
     // empty state: nothing is loading, there is nothing to show, and
@@ -231,39 +399,100 @@ export class ResultsView {
       return;
     }
 
+    // Whose sheet, before the sheet, and in every state below: a parent
+    // whose child has nothing published must still be able to switch to the
+    // other child from here.
+    const child = this.childContext();
+    if (child) root.append(child);
+
+    this.bodyNodes = this.body();
+    root.append(...this.bodyNodes);
+  }
+
+  /**
+   * A different exam. Only what sits under the page header is rebuilt: the
+   * select is the control the person is using, and rebuilding it dropped
+   * focus to <body> after every change, so the next ArrowDown scrolled the
+   * page and a screen reader lost its place. The same node stays, so focus,
+   * its ring and the reader's position stay with it.
+   */
+  private selectExam(examId: string): void {
+    this.selected = examId;
+    for (const n of this.bodyNodes) n.remove();
+    this.bodyNodes = this.body();
+    this.o.root.append(...this.bodyNodes);
+  }
+
+  /**
+   * The child strip for two or more children, the identity block for one
+   * (04 Guardian §03; child-selector.ts). Nothing for a student.
+   */
+  private childContext(): HTMLElement | null {
+    if (!this.guardian || this.wards.length === 0) return null;
+    const d = this.o.doc;
+    if (this.wards.length > 1) {
+      const strip = childSelector(d, {
+        children: this.wards.map(toChildOption),
+        selectedId: this.studentId ?? null,
+        onSelect: (id) => this.selectChild(id),
+      });
+      strip?.classList.add('result-child-switch');
+      return strip;
+    }
+    const only = this.wards[0];
+    // Never name a child whose sheet this is not.
+    if (only.studentId !== this.studentId) return null;
+    const identity = childIdentity(d, toChildOption(only));
+    identity.classList.add('result-child-id');
+    return identity;
+  }
+
+  /** Everything under the header (and the child strip), for the state the screen is in. */
+  private body(): HTMLElement[] {
+    const d = this.o.doc;
+
     // Foundations §04: three grey rows, never a spinner.
-    if (this.loading && this.results.length === 0) { root.append(listSkeleton(d, 3)); return; }
+    if (this.loading && this.results.length === 0) return [listSkeleton(d, 3)];
 
     if (this.failed && this.results.length === 0) {
-      root.append(errorState(d,
+      return [errorState(d,
         'ফলাফল আনা গেল না। ইন্টারনেট নেই বা সার্ভার সাড়া দিচ্ছে না।',
-        () => this.retry()));
-      return;
+        () => this.retry())];
+    }
+
+    if (this.noWards) {
+      // Not "nothing published": there is no child to publish anything for,
+      // and only the school office can link one. আমার সন্তান's sentence.
+      return [emptyState(d, {
+        glyph: 'users',
+        message: 'আপনার সাথে কোনো শিক্ষার্থী যুক্ত নেই। বিদ্যালয়ের অফিসে যোগাযোগ করুন।',
+      })];
     }
 
     if (this.results.length === 0) {
       // Honest about WHY it is empty: a result exists but is not published
       // yet, and the family cannot see it until the school says so.
-      root.append(emptyState(d, {
+      return [emptyState(d, {
         glyph: 'award',
         message: 'এখনো কোনো ফলাফল প্রকাশিত হয়নি। স্কুল প্রকাশ করলে এখানে দেখা যাবে।',
-      }));
-      return;
+      })];
     }
 
     const r = this.results.find((x) => x.examId === this.selected) ?? this.results[0];
+    const out: HTMLElement[] = [];
     if (this.offline) {
       // A --warn-tint banner above the cached sheet (§7), not a grey chip
       // beside the title. This screen only reads, so nothing is queued and
       // there is no count to show.
-      root.append(el(d, 'p', { className: 'offline-banner result-offline' },
+      out.push(el(d, 'p', { className: 'offline-banner result-offline' },
         icon(d, 'wifi-off', 'offline-icon'),
         el(d, 'span', { text: 'অফলাইন — সংরক্ষিত ফলাফল' })));
     }
-    root.append(this.sheet(r));
+    out.push(this.sheet(r));
     const note = this.optionalFootnote(r);
-    if (note) root.append(note);
-    if (this.results.length > 1) root.append(this.trend());
+    if (note) out.push(note);
+    if (this.results.length > 1) out.push(this.trend());
+    return out;
   }
 
   /**
@@ -293,11 +522,17 @@ export class ResultsView {
     const fail = r.subjectsFailed > 0
       ? `${bn(r.subjectsFailed)} বিষয়ে অকৃতকার্য`
       : 'অকৃতকার্য';
+    // 04 Guardian §03: "বার্ষিক পরীক্ষা ২০২৫ · আফিয়া". The full name, not the
+    // first word: two children in one family can share a first name, and a
+    // name that starts "মোঃ" has no useful first word. The line also names
+    // the sheet's region (aria-labelledby), so a reader hears whose it is.
+    const child = this.guardian ? this.wardOf(this.studentId)?.nameBn : undefined;
+    const examLine = child ? `${r.examNameBn} · ${child}` : r.examNameBn;
     return el(d, 'div', {
       className: 'result-hero', data: { outcome: r.isPass ? 'pass' : 'fail' },
     },
       el(d, 'p', { className: 'result-hero-exam', attrs: { id: examId } },
-        ...numText(d, r.examNameBn)),
+        ...numText(d, examLine)),
       el(d, 'div', { className: 'result-hero-row' },
         // The drawing prints the figures bare; the words a screen reader
         // needs to know which figure is which stay, visually hidden.

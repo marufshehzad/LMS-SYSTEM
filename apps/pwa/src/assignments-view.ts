@@ -23,7 +23,7 @@
  * the shared parts only: backLink, pageHeader, field, button, statusBadge.
  */
 import type { Auth } from './auth.ts';
-import { formatIdentifier } from '../../../packages/ui-core/src/format.ts';
+import { formatIdentifier, parseUserNumber } from '../../../packages/ui-core/src/format.ts';
 import {
   planCompression, checkMedia, formatDuration, MEDIA_PROBLEM_BN, MAX_VOICE_MS,
   type MediaDraft,
@@ -33,6 +33,7 @@ import { refuseUnlessOk, isDenied } from './http-status.ts';
 import {
   pageHeader, backLink, permissionState, deniedMessage, deniedContact, dataTable,
   statusBadge, badge, tabs, listSkeleton, button, field, el, icon, numText,
+  focusIsLost, serverMessage,
   type Column,
 } from './ui/index.ts';
 
@@ -91,6 +92,24 @@ interface GradeConflict {
   };
 }
 
+/**
+ * A grading attempt that did not land, held until the teacher acts on it.
+ *
+ * It belongs to ONE row. The old notice was a card above the whole list, so
+ * a teacher grading row 20 saw nothing happen beside the row, and the render
+ * that drew the card also emptied every mark box on the page.
+ */
+interface GradeError {
+  submissionId: string;
+  text: string;
+  /** The mark itself is what is wrong: the box is flagged and takes focus. */
+  invalid: boolean;
+  /** A failure a second attempt can fix (no connection, a 5xx): what to send again. */
+  retry: { marks: number; feedback: string; rowVersion: number } | null;
+  /** Where the attempt was made, so the sentence appears beside it. */
+  from: 'row' | 'conflict';
+}
+
 interface Detail {
   assignment: {
     id: string; titleBn: string; instructionsBn: string | null;
@@ -120,6 +139,17 @@ const BN: Record<string, string> = { '0':'০','1':'১','2':'২','3':'৩','4'
 function bn(s: string | number | null | undefined): string {
   if (s === null || s === undefined || s === '') return '—';
   return String(s).replace(/[0-9]/g, (d) => BN[d] ?? d);
+}
+
+/**
+ * A mark as it is read: "১০", "৮.৫" — not the column's "১০.০০". The server
+ * sends numeric(…, 2) as text, and the trailing zeros said nothing but
+ * made "সর্বোচ্চ ১০.০০" look like money.
+ */
+function markText(s: string | number | null | undefined): string {
+  if (s === null || s === undefined || s === '') return '—';
+  const n = Number(s);
+  return bn(Number.isFinite(n) ? String(n) : s);
 }
 
 /** "৩ দিন বাকি" / "আজ শেষ" / "২ দিন দেরি" — urgency in words, not a raw date. */
@@ -173,8 +203,35 @@ export class AssignmentsView {
   /** The detail read was refused — the same B-30 distinction, one level down. */
   private detailDeniedErr: unknown = null;
   private notice: string | null = '';
-  /** What `notice` means, so a confirmation never wears a warning's colour. */
-  private noticeTone: 'success' | 'error' = 'error';
+  /**
+   * What `notice` means, so a confirmation never wears a warning's colour.
+   * `queued` is an answer kept on this device for want of a connection: not
+   * a failure, and not yet a delivery either.
+   */
+  private noticeTone: 'success' | 'error' | 'queued' = 'error';
+  /**
+   * What the teacher has typed into each unmarked row, by submission id.
+   * Every render rebuilds the list, so without this a failed save, a
+   * validation message or a conflict emptied every mark box on the page.
+   */
+  private gradeInputs = new Map<string, { mark: string; feedback: string }>();
+  /**
+   * Grading attempts that did not land, by submission id, each shown beside
+   * its own row. Several at once is the normal case on a failing connection.
+   */
+  private gradeErrors = new Map<string, GradeError>();
+  /**
+   * The failure that has just happened. Only its sentence is a live alert:
+   * every render re-inserts the others, and re-announcing all of them after
+   * each save would bury the one that is news.
+   */
+  private announceError: string | null = null;
+  /** The row whose mark was just saved, which says so in place. */
+  private gradeSaved: string | null = null;
+  /** Rows with a save on the wire: a double tap must not send the mark twice. */
+  private grading = new Set<string>();
+  /** Removed in destroy(). */
+  private readonly onOnline = (): void => { this.reconnected(); };
   private draft = '';
   private draftStatusEl: HTMLElement | null = null;
   /** F-902. Set when a photo or voice answer has been captured for this assignment. */
@@ -192,7 +249,38 @@ export class AssignmentsView {
 
   constructor(options: AssignmentsViewOptions) {
     this.o = options;
+    // The screen's own "অফলাইন — সংরক্ষিত তালিকা" banner is set by a read,
+    // so only another read can clear it. Without this it stayed up after the
+    // connection came back, over a list nobody was going to refresh.
+    this.o.doc.defaultView?.addEventListener('online', this.onOnline);
     void this.loadList();
+  }
+
+  /** app.ts calls this when the route unmounts. */
+  destroy(): void {
+    this.o.doc.defaultView?.removeEventListener('online', this.onOnline);
+  }
+
+  /**
+   * The connection is back. Re-read only what was read from the cache or
+   * failed for want of a connection: a screen that is already current does
+   * not flash a skeleton, and an open answer or typed mark is left alone.
+   */
+  private reconnected(): void {
+    if (this.denied || this.loading) return;
+    if (this.openId) {
+      // A detail that could not be read is the error card; read it again.
+      if (this.offline && !this.detail && !this.detailDeniedErr) void this.openDetail(this.openId);
+      return;
+    }
+    if (this.failed) {
+      // As the error card's own retry does: no cached list, so a skeleton.
+      this.failed = false;
+      this.loading = true;
+      void this.loadList();
+      return;
+    }
+    if (this.offline) void this.loadList();
   }
 
   private get isStaff(): boolean {
@@ -228,11 +316,22 @@ export class AssignmentsView {
     this.render();
   }
 
-  private async openDetail(id: string): Promise<void> {
+  /**
+   * `keepNotice`: a re-read that follows an outcome the teacher must still
+   * see ("আগের নম্বরই রাখা হয়েছে।"). Clearing it here erased that sentence
+   * before it was ever drawn.
+   */
+  private async openDetail(id: string, keepNotice = false): Promise<void> {
+    if (this.openId !== id) {
+      // Typed marks and their messages belong to one assignment's rows.
+      this.gradeInputs.clear();
+      this.gradeErrors.clear();
+      this.gradeSaved = null;
+    }
     this.openId = id;
     this.detail = null;
     this.detailDeniedErr = null;
-    this.notice = '';
+    if (!keepNotice) this.notice = '';
     this.draft = '';
     this.loading = true;
     this.render();
@@ -283,8 +382,15 @@ export class AssignmentsView {
       // stale draft can never resurrect over the answer that was actually
       // sent. (A later edit starts a fresh draft, and a fresh version.)
       try { localStorage.removeItem(this.draftKey(this.detail.assignment.id)); } catch { /* ignore */ }
-      this.notice = 'জমা হয়েছে (অফলাইন হলে সংযোগ ফিরলে পাঠানো হবে)';
-      this.noticeTone = 'success';
+      // The screen knows whether it is offline, so it says which one
+      // happened instead of "(অফলাইন হলে …)" in the colour of a delivery.
+      if (this.o.doc.defaultView?.navigator.onLine === false) {
+        this.notice = 'তোমার উত্তর এই যন্ত্রে রাখা আছে — সংযোগ ফিরলে নিজেই জমা হবে।';
+        this.noticeTone = 'queued';
+      } else {
+        this.notice = 'জমা হয়েছে।';
+        this.noticeTone = 'success';
+      }
     } catch {
       this.notice = 'জমা দেওয়া যায়নি — আবার চেষ্টা করুন।';
       this.noticeTone = 'error';
@@ -404,42 +510,169 @@ export class AssignmentsView {
     marks: number,
     feedback: string,
     rowVersion: number,
+    from: 'row' | 'conflict' = 'row',
   ): Promise<void> {
+    // One save per row at a time. A second tap while the first is on the wire
+    // sent the old rowVersion again, and came back as a "conflict" with the
+    // teacher's own first write.
+    if (this.grading.has(submissionId)) return;
+    this.grading.add(submissionId);
+    let res: Response | null = null;
+    let body: {
+      ok?: boolean; error?: string; message?: string; conflict?: GradeConflict; rowVersion?: number;
+    } = {};
     try {
-      const res = await this.o.auth.authedFetch('/api/v1/academics/assignments', {
+      res = await this.o.auth.authedFetch('/api/v1/academics/assignments', {
         method: 'POST',
         // F-103: rowVersion is what the screen was showing. Without it the
         // server rejects the write rather than silently overwriting.
         body: JSON.stringify({ submissionId, marksAwarded: marks, feedbackBn: feedback, rowVersion }),
       });
-      const body = (await res.json().catch(() => ({}))) as {
-        ok?: boolean; error?: string; message?: string; conflict?: GradeConflict;
-      };
-      if (res.ok && body.ok) {
-        this.conflict = null;
-        this.notice = 'নম্বর সংরক্ষিত';
-        this.noticeTone = 'success';
-        if (this.openId) void this.openDetail(this.openId);
-        return;
-      }
-      if (res.status === 409 && body.conflict) {
-        // Not an error to dismiss — a decision to put in front of a person.
-        this.conflict = body.conflict;
-        this.notice = null;
-        this.render();
-        return;
-      }
-      this.notice = body.error === 'marks_exceed_max'
-        ? 'নম্বর সর্বোচ্চ নম্বরের চেয়ে বেশি হতে পারে না।'
-        : body.error === 'row_version_required'
-          ? 'তালিকাটি পুরোনো — আবার লোড করে চেষ্টা করুন।'
-          : 'সংরক্ষণ করা যায়নি।';
-      this.noticeTone = 'error';
+      body = (await res.json().catch(() => ({}))) as typeof body;
     } catch {
-      this.notice = 'সংযোগে সমস্যা হয়েছে।';
-      this.noticeTone = 'error';
+      res = null;
+    } finally {
+      this.grading.delete(submissionId);
     }
-    this.render();
+    // What the page shows now, after the wait — not when the tap happened.
+    const before = this.aboveListKey();
+
+    if (res?.ok && body.ok) {
+      // A conflict card about ANOTHER row is still waiting on the teacher.
+      if (this.conflict?.submissionId === submissionId) this.conflict = null;
+      this.notice = '';
+      this.gradeErrors.delete(submissionId);
+      this.gradeInputs.delete(submissionId);
+      // The server has confirmed this write and echoed the row's new
+      // version, so the row is updated in place. Re-reading the assignment
+      // put a skeleton up after every mark: the page shrank, the scroll
+      // position went back to the top, and the teacher had to find row 20
+      // again for row 21.
+      const s = this.detail?.submissions.find((x) => x.id === submissionId);
+      if (s) {
+        s.marksAwarded = String(marks);
+        s.feedbackBn = feedback || null;
+        s.gradedAt = new Date().toISOString();
+        s.rowVersion = typeof body.rowVersion === 'number' ? body.rowVersion : s.rowVersion + 1;
+      }
+      // "নম্বর সংরক্ষিত" stands beside the newest save only.
+      const prev = this.gradeSaved;
+      this.gradeSaved = submissionId;
+      if (prev && prev !== submissionId) this.rowPart(prev, '.sub-grade-saved')?.remove();
+      this.redraw(submissionId, before);
+      // The দাও button has gone with the row's form, so focus goes to the
+      // "saved" note in its place rather than to nobody. From the conflict
+      // card at the top the row may be far down, so that one scrolls.
+      if (focusIsLost(this.o.doc)) {
+        this.rowPart(submissionId, '.sub-grade-saved')?.focus({ preventScroll: from === 'row' });
+      }
+      return;
+    }
+    if (res?.status === 409 && body.conflict) {
+      // Not an error to dismiss — a decision to put in front of a person.
+      this.conflict = body.conflict;
+      this.notice = null;
+      this.gradeErrors.delete(submissionId);
+      this.render();
+      return;
+    }
+    const invalid = !!res && (body.error === 'marks_exceed_max' || body.error === 'invalid_marks');
+    const failure: GradeError = res
+      ? {
+          submissionId, from, invalid,
+          text: body.error === 'marks_exceed_max'
+            ? 'নম্বর সর্বোচ্চ নম্বরের চেয়ে বেশি হতে পারে না।'
+            : body.error === 'invalid_marks'
+              ? 'সঠিক নম্বর দিন।'
+              : body.error === 'row_version_required'
+                ? 'তালিকাটি পুরোনো — আবার লোড করে চেষ্টা করুন।'
+                // The public preview's own sentence ("এটি প্রদর্শনী সংস্করণ — …"),
+                // which is not a permission problem and must not read as one.
+                : body.error === 'demo_read_only' && typeof body.message === 'string' && /[ঀ-৿]/.test(body.message)
+                  ? body.message
+                  // A refusal, or the server's Bangla sentence; generic otherwise.
+                  : serverMessage(body, res.status, 'নম্বর সংরক্ষণ করা যায়নি।'),
+          // A 5xx can pass on a second try; a refusal or a bad request cannot.
+          retry: res.status >= 500 ? { marks, feedback, rowVersion } : null,
+        }
+      : {
+          submissionId, from, invalid: false,
+          text: `নম্বর পাঠানো যায়নি। ${ERROR_TAIL}`,
+          retry: { marks, feedback, rowVersion },
+        };
+    // Only this row's sentence changes, so only this row is drawn again, and
+    // the shell's focus keeper returns focus to the same দাও in it.
+    this.gradeErrors.set(submissionId, failure);
+    this.announceError = submissionId;
+    this.redraw(submissionId, before);
+    // Into the box the sentence is about — unless the teacher has already
+    // moved on to another row while this one was on the wire.
+    if (failure.invalid && failure.from === 'row' && focusIsLost(this.o.doc)) this.focusMark(submissionId);
+  }
+
+  /**
+   * Show a grading outcome. When nothing above the list changes, only that
+   * submission's row is built again. A whole-page render also rebuilt every
+   * OTHER row's mark and comment boxes: the values came back, but on an
+   * Android keyboard rebuilding a field ends the word being composed in it,
+   * and a teacher on 3G is typing into the next row while this one saves.
+   */
+  private redraw(submissionId: string, before: string): void {
+    const s = this.detail?.submissions.find((x) => x.id === submissionId);
+    const old = this.rowEl(submissionId);
+    if (!this.openId || this.loading || !this.detail || !s || !old || this.aboveListKey() !== before) {
+      this.render();
+      return;
+    }
+    if (this.announceError === submissionId) {
+      // Only the newest failure is a live alert (see announceError).
+      for (const p of this.o.root.querySelectorAll('.sub-grade-error [role="alert"]')) p.removeAttribute('role');
+    }
+    old.replaceWith(this.submissionItem(s, this.detail.assignment.maxMarks));
+    this.announceError = null;
+  }
+
+  /**
+   * What renderDetail draws between the header and the submission list — the
+   * conflict card, the notice, and the errors that cannot sit in a row — as
+   * one comparable value.
+   */
+  private aboveListKey(): string {
+    return JSON.stringify([
+      this.conflict,
+      this.notice || '',
+      this.notice ? this.noticeTone : '',
+      this.detachedErrors().map((e) => [e.submissionId, e.text, e.retry !== null]),
+    ]);
+  }
+
+  /**
+   * Grading errors shown as a card above the list: a save made from the
+   * conflict card, or a row that is no longer open for marking and so cannot
+   * hold its own message.
+   */
+  private detachedErrors(): GradeError[] {
+    const subs = this.detail?.submissions ?? [];
+    return [...this.gradeErrors.values()].filter((ge) => !(ge.from === 'row'
+      && subs.some((s) => s.id === ge.submissionId && !s.gradedAt)));
+  }
+
+  /** One submission's row, by id. */
+  private rowEl(submissionId: string): HTMLElement | null {
+    for (const li of this.o.root.querySelectorAll<HTMLElement>('.sub-item')) {
+      if (li.dataset.id === submissionId) return li;
+    }
+    return null;
+  }
+
+  /** An element inside one submission's row, by selector. */
+  private rowPart(submissionId: string, selector: string): HTMLElement | null {
+    return this.rowEl(submissionId)?.querySelector<HTMLElement>(selector) ?? null;
+  }
+
+  /** Put the teacher back in the mark box the message is about. */
+  private focusMark(submissionId: string): void {
+    this.rowPart(submissionId, '.sub-mark')?.focus();
   }
 
   /**
@@ -472,8 +705,8 @@ export class AssignmentsView {
         el(d, 'dd', {}, ...numText(d, note ? `${mark} — ${note}` : mark)),
       );
     };
-    addRow('তাঁদের নম্বর', bn(c.theirs.marksAwarded ?? '—'), c.theirs.feedbackBn);
-    addRow('আপনার নম্বর', bn(c.yours.marksAwarded), c.yours.feedbackBn);
+    addRow('তাঁদের নম্বর', markText(c.theirs.marksAwarded), c.theirs.feedbackBn);
+    addRow('আপনার নম্বর', markText(c.yours.marksAwarded), c.yours.feedbackBn);
     card.append(table);
 
     const keep = button(d, {
@@ -483,7 +716,10 @@ export class AssignmentsView {
         this.conflict = null;
         this.notice = 'আগের নম্বরই রাখা হয়েছে।';
         this.noticeTone = 'success';
-        if (this.openId) void this.openDetail(this.openId);
+        this.gradeErrors.delete(c.submissionId);
+        // The row now holds their mark, so what was typed into it is moot.
+        this.gradeInputs.delete(c.submissionId);
+        if (this.openId) void this.openDetail(this.openId, true);
       },
     });
     const replace = button(d, {
@@ -497,6 +733,7 @@ export class AssignmentsView {
           c.yours.marksAwarded,
           c.yours.feedbackBn ?? '',
           c.currentRowVersion,
+          'conflict',
         );
       },
     });
@@ -638,7 +875,7 @@ export class AssignmentsView {
       return sub.gradedAt
         ? statusBadge(d, {
             state: 'published',
-            label: `${bn(sub.marksAwarded)}${a.maxMarks ? `/${bn(a.maxMarks)}` : ''}`,
+            label: `${markText(sub.marksAwarded)}${a.maxMarks ? `/${markText(a.maxMarks)}` : ''}`,
           })
         : statusBadge(d, { state: 'invited', label: 'জমা হয়েছে' });
     }
@@ -658,6 +895,7 @@ export class AssignmentsView {
     root.append(backLink(d, 'সব কাজ', () => {
       this.openId = null; this.detail = null; this.notice = ''; this.conflict = null;
       this.detailDeniedErr = null;
+      this.gradeInputs.clear(); this.gradeErrors.clear(); this.gradeSaved = null;
       void this.loadList();
     }));
 
@@ -684,7 +922,7 @@ export class AssignmentsView {
     const due = dueLabel(a.dueAt);
     root.append(pageHeader(d, {
       title: a.titleBn,
-      subtitle: `${a.subjectBn} · ${due.text}${a.maxMarks ? ` · সর্বোচ্চ ${bn(a.maxMarks)}` : ''}`,
+      subtitle: `${a.subjectBn} · ${due.text}${a.maxMarks ? ` · সর্বোচ্চ ${markText(a.maxMarks)}` : ''}`,
     }));
 
     // Directly under the title: an unresolved conflict is the only thing on
@@ -700,6 +938,17 @@ export class AssignmentsView {
 
     if (this.notice) root.append(this.noticeEl(this.notice));
 
+    // A save made from the conflict card is answered beside the card, and a
+    // row that is no longer open for marking cannot hold its own message.
+    for (const ge of this.detachedErrors()) {
+      const retry = ge.retry;
+      const card = errorState(d, ge.text, retry
+        ? () => { void this.grade(ge.submissionId, retry.marks, retry.feedback, retry.rowVersion, ge.from); }
+        : undefined);
+      card.classList.add('assign-notice');
+      root.append(card);
+    }
+
     if (this.isStaff) { this.renderSubmissionList(root); return; }
 
     /* ------------------------------------------------------ student answer */
@@ -712,7 +961,7 @@ export class AssignmentsView {
         el(d, 'p', { className: 'label assign-score-label', text: 'প্রাপ্ত নম্বর' }),
         el(d, 'p', {
           className: 'assign-score n',
-          text: `${bn(mine.marksAwarded)}${a.maxMarks ? ` / ${bn(a.maxMarks)}` : ''}`,
+          text: `${markText(mine.marksAwarded)}${a.maxMarks ? ` / ${markText(a.maxMarks)}` : ''}`,
         }),
         mine.feedbackBn
           ? el(d, 'p', { className: 'assign-feedback' }, ...numText(d, mine.feedbackBn))
@@ -836,59 +1085,159 @@ export class AssignmentsView {
       return;
     }
 
+    const maxMarks = this.detail?.assignment.maxMarks ?? null;
     const ul = el(d, 'ul', { className: 'sub-list', attrs: { 'aria-label': 'জমা পড়া উত্তর' } });
-    for (const s of subs) {
-      const name = s.fullNameBn ?? '—';
-      const li = el(d, 'li', { className: 'sub-item' });
+    for (const s of subs) ul.append(this.submissionItem(s, maxMarks));
+    root.append(ul);
+    // Announced once, on the render the failure caused.
+    this.announceError = null;
+  }
 
-      // Roll first, as on every roster row; an identifier, so Latin digits.
-      const who = el(d, 'span', { className: 'sub-who' },
-        s.rollNo ? el(d, 'span', { className: 'sub-roll n', text: formatIdentifier(s.rollNo) }) : null,
-        name);
-      const state = s.gradedAt
-        ? statusBadge(d, { state: 'published', label: `${bn(s.marksAwarded)} নম্বর` })
-        : s.isLate
-          ? statusBadge(d, { state: 'late', label: 'দেরিতে জমা' })
-          : statusBadge(d, { state: 'pending', label: 'অদেখা' });
-      li.append(el(d, 'div', { className: 'sub-head' }, who, state));
-      li.append(el(d, 'p', { className: 'sub-body' }, ...numText(d, s.bodyBn ?? '(ছবি)')));
+  /**
+   * One submission's row: who, the answer, and either the grading form or
+   * the mark. Built on its own so a grading outcome can replace just this
+   * row (see redraw()).
+   */
+  private submissionItem(s: Submission, maxMarks: string | null): HTMLElement {
+    const d = this.o.doc;
+    const name = s.fullNameBn ?? '—';
+    // data-id: the row's identity across renders, so the shell's focus
+    // keeper sends focus back to THIS row's দাও, not the first one's.
+    const li = el(d, 'li', { className: 'sub-item', data: { id: s.id } });
 
-      if (!s.gradedAt) {
-        const mark = el(d, 'input', {
-          className: 'ui-input n is-num sub-mark',
-          attrs: {
-            type: 'number', min: '0', step: '0.5', placeholder: 'নম্বর',
-            'aria-label': `${name} — নম্বর`,
-          },
-        });
-        const fb = el(d, 'input', {
-          className: 'ui-input sub-feedback',
-          attrs: { type: 'text', placeholder: 'মন্তব্য (ঐচ্ছিক)', 'aria-label': `${name} — মন্তব্য` },
-        });
-        // Secondary, not primary: one of these sits on every unmarked row,
-        // and the screen keeps a single accent button.
-        const save = button(d, {
-          label: 'দাও',
-          variant: 'secondary',
-          size: 'sm',
-          onClick: () => {
-            const m = Number(mark.value);
-            if (!Number.isFinite(m) || m < 0) {
-              this.notice = 'সঠিক নম্বর দিন।';
-              this.noticeTone = 'error';
-              this.render();
-              return;
-            }
-            void this.grade(s.id, m, fb.value.trim(), s.rowVersion);
-          },
-        });
-        li.append(el(d, 'div', { className: 'sub-grade-row' }, mark, fb, save));
-      } else if (s.feedbackBn) {
+    // Roll first, as on every roster row; an identifier, so Latin digits.
+    const who = el(d, 'span', { className: 'sub-who' },
+      s.rollNo ? el(d, 'span', { className: 'sub-roll n', text: formatIdentifier(s.rollNo) }) : null,
+      name);
+    const state = s.gradedAt
+      ? statusBadge(d, { state: 'published', label: `${markText(s.marksAwarded)} নম্বর` })
+      : s.isLate
+        ? statusBadge(d, { state: 'late', label: 'দেরিতে জমা' })
+        : statusBadge(d, { state: 'pending', label: 'অদেখা' });
+    li.append(el(d, 'div', { className: 'sub-head' }, who, state));
+    li.append(el(d, 'p', { className: 'sub-body' }, ...numText(d, s.bodyBn ?? '(ছবি)')));
+
+    if (!s.gradedAt) {
+      const typed = this.gradeInputs.get(s.id);
+      const found = this.gradeErrors.get(s.id);
+      const err = found?.from === 'row' ? found : null;
+      const errId = `sub-grade-error-${s.id}`;
+      // type="text" + inputmode, as the marks sheet does: type="number"
+      // reads an empty box as a valid 0, and on some keyboards drops a
+      // Bangla ৮ without a word. parseUserNumber reads either digit system.
+      const mark = el(d, 'input', {
+        className: 'ui-input n is-num sub-mark',
+        attrs: {
+          type: 'text', inputmode: 'decimal', autocomplete: 'off', placeholder: 'নম্বর',
+          'aria-label': `${name} — নম্বর`,
+        },
+      });
+      const fb = el(d, 'input', {
+        className: 'ui-input sub-feedback',
+        attrs: { type: 'text', placeholder: 'মন্তব্য (ঐচ্ছিক)', 'aria-label': `${name} — মন্তব্য` },
+      });
+      mark.value = typed?.mark ?? '';
+      fb.value = typed?.feedback ?? '';
+      if (err?.invalid) {
+        // The sheet's error look (.ui-input.is-error), and the sentence is
+        // read out with the box, not only once as it appears.
+        mark.classList.add('is-error');
+        mark.setAttribute('aria-invalid', 'true');
+        mark.setAttribute('aria-describedby', errId);
+      }
+
+      let errEl: HTMLElement | null = null;
+      const remember = (clearsInvalid: boolean) => () => {
+        this.gradeInputs.set(s.id, { mark: mark.value, feedback: fb.value });
+        // Cleared while the teacher fixes it, as a field's error is: a
+        // sentence that stays reads as "still wrong". A retry would now
+        // send stale values, so any edit takes that away too.
+        const cur = this.gradeErrors.get(s.id);
+        if (cur?.from === 'row' && (clearsInvalid || !cur.invalid)) {
+          this.gradeErrors.delete(s.id);
+          errEl?.remove();
+          errEl = null;
+          mark.classList.remove('is-error');
+          mark.removeAttribute('aria-invalid');
+          mark.removeAttribute('aria-describedby');
+          save.removeAttribute('aria-describedby');
+        }
+      };
+      // Secondary, not primary: one of these sits on every unmarked row,
+      // and the screen keeps a single accent button.
+      const save = button(d, {
+        label: 'দাও',
+        variant: 'secondary',
+        size: 'sm',
+        onClick: () => {
+          const raw = mark.value.trim();
+          const m = parseUserNumber(raw);
+          const max = maxMarks === null ? NaN : Number(maxMarks);
+          // Checked here, before anything is sent: an empty box used to go
+          // out as marksAwarded 0, which the server stores as a real zero.
+          const problem = raw === ''
+            ? 'নম্বর লিখুন।'
+            : m === null || m < 0
+              ? 'সঠিক নম্বর দিন।'
+              : Number.isFinite(max) && m > max
+                ? `নম্বর সর্বোচ্চ ${markText(maxMarks)}-এর বেশি হতে পারে না।`
+                : null;
+          if (problem !== null || m === null) {
+            const before = this.aboveListKey();
+            this.gradeInputs.set(s.id, { mark: mark.value, feedback: fb.value });
+            this.gradeErrors.set(s.id, {
+              submissionId: s.id, text: problem ?? 'সঠিক নম্বর দিন।',
+              invalid: true, retry: null, from: 'row',
+            });
+            this.announceError = s.id;
+            this.redraw(s.id, before);
+            this.focusMark(s.id);
+            return;
+          }
+          void this.grade(s.id, m, fb.value.trim(), s.rowVersion);
+        },
+      });
+      mark.addEventListener('input', remember(true));
+      fb.addEventListener('input', remember(false));
+      li.append(el(d, 'div', { className: 'sub-grade-row' }, mark, fb, save));
+
+      if (err) {
+        // A failure that is not about the mark is read with the button that
+        // failed, which is where the focus keeper returns focus.
+        if (!err.invalid) save.setAttribute('aria-describedby', errId);
+        // The alert holds the words only; the retry is a control beside it.
+        errEl = el(d, 'div', { className: 'sub-grade-error' },
+          el(d, 'p', {
+            className: 'ui-field-error',
+            attrs: { id: errId, role: this.announceError === s.id ? 'alert' : null },
+          }, ...numText(d, err.text)));
+        const retry = err.retry;
+        if (retry) {
+          errEl.append(button(d, {
+            label: 'আবার চেষ্টা করুন',
+            variant: 'ghost',
+            size: 'sm',
+            onClick: () => { void this.grade(s.id, retry.marks, retry.feedback, retry.rowVersion); },
+          }));
+        }
+        li.append(errEl);
+      }
+    } else {
+      if (s.feedbackBn) {
         li.append(el(d, 'p', { className: 'assign-feedback' }, ...numText(d, s.feedbackBn)));
       }
-      ul.append(li);
+      if (this.gradeSaved === s.id) {
+        // Where the দাও button was, and focusable so focus has somewhere to
+        // be once that button is gone (see grade()).
+        const saved = successNote(d, 'নম্বর সংরক্ষিত');
+        saved.classList.add('sub-grade-saved');
+        saved.setAttribute('role', 'status');
+        saved.setAttribute('tabindex', '-1');
+        saved.setAttribute('data-focus-key', 'grade-saved');
+        li.append(saved);
+      }
     }
-    root.append(ul);
+    return li;
   }
 
   /**
@@ -902,6 +1251,11 @@ export class AssignmentsView {
       const ok = successNote(d, text);
       ok.setAttribute('role', 'status');
       return ok;
+    }
+    if (this.noticeTone === 'queued') {
+      // The screen's own warn strip (as "সময় শেষ" uses): kept, not yet sent.
+      return el(d, 'p', { className: 'assign-note', attrs: { role: 'status' } },
+        icon(d, 'clock'), el(d, 'span', {}, ...numText(d, text)));
     }
     const err = errorState(d, text);
     err.classList.add('assign-notice');

@@ -283,8 +283,12 @@ describe('B-15 — today’s class', () => {
     // screen renders and only the one block shows its own state.
     assert.ok(r.textContent?.includes('হাজিরা'));
     assert.ok(r.querySelector('.sh-due'));
-    assert.ok(!r.textContent?.includes('আবার চেষ্টা করুন'),
-      'a single failure is not a whole-screen error');
+    // The failed block carries its own retry (ux-fix 65); nothing wider does.
+    const errors = [...r.querySelectorAll('.ui-state-error')];
+    assert.equal(errors.length, 1, 'a single failure is not a whole-screen error');
+    assert.ok(errors[0].closest('.sh-now-empty'), 'the error sits in the failed block only');
+    assert.equal([...r.querySelectorAll('button')]
+      .filter((b) => b.textContent === 'আবার চেষ্টা করুন').length, 1);
   });
 });
 

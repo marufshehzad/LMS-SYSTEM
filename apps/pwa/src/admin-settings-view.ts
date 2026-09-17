@@ -55,6 +55,7 @@ import {
   el, append, numText, type Field,
 } from './ui/index.ts';
 import { isDenied } from './http-status.ts';
+import { parseUserNumber } from '../../../packages/ui-core/src/format.ts';
 
 interface SmsSettings {
   noticeMaxChars: number;
@@ -238,7 +239,8 @@ export class AdminSettingsView {
     const reset = button(d, {
       label: `প্রস্তাবিত (${bnNum(sms.default)})`, variant: 'secondary', size: 'sm',
       disabled: !this.o.canManage,
-      onClick: () => { (chars.input as HTMLInputElement).value = String(sms.default); sync(); },
+      // Written back in Bangla digits, like the label it sits beside (R6).
+      onClick: () => { (chars.input as HTMLInputElement).value = bnNum(sms.default); sync(); },
     });
 
     // The field's label is the row title and its helper the row sub (08 §02
@@ -247,7 +249,10 @@ export class AdminSettingsView {
       label: 'এসএমএসের সর্বোচ্চ দৈর্ঘ্য',
       name: 'noticeMaxChars',
       kind: 'number',
-      value: String(this.draft),
+      // A count of letters, not an identifier: Bangla digits, as in the
+      // helper and the reset label beside it (R6). Read back with
+      // parseUserNumber, so either numeral system is accepted.
+      value: bnNum(this.draft),
       disabled: !this.o.canManage,
       helper: `বাংলায় ${bnNum(sms.charsPerSegment)} অক্ষরে একটি এসএমএস — এর বেশি হলে খরচ দ্বিগুণ। ` +
               `প্রস্তাবিত ${bnNum(sms.default)} · সর্বনিম্ন ${bnNum(sms.min)} · ` +
@@ -288,11 +293,26 @@ export class AdminSettingsView {
       append(node, ...numText(d, text));
     };
 
+    /**
+     * The typed value, in either numeral system. Not `Number()`: the helper
+     * states the range in Bangla digits, so "২৪০" from a Bangla keyboard is the
+     * expected entry, and `Number('২৪০')` is NaN — which silently disabled
+     * save and priced the default instead of what was typed.
+     */
+    const typed = (): number | null => parseUserNumber(chars.value());
+    const inRange = (n: number | null): n is number =>
+      n !== null && n >= sms.min && n <= sms.max;
+
     const sync = (): void => {
-      const n = Number(chars.value());
-      const ok = Number.isFinite(n) && n >= sms.min && n <= sms.max;
-      const segs = this.segments(Number.isFinite(n) ? n : sms.default);
-      say(cost, `প্রতি প্রাপকে আনুমানিক ${bnNum(segs)} টি এসএমএস।`);
+      const n = typed();
+      const ok = inRange(n);
+      if (n === null || n <= 0) {
+        // No number yet: an estimate here would be the bill for a value nobody
+        // typed (the default's, or "১" for an empty field).
+        cost.textContent = '';
+      } else {
+        say(cost, `প্রতি প্রাপকে আনুমানিক ${bnNum(this.segments(n))} টি এসএমএস।`);
+      }
       // The warning appears when the school goes beyond the recommendation,
       // stated as a multiple of the bill rather than as a number of letters.
       const over = ok && n > sms.default;
@@ -300,18 +320,23 @@ export class AdminSettingsView {
       if (over) {
         const baseSegs = this.segments(sms.default);
         say(warn,
-          `প্রস্তাবিত দৈর্ঘ্যের চেয়ে বেশি — খরচ প্রায় ${bnNum((segs / baseSegs).toFixed(1))} গুণ হতে পারে। ` +
+          `প্রস্তাবিত দৈর্ঘ্যের চেয়ে বেশি — খরচ প্রায় ${bnNum((this.segments(n) / baseSegs).toFixed(1))} গুণ হতে পারে। ` +
           'এসএমএস প্রতিষ্ঠানের সবচেয়ে বড় চলতি খরচ।');
       }
       if (ok) { clearFieldError(chars.root); this.draft = Math.floor(n); }
-      saveBtn.toggleAttribute('disabled', this.busy || !ok || !this.o.canManage);
+      // Save is NOT disabled for a value it will refuse. A greyed button says
+      // nothing about why, and — being the form's submit button — it also
+      // swallowed Enter, so the range message below could never be reached.
+      // The submit handler is the gate; busy and read-only still disable.
+      saveBtn.toggleAttribute('disabled', this.busy || !this.o.canManage);
     };
     chars.input.addEventListener('input', sync);
 
     form.addEventListener('submit', (e) => {
       e.preventDefault();
-      const n = Number(chars.value());
-      if (!Number.isFinite(n) || n < sms.min || n > sms.max) {
+      if (this.busy || !this.o.canManage) return;
+      const n = typed();
+      if (!inRange(n)) {
         // Field-level, so the number the person typed stays in front of them
         // while they correct it.
         setFieldError(chars.root,
@@ -319,6 +344,8 @@ export class AdminSettingsView {
         chars.input.focus();
         return;
       }
+      // From the field itself, not only from the last `input` event.
+      this.draft = Math.floor(n);
       void this.save();
     });
 

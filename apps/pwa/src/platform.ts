@@ -38,11 +38,13 @@
  */
 import { skeleton, errorState, emptyState, successNote, bnNum, bnDate } from './view-states.ts';
 import {
-  PlatformOpsView, platBand, plainError, errorCodeOf, isDenied, type Tab,
+  PlatformOpsView, platBand, plainError, errorCodeOf, isDenied, refusalState,
+  titleTarget, focusTitle, type Tab,
 } from './platform-ops.ts';
 import {
-  el, icon, append, uid, numText, button, pageHeader, backLink, sectionHeading,
-  field as uiField, fileUpload, permissionState, type FieldKind,
+  el, icon, lang, append, uid, numText, button, pageHeader, backLink, sectionHeading,
+  field as uiField, fileUpload, setFieldError, clearFieldError, setBusy,
+  keepFocusWithin, focusIsLost, type FieldKind,
 } from './ui/index.ts';
 import { parseUserNumber } from '../../../packages/ui-core/src/format.ts';
 import {
@@ -340,8 +342,24 @@ export class Console_ {
   /** R-8. Null until the readiness screen is opened. */
   private goLive: { checks: GoLiveCheck[]; ready: boolean; blockingRemaining: number } | null = null;
 
+  /**
+   * Which page is on screen — the sign-in, a view, a wizard step. When it
+   * changes, focus moves to the new page's name (see `render`).
+   */
+  private page = '';
+  /** Disposer for the focus keeper on the console's root. */
+  private stopKeeper: () => void = () => {};
+  /** The offline state (§7), kept across redraws. */
+  private readonly offlineBanner: HTMLElement;
+
   constructor(root: HTMLElement) {
     this.root = root;
+    this.offlineBanner = this.buildOfflineBanner();
+    // Every redraw here empties the root and builds it again, which destroys
+    // whatever had focus. The shared keeper puts focus back on the same
+    // control in the new DOM — the app shell arms it on its view; this page
+    // has no shell, so it arms it on its own root.
+    this.stopKeeper = keepFocusWithin(root);
     // Render, and let whichever view is open fetch its own data.
     //
     // This used to call `loadList()` unconditionally, which fetched the
@@ -351,6 +369,28 @@ export class Console_ {
     // product, every time an operator signed in.
     this.render();
     if (this.token && this.key && this.view === 'list') void this.loadList();
+  }
+
+  /**
+   * The offline state (§7): the app shell's warn banner, which this page
+   * never had. With the network gone the sign-in form said nothing, and a
+   * press of প্রবেশ opened the console onto nothing but an error card. The
+   * console queues nothing, so there is no count, and the sentence is the
+   * shell's for a screen whose work needs the connection.
+   */
+  private buildOfflineBanner(): HTMLElement {
+    const d = this.doc;
+    const banner = el(d, 'p', { className: 'offline-banner', attrs: { role: 'status' } },
+      icon(d, 'wifi-off', 'offline-icon'),
+      el(d, 'span', {
+        className: 'offline-text', text: 'ইন্টারনেট নেই — এই পাতার কাজ সংরক্ষণ করতে সংযোগ লাগবে',
+      }));
+    const win = d.defaultView;
+    const sync = (): void => { banner.hidden = win?.navigator.onLine !== false; };
+    sync();
+    win?.addEventListener('online', sync);
+    win?.addEventListener('offline', sync);
+    return banner;
   }
 
   // ── Transport ─────────────────────────────────────────────────────────
@@ -448,6 +488,70 @@ export class Console_ {
    * not a school's app — and never a school's logo (D11).
    */
   private render(): void {
+    const ours = this.holdsFocus();
+    this.draw();
+    const page = this.pageKey();
+    if (page === this.page) {
+      // The same page, redrawn. The keeper puts focus back on the control
+      // that had it. When that control is not on the new page and nothing is
+      // still loading that could bring it back (a sort header whose name
+      // changed with the order, a band whose count changed), the keeper can
+      // only park focus on the whole console, and the next Tab starts again
+      // at the top of the sidebar. The page's name is the better place.
+      if (ours && !this.loading && !this.busy) this.titleIfLost();
+      return;
+    }
+    const first = this.page === '';
+    this.page = page;
+    // Not on the first draw: moving focus then would take it from wherever
+    // the browser restored it.
+    if (!first) this.enterPage(focusIsLost(this.doc));
+  }
+
+  /**
+   * Is keyboard focus the console's to look after? On something inside it,
+   * or parked on it by the keeper. Focus on <body> is where the person put
+   * it, or where the keeper is waiting for a busy control to come back; and
+   * focus in a drawer belongs to the drawer.
+   */
+  private holdsFocus(): boolean {
+    const a = this.doc.activeElement;
+    if (!a || a === this.doc.body || a === this.doc.documentElement) return false;
+    return this.root.contains(a);
+  }
+
+  /**
+   * After a redraw, and after the keeper has had its turn (its observer was
+   * queued by the redraw, so it runs first): if focus still has nowhere to
+   * be, give it the page's name.
+   */
+  private titleIfLost(): void {
+    queueMicrotask(() => {
+      if (focusIsLost(this.doc)) focusTitle(this.root);
+    });
+  }
+
+  /** The page on screen, as far as focus is concerned. */
+  private pageKey(): string {
+    if (!this.token || !this.key) return 'signin';
+    return this.view === 'wizard' ? `wizard:${this.step}` : this.view;
+  }
+
+  /**
+   * A different page is on screen: the keeper starts again (so a control
+   * from the old page is never matched against the new one), and focus goes
+   * to the new page's name — as the app shell moves it into each new route.
+   * Without this a sidebar press, a sign-in or "সেশন শেষ" left focus on
+   * <body>: a screen reader heard nothing, and the next Tab started again at
+   * the top of the sidebar.
+   */
+  private enterPage(moveFocus: boolean): void {
+    this.stopKeeper();
+    this.stopKeeper = keepFocusWithin(this.root);
+    if (moveFocus) focusTitle(this.root);
+  }
+
+  private draw(): void {
     const d = this.doc;
     this.root.replaceChildren();
     const signedIn = Boolean(this.token && this.key);
@@ -470,9 +574,24 @@ export class Console_ {
           className: 'plat-nav-item',
           attrs: { type: 'button', 'aria-current': key === current ? 'page' : null },
         }, icon(d, glyph, 'plat-nav-glyph'), el(d, 'span', { className: 'plat-nav-label', text: label }));
+        // Below 1024px the rows are one strip that scrolls sideways with no
+        // scrollbar. A row reached by Tab was left half off the edge (at
+        // 320px only অপারেটর's icon showed); bring it fully into view.
+        b.addEventListener('focus', () => {
+          if (typeof b.scrollIntoView === 'function') {
+            b.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+          }
+        });
         b.addEventListener('click', () => {
-          this.view = 'ops'; this.error = ''; this.render();
+          // Already in operations, only the section changes: the section is
+          // redrawn and the sidebar is left alone. Rebuilding the whole shell
+          // for it destroyed the very row that was pressed.
+          if (this.view !== 'ops') { this.view = 'ops'; this.error = ''; this.draw(); }
           this.opsView?.showSection(key);
+          this.page = this.pageKey();
+          // A section is a new page: focus goes to its name, whether or not
+          // the row that was pressed survived.
+          this.enterPage(true);
         });
         this.navButtons.set(key, b);
         nav.append(b);
@@ -497,6 +616,11 @@ export class Console_ {
             // with the old credential). The next visit builds a fresh view,
             // which loads with the new one.
             this.opsView = null; this.opsHost = null;
+            // Nor may anything the session said: a failed load's error (in the
+            // server's English, too) sat under the fresh sign-in form as an
+            // alert, and a success notice or the fleet's counts would greet
+            // the next operator.
+            this.error = ''; this.errorCode = ''; this.notice = ''; this.summary = null;
             this.token = ''; this.key = ''; this.view = 'list'; this.render();
           },
         })));
@@ -507,14 +631,18 @@ export class Console_ {
 
     const main = d.createElement('main');
     main.className = 'platform-main';
+    main.append(this.offlineBanner);
     this.root.append(main);
 
-    if (!this.token || !this.key) { this.renderSignIn(main); return; }
-    if (this.view === 'ops') { this.renderOps(main); return; }
-    if (this.view === 'readiness') { this.renderReadiness(main); return; }
-    if (this.view === 'wizard') { this.renderWizard(main); return; }
-    if (this.view === 'detail') { this.renderDetail(main); return; }
-    this.renderList(main);
+    if (!this.token || !this.key) this.renderSignIn(main);
+    else if (this.view === 'ops') this.renderOps(main);
+    else if (this.view === 'readiness') this.renderReadiness(main);
+    else if (this.view === 'wizard') this.renderWizard(main);
+    else if (this.view === 'detail') this.renderDetail(main);
+    else this.renderList(main);
+    // Every page's name: where a page change puts focus, and a place the
+    // keeper can find again when a load redraws the page.
+    titleTarget(main);
   }
 
   /**
@@ -618,24 +746,111 @@ export class Console_ {
 
     const tokenField = this.field('অপারেটর টোকেন (super_admin JWT)', 'password', this.token);
     const keyField = this.field('PLATFORM_API_KEY', 'password', this.key);
+    // The English in the two names is read by an English voice (04-UIUX §5).
+    tokenField.wrap.querySelector('.ui-field-label > span')
+      ?.replaceChildren('অপারেটর টোকেন (', lang(d, 'en', 'super_admin JWT'), ')');
+    keyField.wrap.querySelector('.ui-field-label > span')?.setAttribute('lang', 'en');
+    const fields = [tokenField, keyField];
     form.append(tokenField.wrap, keyField.wrap);
 
-    form.append(button(d, { label: 'প্রবেশ', variant: 'primary', type: 'submit' }));
+    const submit = button(d, {
+      label: 'প্রবেশ', variant: 'primary', type: 'submit',
+      attrs: { 'data-focus-key': 'plat-signin' },
+    });
+    form.append(submit);
 
     if (this.error) form.append(errorState(d, this.error));
 
+    // A refused pair, said on the form it was typed into. The server will not
+    // say which of the two was wrong (platform-svc answers a bad key and a bad
+    // token alike, on purpose), so the words name both and both fields are
+    // marked. Cleared the moment either is edited, like a field's own error.
+    let refusal: HTMLElement | null = null;
+    const clearRefusal = (): void => {
+      if (!refusal) return;
+      refusal.remove();
+      refusal = null;
+      for (const f of fields) {
+        f.wrap.classList.remove('is-error');
+        delete f.wrap.dataset.invalid;
+        f.input.removeAttribute('aria-invalid');
+        f.input.removeAttribute('aria-describedby');
+      }
+    };
+    for (const f of fields) f.input.addEventListener('input', clearRefusal);
+
     form.addEventListener('submit', (e) => {
       e.preventDefault();
-      this.token = tokenField.input.value.trim();
-      this.key = keyField.input.value.trim();
-      if (!this.token || !this.key) { this.error = 'দুটোই দিতে হবে।'; this.render(); return; }
-      sessionStorage.setItem('shikhon_platform_token', this.token);
-      sessionStorage.setItem('shikhon_platform_key', this.key);
-      void this.loadList();
+      if (submit.disabled) return;
+      const token = tokenField.input.value.trim();
+      const key = keyField.input.value.trim();
+
+      // Checked in place. This used to set an error and redraw the whole
+      // page, which destroyed the field or button the operator was on (focus
+      // fell to <body>) and said "দুটোই দিতে হবে।" even when one was given.
+      clearRefusal();
+      for (const f of fields) clearFieldError(f.wrap);
+      if (!token) setFieldError(tokenField.wrap, 'অপারেটর টোকেন দিন।');
+      if (!key) setFieldError(keyField.wrap, 'PLATFORM_API_KEY দিন।');
+      if (!token || !key) { (token ? keyField : tokenField).input.focus(); return; }
+
+      setBusy(submit, true);
+      void this.signIn(token, key).then((entered) => {
+        if (entered || !submit.isConnected) return;
+        setBusy(submit, false);
+        refusal = errorState(d,
+          'টোকেন বা কী গ্রহণ করা হয়নি। দুটোই ঠিকভাবে দেওয়া হয়েছে কি না দেখে আবার প্রবেশ করুন।');
+        const words = refusal.querySelector<HTMLElement>('[role="alert"]');
+        if (words) words.id = uid('plat-refused');
+        submit.after(refusal);
+        for (const f of fields) {
+          f.wrap.classList.add('is-error');
+          f.wrap.dataset.invalid = 'true';
+          f.input.setAttribute('aria-invalid', 'true');
+          if (words) f.input.setAttribute('aria-describedby', words.id);
+        }
+        tokenField.input.focus();
+      });
     });
     main.append(platBand(d, 'plat-form-band',
       el(d, 'p', { className: 'plat-note', text: 'প্ল্যাটফর্ম টোকেন ও কী দিন। এগুলো শুধু এই সেশনে থাকে।' }),
       form));
+  }
+
+  /**
+   * Check a pasted token and key before the console takes them.
+   *
+   * They used to be stored and treated as a sign-in the moment they were
+   * typed. A mistyped key drew the whole signed-in console — sidebar,
+   * sections, "সেশন শেষ" — around a grey "অনুমতি নেই" card, and survived a
+   * reload because it was already in sessionStorage.
+   *
+   * `readiness` is the check because it is the cheapest request the platform
+   * answers: the same authorisation as every other, and no query behind it.
+   * Only a REFUSAL keeps the operator on the form. A network failure or a
+   * deployment that is not configured says nothing about the credential, so
+   * the console opens as before and shows that failure with its retry.
+   *
+   * Resolves true when the console was entered.
+   */
+  private async signIn(token: string, key: string): Promise<boolean> {
+    try {
+      await this.call('readiness', {
+        headers: { 'Authorization': `Bearer ${token}`, 'X-Platform-Key': key },
+      });
+    } catch (e) {
+      if (isDenied(errorCodeOf(e))) return false;
+    }
+    sessionStorage.setItem('shikhon_platform_token', token);
+    sessionStorage.setItem('shikhon_platform_key', key);
+    this.token = token; this.key = key;
+    this.error = ''; this.errorCode = '';
+    // The operations view fetches its own data when it is built. Calling
+    // loadList() here as well fetched the provisioning list and the summary a
+    // second time on every sign-in, for a list that was not on screen.
+    if (this.view === 'list') void this.loadList();
+    else this.render();
+    return true;
   }
 
   // ── The institution list ──────────────────────────────────────────────
@@ -711,7 +926,9 @@ export class Console_ {
       void this.loadList();
     });
     main.append(searchForm);
-    main.append(this.attentionBar());
+    // Not over a failure that read nothing: "জরুরি ০টি" above an error card
+    // reads as "nothing is urgent" when nothing was counted.
+    if (!(this.error && !this.summary)) main.append(this.attentionBar());
 
     if (this.notice) main.append(platBand(d, 'plat-flash', successNote(d, this.notice)));
     if (this.loading) { main.append(platBand(d, 'plat-loading', skeleton(d, 4))); return; }
@@ -777,6 +994,9 @@ export class Console_ {
         active ? (this.fleet.dir === 'desc' ? 'descending' : 'ascending') : 'none');
       const b = d.createElement('button');
       b.type = 'button';
+      // Its words and its name change with the order; the column does not.
+      // Without a stable key the focus keeper lost it on every sort.
+      b.setAttribute('data-focus-key', `fleet-sort:${c.sort}`);
       b.className = 'fleet-sort' + (active ? ' is-active' : '');
       b.textContent = c.bn + (active ? (this.fleet.dir === 'desc' ? ' ↓' : ' ↑') : '');
       b.setAttribute('aria-label',
@@ -810,12 +1030,12 @@ export class Console_ {
 
   /**
    * A failed load, as a state (§7). A refusal is B-30's canonical sentence
-   * with no retry — the way out is "সেশন শেষ" — and anything else is the
-   * error with "আবার চেষ্টা করুন".
+   * with no retry, the way out ("সেশন শেষ") named under it, and announced;
+   * anything else is the error with "আবার চেষ্টা করুন".
    */
   private loadProblem(retry: () => void): HTMLElement {
     return isDenied(this.errorCode)
-      ? permissionState(this.doc)
+      ? refusalState(this.doc)
       : errorState(this.doc, this.error, retry);
   }
 
@@ -843,6 +1063,8 @@ export class Console_ {
     const mk = (key: string, label: string, n: number): HTMLElement => {
       const b = d.createElement('button');
       b.type = 'button';
+      // The count in its words changes with every load; the band does not.
+      b.setAttribute('data-focus-key', `fleet-band:${key || 'all'}`);
       const on = this.filterBand === key;
       b.className = `fleet-band fleet-band-${key || 'all'}${on ? ' is-on' : ''}`;
       b.setAttribute('aria-pressed', on ? 'true' : 'false');
@@ -1685,6 +1907,9 @@ export class Console_ {
     const f = uiField(this.doc, {
       label, name: uid('pf'), kind: type as FieldKind, value, helper: hint || undefined,
     });
+    // The name is minted fresh on every draw, so it cannot tell the focus
+    // keeper that this is the same field; the label can.
+    f.input.setAttribute('data-focus-key', `pf:${label}`);
     return { wrap: f.root, input: f.input as HTMLInputElement };
   }
 
@@ -1695,6 +1920,7 @@ export class Console_ {
       label, name: uid('pf'), kind: 'select', value,
       options: Object.entries(options).map(([v, t]) => ({ value: v, label: t })),
     });
+    f.input.setAttribute('data-focus-key', `pf:${label}`);
     return { wrap: f.root, input: f.input as HTMLSelectElement };
   }
 
@@ -1724,6 +1950,8 @@ export class Console_ {
     row.append(button(d, {
       label: this.busy ? 'অপেক্ষা করুন…' : nextLabel, variant: nextVariant,
       disabled: this.busy,
+      // Its words change while busy; the keeper still knows it is this button.
+      attrs: { 'data-focus-key': 'plat-next' },
       onClick: () => { void onNext(); },
     }));
     main.append(row);

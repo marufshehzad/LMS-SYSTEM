@@ -50,7 +50,7 @@ import {
   permissionMessage, permissionState, pageHeader, sectionHeading, buttonRow, button,
   iconButton, badge, card, dataTable, statusBadge, field, setFieldError, clearFieldError,
   el, append, clear, icon, numText, uid, list, listItem, listSkeleton,
-  openOverlay, confirmOverlay, serverMessage,
+  openOverlay, confirmOverlay, serverMessage, focusIsLost,
   type Field, type Crumb, type OverlayHandle,
 } from './ui/index.ts';
 
@@ -143,6 +143,37 @@ type Depth =
   | { at: 'section'; sectionId: string }
   | { at: 'student'; sectionId: string; studentId: string };
 
+/**
+ * Where focus lands when a move between depths finishes drawing.
+ *
+ * Every move here repaints the whole screen, which throws away the control
+ * that was pressed. Going IN, the new depth's heading takes focus, so a
+ * screen reader says where the person now is and the next Tab starts on
+ * that page. Going BACK, the row they came from takes it — the section in
+ * the tree, the student in the roster — so a principal working down forty
+ * children does not have to find their place again after every one.
+ */
+type FocusTarget =
+  | { to: 'heading' }
+  | { to: 'section-row'; sectionId: string }
+  | { to: 'student-row'; studentId: string };
+
+/**
+ * `enrolments.status` (migration 003) in Bangla — the same words
+ * students-view.ts uses, except `active`, which this screen has always
+ * called সক্রিয়. An unknown value still shows as itself rather than vanish.
+ */
+const ENROLMENT_BN: Record<string, string> = {
+  active: 'সক্রিয়',
+  promoted: 'উন্নীত',
+  transferred: 'বদলি',
+  left: 'ছেড়েছে',
+  detained: 'একই শ্রেণিতে',
+};
+function enrolmentBn(status: string): string {
+  return Object.prototype.hasOwnProperty.call(ENROLMENT_BN, status) ? ENROLMENT_BN[status] : status;
+}
+
 /** One thing a row lets you do: inline on a desktop row, a sheet item on a phone. */
 interface NodeAction {
   glyph: string;
@@ -219,6 +250,14 @@ export class AcademicView {
    * otherwise open it out of sight — a press that seems to do nothing.
    */
   private focusForm = false;
+  /**
+   * Where focus goes once the depth being opened has drawn (see FocusTarget).
+   * Kept across the skeleton render and cleared by the first render that is
+   * not loading: the row a person came back to only exists once the section
+   * has loaded, and the loaded render rebuilds the heading the skeleton's
+   * focus was on.
+   */
+  private focusAfter: FocusTarget | null = null;
 
   constructor(options: AcademicViewOptions) {
     this.o = options;
@@ -251,8 +290,14 @@ export class AcademicView {
     }
   }
 
-  private async openSection(sectionId: string): Promise<void> {
+  /**
+   * `focus` is for a MOVE to this section (from the tree, or back from a
+   * student). A re-read after a write passes nothing: the person is still
+   * where they were, and pulling them up to the heading would lose that.
+   */
+  private async openSection(sectionId: string, focus: FocusTarget | null = null): Promise<void> {
     this.depth = { at: 'section', sectionId };
+    this.focusAfter = focus;
     this.panel = 'none'; this.selected.clear();
     this.loading = true; this.error = ''; this.detail = null; this.render();
     try {
@@ -271,6 +316,8 @@ export class AcademicView {
     const sectionId = this.depth.at === 'section' || this.depth.at === 'student'
       ? this.depth.sectionId : '';
     this.depth = { at: 'student', sectionId, studentId };
+    // Only ever reached from a roster row: always a move inward.
+    this.focusAfter = { to: 'heading' };
     this.loading = true; this.error = ''; this.student = null; this.render();
     try {
       const res = await this.o.auth.authedFetch(
@@ -437,15 +484,92 @@ export class AcademicView {
     }
   }
 
-  /** Out of a section or a student, back to the tree with its branch open. */
-  private backToTree(classId: string | undefined): void {
+  /**
+   * Out of a section or a student, back to the tree with its branch open and
+   * the section's own row focused — the place the person left from.
+   */
+  private backToTree(sectionId: string): void {
+    const classId = this.findSection(sectionId)?.classId;
     this.depth = { at: 'tree' };
     if (classId) this.expandForClass(classId);
     this.error = ''; this.notice = '';
+    this.focusAfter = { to: 'section-row', sectionId };
     this.render();
   }
 
+  /** Out of a student, back to its section, on that student's roster row. */
+  private backToSection(sectionId: string, studentId: string): void {
+    void this.openSection(sectionId, { to: 'student-row', studentId });
+  }
+
   private render(): void {
+    this.paint();
+    this.landFocus();
+  }
+
+  /**
+   * Put focus where the move that just drew meant it to go (FocusTarget).
+   *
+   * Only focus this screen's own repaint threw away is moved: lost (on
+   * `<body>`, or parked by the shell's keeper) or still inside the root.
+   * Someone who went on to the sidebar during a slow load stays there.
+   * While loading, the heading holds focus; the row, when there is one, takes
+   * it on the render that brings the data. A row that is no longer there (the
+   * student was moved out) falls back to the heading.
+   */
+  private landFocus(): void {
+    const target = this.focusAfter;
+    if (!target) return;
+    if (!this.loading) this.focusAfter = null;
+    const d = this.o.doc;
+    const root = this.o.root;
+    const active = d.activeElement;
+    if (!focusIsLost(d) && !(active && root.contains(active))) return;
+
+    if (target.to !== 'heading' && !this.loading) {
+      // The roster draws each row twice — a table row and a phone list item —
+      // and CSS hides one. A hidden control refuses focus, so the first one
+      // that takes it is the one on screen.
+      for (const control of this.landingControls(target)) {
+        if (this.focusOn(control)) {
+          control.scrollIntoView?.({ block: 'center' });
+          return;
+        }
+      }
+    }
+    const h1 = root.querySelector<HTMLElement>('h1');
+    if (!h1) return;
+    if (!h1.hasAttribute('tabindex')) h1.setAttribute('tabindex', '-1');
+    this.focusOn(h1);
+    // A new depth starts at its top, as a new route does (shell.ts). Bare
+    // `scrollTo`, as there: jsdom's window has one that only complains.
+    try { scrollTo({ top: 0 }); } catch { /* not a browser */ }
+  }
+
+  /** The row control(s) a back move returns to, in the DOM just drawn. */
+  private landingControls(target: FocusTarget): HTMLElement[] {
+    const root = this.o.root;
+    if (target.to === 'section-row' && this.depth.at === 'tree') {
+      const node = [...root.querySelectorAll<HTMLElement>('li.ac-node')]
+        .find((li) => li.dataset.node === `S:${target.sectionId}`);
+      const hit = node?.querySelector<HTMLElement>('.ac-node-hit');
+      return hit ? [hit] : [];
+    }
+    if (target.to === 'student-row' && this.depth.at === 'section') {
+      return [...root.querySelectorAll<HTMLElement>('.ac-roster [data-key]')]
+        .filter((row) => row.dataset.key === target.studentId)
+        .map((row) => row.querySelector<HTMLElement>('button.ui-row-open, button.ui-list-hit'))
+        .filter((b): b is HTMLElement => b !== null);
+    }
+    return [];
+  }
+
+  private focusOn(node: HTMLElement): boolean {
+    try { node.focus({ preventScroll: true }); } catch { /* not focusable */ }
+    return this.o.doc.activeElement === node;
+  }
+
+  private paint(): void {
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';
@@ -548,7 +672,7 @@ export class AcademicView {
     if (depth.at !== 'tree') {
       crumbs.push({
         label: 'একাডেমিক কাঠামো',
-        onClick: () => this.backToTree(this.findSection(depth.sectionId)?.classId),
+        onClick: () => this.backToTree(depth.sectionId),
       });
     }
     if (depth.at === 'student') {
@@ -560,7 +684,7 @@ export class AcademicView {
       if (found) {
         crumbs.push({
           label: `সেকশন ${found.name}`,
-          onClick: () => void this.openSection(depth.sectionId),
+          onClick: () => this.backToSection(depth.sectionId, depth.studentId),
         });
       }
     }
@@ -604,8 +728,8 @@ export class AcademicView {
         onClick: () => {
           this.notice = '';
           const now = this.depth;
-          if (now.at === 'student') void this.openSection(now.sectionId);
-          else if (now.at === 'section') this.backToTree(this.findSection(now.sectionId)?.classId);
+          if (now.at === 'student') this.backToSection(now.sectionId, now.studentId);
+          else if (now.at === 'section') this.backToTree(now.sectionId);
         },
       }));
     }
@@ -769,7 +893,7 @@ export class AcademicView {
         : `${bnNum(sec.studentCount)} জন`,
       glyph: 'users',
       expandable: false,
-      onOpen: () => void this.openSection(sec.id),
+      onOpen: () => void this.openSection(sec.id, { to: 'heading' }),
       flag: sec.classTeacher ? null : statusBadge(d, { state: 'pending', label: 'শিক্ষক নেই' }),
       actions: [{
         glyph: 'edit',
@@ -1081,6 +1205,8 @@ export class AcademicView {
 
     root.append(dataTable(d, {
       caption: `সেকশন ${det.section.name} — শিক্ষার্থীর তালিকা`,
+      // A hook, not a style: coming back from a student finds their row here.
+      className: 'ac-roster',
       rows: det.roster,
       rowKey: (r) => r.studentId,
       // While selecting for a move, the row must NOT navigate: a tap that
@@ -1107,7 +1233,7 @@ export class AcademicView {
         { key: 'status', header: 'অবস্থা', mobile: 'status', width: '120px',
           cell: (r) => statusBadge(d, {
             state: r.status === 'active' ? 'published' : 'overdue',
-            label: r.status === 'active' ? 'সক্রিয়' : r.status,
+            label: enrolmentBn(r.status),
           }) },
       ],
     }));
@@ -1395,7 +1521,8 @@ export class AcademicView {
         { key: 'status', header: 'অবস্থা', mobile: 'status', width: '120px',
           cell: (h) => statusBadge(d, {
             state: h.status === 'active' ? 'published' : 'draft',
-            label: h.status === 'active' ? 'সক্রিয়' : h.status,
+            // A past year's word, not the column's English ("promoted").
+            label: enrolmentBn(h.status),
           }) },
       ],
     }));

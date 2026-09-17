@@ -113,7 +113,7 @@ export function tabs(doc: Document, o: {
     if (item.count !== undefined) {
       append(b, el(doc, 'span', { className: 'ui-tab-count n', text: toBanglaDigits(item.count) }));
     }
-    b.addEventListener('click', () => o.onSelect(item.id));
+    b.addEventListener('click', () => { o.onSelect(item.id); refocus(b, item.id); });
     buttons.push(b);
     append(strip, b);
   });
@@ -129,9 +129,26 @@ export function tabs(doc: Document, o: {
     else if (key === 'End') next = buttons.length - 1;
     if (next < 0) return;
     e.preventDefault();
-    buttons[next].focus();
-    o.onSelect(buttons[next].dataset.id!);
+    const target = buttons[next];
+    target.focus();
+    o.onSelect(target.dataset.id!);
+    refocus(target, target.dataset.id!);
   });
+
+  /**
+   * Most callers answer `onSelect` by rebuilding their view, strip included,
+   * which removes the tab that was just pressed and drops focus to <body> —
+   * the arrow keys then work exactly once. When that happened, focus goes to
+   * the rebuilt strip's tab with the same id (its roving tabindex is already
+   * 0, because it is now the selected one). Nothing moves when the strip
+   * survived, or when focus is already somewhere the person put it.
+   */
+  function refocus(pressed: HTMLElement, id: string): void {
+    if (pressed.isConnected) return;
+    const a = doc.activeElement;
+    if (a && a !== doc.body && a !== doc.documentElement) return;
+    doc.getElementById(`tab-${id}`)?.focus({ preventScroll: true });
+  }
 
   return strip;
 }

@@ -30,7 +30,10 @@
  * app is framework-free by decision (D1/D3) and its views own their rendering.
  */
 
-export { el, append, icon, lang, clear, uid, resetUid, numText, numClass, hasDigit } from './dom.ts';
+export {
+  el, append, icon, lang, clear, uid, resetUid, numText, numClass, hasDigit,
+  keepFocusWithin, focusIsLost,
+} from './dom.ts';
 export type { Child, ElProps } from './dom.ts';
 
 export { button, iconButton, buttonRow, setBusy, onClickBusy } from './button.ts';
@@ -59,7 +62,7 @@ export {
 export type { Column, TableOptions, MobileRole } from './table.ts';
 
 export {
-  openOverlay, openDrawer, confirmOverlay, setOverlayBody,
+  openOverlay, openDrawer, confirmOverlay, setOverlayBody, closeAllOverlays,
 } from './overlay.ts';
 export type { OverlayOptions, OverlayHandle, OverlayKind } from './overlay.ts';
 

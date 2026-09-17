@@ -44,7 +44,7 @@ import {
   serverMessage, pageHeader, field as uiField, setFieldError, clearFieldError,
   permissionState, permissionMessage, button, buttonRow, statusBadge, emptyState,
   errorState, successNote, listSkeleton, irreversiblePanel, el, icon, uid, clear,
-  append, numText, numClass, type Field,
+  append, numText, numClass, focusIsLost, type Field,
 } from './ui/index.ts';
 
 /**
@@ -85,6 +85,38 @@ interface Estimate {
   confirmThreshold: number; needsConfirmation: boolean;
 }
 
+/**
+ * The preview reply, checked before anything reads it — or null.
+ *
+ * Every figure here goes through `toBnGrouped`, which throws on a missing
+ * number. A reply without them (the demo answered `?preview=1` with the
+ * publish reply, `{noticeId, status, recipients}`) threw out of `syncLive`
+ * inside the typing listener, freezing the counter and the send button, and
+ * out of `render` after the root was emptied, leaving a blank screen where the
+ * typed notice had been. A reply that is not an estimate is no estimate: a
+ * dash on screen, the same as offline.
+ *
+ * `needsConfirmation` fails closed: a reply that leaves it out, but whose own
+ * numbers are over the threshold, still gets the gate.
+ */
+function readEstimate(raw: unknown): Estimate | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const count = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+  const recipients = count(r.recipients);
+  const smsRecipients = count(r.smsRecipients);
+  const segmentsEach = count(r.segmentsEach);
+  const segmentsTotal = count(r.segmentsTotal);
+  const confirmThreshold = count(r.confirmThreshold);
+  if (recipients === null || smsRecipients === null || segmentsEach === null
+    || segmentsTotal === null || confirmThreshold === null) return null;
+  return {
+    recipients, smsRecipients, segmentsEach, segmentsTotal, confirmThreshold,
+    needsConfirmation: r.needsConfirmation === true || segmentsTotal > confirmThreshold,
+  };
+}
+
 export class NoticeComposeView {
   private readonly o: NoticeComposeOptions;
   private title = '';
@@ -104,6 +136,13 @@ export class NoticeComposeView {
    * with nothing on screen saying so.
    */
   private estimate: Estimate | null = null;
+  /**
+   * The estimate the drawn irreversible panel states; null while none is
+   * drawn. Kept apart from `estimate` because a re-count that fails is not a
+   * small send: the panel stays until the server says the send is small, and
+   * an acknowledgement is checked against the numbers it was given for.
+   */
+  private gate: Estimate | null = null;
   /** Set by the operator, for a send big enough to need saying out loud. */
   private bigSendAcknowledged = false;
   private estimateSeq = 0;
@@ -137,12 +176,17 @@ export class NoticeComposeView {
       : TEACHER_AUDIENCES;
   }
 
+  /**
+   * The section list arrives after the form is on screen — on 2G, seconds
+   * after — and the author may already be typing. So it lands in place, in
+   * the picker, and never rebuilds the fields (see `syncAudience`).
+   */
   private async loadSections(): Promise<void> {
     try {
       const res = await this.o.auth.authedFetch('/api/v1/academics/sections');
       if (!res.ok) {
         this.sectionsState = 'failed';
-        if (this.audienceType === 'section') this.render();
+        this.syncAudience();
         return;
       }
       const body = (await res.json()) as {
@@ -153,11 +197,13 @@ export class NoticeComposeView {
         label: `${s.className?.bn ?? ''} ${s.name}`.trim(),
       }));
       this.sectionsState = 'ready';
-      this.render();
+      this.syncAudience();
+      // The "পাবে:" line names the chosen sections.
+      this.syncLive();
     } catch {
       // The picker says the list could not be fetched, and offers to try again.
       this.sectionsState = 'failed';
-      if (this.audienceType === 'section') this.render();
+      this.syncAudience();
     }
   }
 
@@ -252,6 +298,14 @@ export class NoticeComposeView {
       this.selectedSections.clear();
       this.smsTouched = false;
       this.sendSms = smsDefaultFor(this.category);
+      // The figures, the panel and the tick were for the notice just sent.
+      // Kept, the empty form showed that send's counts ticked, and the next
+      // notice to the same audience at the same length (same totals) went out
+      // on the old tick. A reply still on its way was for that notice too.
+      this.estimateSeq++;
+      this.estimate = null;
+      this.gate = null;
+      this.bigSendAcknowledged = false;
       this.o.onPublished?.();
     } catch {
       // Offline, not a refusal: the warn tone, and the typed notice is kept.
@@ -332,7 +386,6 @@ export class NoticeComposeView {
   /** Refresh only the parts that depend on the body: never re-render mid-type. */
   private syncLive(): void {
     const root = this.o.root;
-    const est = this.estimate;
     const live = this.liveText();
 
     const recipients = root.querySelector<HTMLElement>('[data-estimate-recipients]');
@@ -356,15 +409,15 @@ export class NoticeComposeView {
     if (line) this.fill(line, this.audienceSentence());
 
     // The acknowledgement shows what the estimate says NOW. A changed estimate
-    // has already revoked the flag (refreshEstimate); the box and the counts
+    // has already revoked the flag (applyEstimate); the box and the counts
     // beside it say so instead of showing last send's numbers ticked.
     const gate = root.querySelector<HTMLElement>('[data-big-send]');
-    if (gate && est) {
+    if (gate && this.gate) {
       const texts = gate.querySelectorAll<HTMLElement>('.irrev-item-text');
-      this.ackItems(est).forEach((t, i) => { if (texts[i]) this.fill(texts[i], t); });
-      const box = gate.querySelector<HTMLInputElement>('input[type=checkbox]');
-      if (box && box.checked !== this.bigSendAcknowledged) box.checked = this.bigSendAcknowledged;
+      this.ackItems(this.gate).forEach((t, i) => { if (texts[i]) this.fill(texts[i], t); });
     }
+    const box = gate?.querySelector<HTMLInputElement>('input[type=checkbox]');
+    if (box && box.checked !== this.bigSendAcknowledged) box.checked = this.bigSendAcknowledged;
 
     const send = root.querySelector<HTMLButtonElement>('[data-send]');
     // R-8 §4. A send large enough to be a mistake needs the mistake said out
@@ -373,8 +426,7 @@ export class NoticeComposeView {
   }
 
   private sendDisabled(): boolean {
-    const blockedByScale = this.estimate?.needsConfirmation === true
-      && !this.bigSendAcknowledged;
+    const blockedByScale = this.gate !== null && !this.bigSendAcknowledged;
     return this.busy || !this.title.trim() || !this.body.trim() || blockedByScale;
   }
 
@@ -401,32 +453,68 @@ export class NoticeComposeView {
         }),
       });
       if (seq !== this.estimateSeq) return;
-      if (!res.ok) { this.estimate = null; this.syncLive(); return; }
-      const next = await res.json() as Estimate;
+      if (!res.ok) { this.applyEstimate(null); return; }
+      const next = readEstimate(await res.json());
       if (seq !== this.estimateSeq) return;
-      // A changed audience invalidates an acknowledgement: saying yes to
-      // "৮টি এসএমএস" must not carry over to "৪,৫০০টি".
-      if (this.estimate && next.segmentsTotal !== this.estimate.segmentsTotal) {
-        this.bigSendAcknowledged = false;
-      }
-      // A full render when the GATE changes, not just the numbers.
-      //
-      // `syncLive` updates text and button state in place — it does not build
-      // the acknowledgement panel, which exists only in `render`. So an
-      // estimate that arrived and flipped `needsConfirmation` to true disabled
-      // the send button and drew nothing to re-enable it: a dead end, and a
-      // worse outcome than having no gate at all. Caught by the test that asks
-      // for the checkbox after a large estimate.
-      const gateChanged = (this.estimate?.needsConfirmation ?? false)
-        !== next.needsConfirmation;
-      this.estimate = next;
-      if (gateChanged) this.render(); else this.syncLive();
+      this.applyEstimate(next);
     } catch {
       // Offline: no estimate rather than a wrong one. The send button stays
       // enabled — the composer already works offline and the server counts
       // again at publish.
-      if (seq === this.estimateSeq) { this.estimate = null; this.syncLive(); }
+      if (seq === this.estimateSeq) this.applyEstimate(null);
     }
+  }
+
+  /**
+   * Put an estimate on screen. It lands while the author is typing — 400 ms
+   * after a pause — so it never rebuilds the form.
+   *
+   * It used to call `render()` whenever `needsConfirmation` flipped. That
+   * emptied the root and rebuilt the title and body under the caret: focus
+   * fell to <body>, a phone's keyboard closed, the next keys went nowhere, and
+   * a Bangla keyboard's composition was cut mid-word. And because the demo's
+   * reply had no `needsConfirmation`, `false !== undefined` made that happen on
+   * every pause. The panel is the only part the gate changes, so the panel is
+   * the only part rebuilt (`swapPanel`); everything else updates in place.
+   */
+  private applyEstimate(next: Estimate | null): void {
+    this.estimate = next;
+    // No count is not a small count: a panel already drawn stays, and its
+    // acknowledgement with it, until the server says otherwise.
+    if (next === null) { this.syncLive(); return; }
+    const was = this.gate;
+    // A changed send invalidates an acknowledgement: saying yes to
+    // "৮টি এসএমএস" must not carry over to "৪,৫০০টি".
+    if (was && next.segmentsTotal !== was.segmentsTotal) this.bigSendAcknowledged = false;
+    this.gate = next.needsConfirmation ? next : null;
+    // `syncLive` updates text and button state in place — it cannot build the
+    // acknowledgement panel. An estimate that turned the gate on and drew
+    // nothing would disable Send with nothing to re-enable it: a dead end.
+    if ((was === null) !== (this.gate === null)) this.swapPanel();
+    else this.syncLive();
+  }
+
+  /**
+   * Rebuild the panel beside Send, and only the panel: the fields are never
+   * touched, so the caret, the phone keyboard and an IME composition survive.
+   *
+   * If focus was inside the old panel (on Send, or on the tick), it goes to
+   * what now needs doing: the tick when the gate has just appeared, Send when
+   * it has just gone.
+   */
+  private swapPanel(): void {
+    const d = this.o.doc;
+    const old = this.o.root.querySelector<HTMLElement>('.compose-panel');
+    if (!old) return;
+    const active = d.activeElement;
+    const hadFocus = !!active && old.contains(active);
+    const next = this.buildPanel(d);
+    old.replaceWith(next);
+    if (!hadFocus || !focusIsLost(d)) return;
+    const target = next.querySelector<HTMLInputElement>('[data-big-send] input[type=checkbox]')
+      ?? next.querySelector<HTMLButtonElement>('[data-send]');
+    // A disabled Send cannot take focus; the shell's focus keeper waits for it.
+    if (target && !target.disabled) target.focus({ preventScroll: true });
   }
 
   /**
@@ -484,7 +572,11 @@ export class NoticeComposeView {
       const chip = el(d, 'button', {
         className: 'audience-chip',
         text: AUDIENCE_LABELS_BN[a],
-        attrs: { type: 'button', 'aria-pressed': String(this.audienceType === a) },
+        data: { audience: a },
+        attrs: {
+          type: 'button', 'aria-pressed': String(this.audienceType === a),
+          'data-focus-key': `compose-audience-${a}`,
+        },
       });
       chip.addEventListener('click', () => {
         this.audienceType = a;
@@ -492,50 +584,18 @@ export class NoticeComposeView {
         // acknowledgement of the previous one.
         this.bigSendAcknowledged = false;
         void this.refreshEstimate();
-        this.render();
+        // In place, not render(): the pressed chip keeps focus. A rebuild
+        // dropped focus to <body>, the next Tab landed on "সবাই" at the top,
+        // and Enter there silently widened the audience to everyone.
+        this.syncAudience();
+        this.syncLive();
       });
       chips.append(chip);
     }
     wrap.append(chips);
 
-    if (this.audienceType === 'section') {
-      const list = el(d, 'div', { className: 'audience-sections' });
-      if (this.sectionsState === 'loading') {
-        list.append(listSkeleton(d, 3));
-      } else if (this.sectionsState === 'failed') {
-        list.append(errorState(d, 'শাখার তালিকা আনা যায়নি।', () => {
-          this.sectionsState = 'loading';
-          this.render();
-          void this.loadSections();
-        }));
-      } else if (this.sections.length === 0) {
-        list.append(emptyState(d, {
-          glyph: 'users',
-          message: 'এখনো কোনো শাখা নেই।',
-          detail: 'শাখা তৈরি হলে এখানে বাছাই করা যাবে।',
-          action: this.isManagement()
-            ? {
-              label: 'শাখা তৈরি করুন',
-              onClick: () => { const w = d.defaultView; if (w) w.location.hash = '#/academic'; },
-            }
-            : undefined,
-        }));
-      }
-      for (const s of this.sectionsState === 'ready' ? this.sections : []) {
-        const box = el(d, 'input', { attrs: { type: 'checkbox' } });
-        box.checked = this.selectedSections.has(s.id);
-        box.addEventListener('change', () => {
-          if (box.checked) this.selectedSections.add(s.id);
-          else this.selectedSections.delete(s.id);
-          this.bigSendAcknowledged = false;
-          void this.refreshEstimate();
-          this.syncLive();
-        });
-        list.append(el(d, 'label', { className: 'audience-section' },
-          box, el(d, 'span', {}, ...numText(d, s.label))));
-      }
-      wrap.append(list);
-    }
+    const list = this.sectionsList(d);
+    if (list) wrap.append(list);
 
     if (this.fieldError?.field === 'audience') {
       wrap.append(el(d, 'p', {
@@ -543,6 +603,76 @@ export class NoticeComposeView {
       }, ...numText(d, this.fieldError.message)));
     }
     return wrap;
+  }
+
+  /** For a section audience, the list under the chips in its three states; otherwise null. */
+  private sectionsList(d: Document): HTMLElement | null {
+    if (this.audienceType !== 'section') return null;
+    const list = el(d, 'div', { className: 'audience-sections' });
+    if (this.sectionsState === 'loading') {
+      list.append(listSkeleton(d, 3));
+    } else if (this.sectionsState === 'failed') {
+      list.append(errorState(d, 'শাখার তালিকা আনা যায়নি।', () => {
+        this.sectionsState = 'loading';
+        this.syncAudience();
+        void this.loadSections();
+      }));
+    } else if (this.sections.length === 0) {
+      list.append(emptyState(d, {
+        glyph: 'users',
+        message: 'এখনো কোনো শাখা নেই।',
+        detail: 'শাখা তৈরি হলে এখানে বাছাই করা যাবে।',
+        action: this.isManagement()
+          ? {
+            label: 'শাখা তৈরি করুন',
+            onClick: () => { const w = d.defaultView; if (w) w.location.hash = '#/academic'; },
+          }
+          : undefined,
+      }));
+    }
+    for (const s of this.sectionsState === 'ready' ? this.sections : []) {
+      const box = el(d, 'input', { attrs: { type: 'checkbox' } });
+      box.checked = this.selectedSections.has(s.id);
+      box.addEventListener('change', () => {
+        if (box.checked) this.selectedSections.add(s.id);
+        else this.selectedSections.delete(s.id);
+        this.bigSendAcknowledged = false;
+        void this.refreshEstimate();
+        this.syncLive();
+      });
+      list.append(el(d, 'label', { className: 'audience-section', data: { id: s.id } },
+        box, el(d, 'span', {}, ...numText(d, s.label))));
+    }
+    return list;
+  }
+
+  /**
+   * The chips' pressed state and the section list under them, in place.
+   *
+   * Used for a chip press, the section list arriving, and its retry — none of
+   * which may rebuild the title or body someone is typing in. If focus was in
+   * the old list (the retry button, now a skeleton), it goes to the pressed
+   * chip just above rather than to <body>.
+   */
+  private syncAudience(): void {
+    const d = this.o.doc;
+    const root = this.o.root;
+    const chips = root.querySelector<HTMLElement>('.audience-chips');
+    if (!chips) return;
+    for (const chip of chips.querySelectorAll<HTMLElement>('.audience-chip')) {
+      chip.setAttribute('aria-pressed', String(chip.dataset.audience === this.audienceType));
+    }
+    const old = root.querySelector<HTMLElement>('.audience-sections');
+    const active = d.activeElement;
+    const hadFocus = !!old && !!active && old.contains(active);
+    const next = this.sectionsList(d);
+    if (old && next) old.replaceWith(next);
+    else if (old) old.remove();
+    else if (next) chips.after(next);
+    if (hadFocus && focusIsLost(d)) {
+      chips.querySelector<HTMLElement>('.audience-chip[aria-pressed="true"]')
+        ?.focus({ preventScroll: true });
+    }
   }
 
   /** ধরন, এসএমএস, কখন — the three controls the drawing leaves out and the code keeps. */
@@ -559,8 +689,20 @@ export class NoticeComposeView {
         this.category = v as NoticeCategory;
         // The category suggests a default until the author touches the toggle;
         // after that it is theirs.
+        const hadSms = this.sendSms;
         if (!this.smsTouched) this.sendSms = smsDefaultFor(this.category);
-        this.render();
+        if (this.sendSms !== hadSms) {
+          // জরুরি turned SMS on for the author, which is the same change as
+          // ticking the box: it takes the cost from zero to the audience, so
+          // it re-asks now, and a tick given for the old send does not carry
+          // over. Without this the estimate still said "no SMS" — Send stayed
+          // ungated for a 900-phone send until the next pause in typing.
+          this.bigSendAcknowledged = false;
+          void this.refreshEstimate();
+        }
+        // In place: the select keeps focus, so the next ArrowDown moves it
+        // again instead of scrolling the page.
+        this.syncSms();
       },
     });
     if (this.fieldError?.field === 'category') setFieldError(cat.root, this.fieldError.message);
@@ -577,23 +719,32 @@ export class NoticeComposeView {
       },
     });
     at.value = this.publishAt;
-    at.addEventListener('change', () => { this.publishAt = at.value; this.render(); });
+    // Honest about the granularity rather than implying minute precision the
+    // nightly sweeper cannot deliver.
+    const whenHelp = () => (this.publishAt
+      ? 'নির্ধারিত সময়ের পর পরবর্তী রক্ষণাবেক্ষণ চক্রে পাঠানো হবে।'
+      : 'খালি রাখলে এখনই পাঠানো হবে।');
+    const help = el(d, 'p', {
+      className: 'ui-field-help', attrs: { id: whenHelpId }, text: whenHelp(),
+    });
+    at.addEventListener('change', () => {
+      this.publishAt = at.value;
+      // In place: a rebuild threw the field away under the person still
+      // adjusting it, and focus with it. The panel carries the send button,
+      // whose label names the time.
+      help.textContent = whenHelp();
+      this.swapPanel();
+    });
     options.append(el(d, 'div', { className: 'ui-field' },
       el(d, 'label', { className: 'ui-field-label', attrs: { for: whenId } },
         el(d, 'span', { text: 'কখন পাঠানো হবে' })),
       el(d, 'div', { className: 'ui-field-control' }, at),
-      // Honest about the granularity rather than implying minute precision the
-      // nightly sweeper cannot deliver.
-      el(d, 'p', {
-        className: 'ui-field-help',
-        attrs: { id: whenHelpId },
-        text: this.publishAt
-          ? 'নির্ধারিত সময়ের পর পরবর্তী রক্ষণাবেক্ষণ চক্রে পাঠানো হবে।'
-          : 'খালি রাখলে এখনই পাঠানো হবে।',
-      })));
+      help));
 
     // ── How ──
-    const smsBox = el(d, 'input', { attrs: { type: 'checkbox' } });
+    const smsBox = el(d, 'input', {
+      attrs: { type: 'checkbox', 'data-sms-toggle': '', 'data-focus-key': 'compose-sms' },
+    });
     smsBox.checked = this.sendSms;
     smsBox.addEventListener('change', () => {
       this.sendSms = smsBox.checked;
@@ -603,23 +754,67 @@ export class NoticeComposeView {
       // the typing debounce.
       this.bigSendAcknowledged = false;
       void this.refreshEstimate();
-      this.render();
+      // In place: the box keeps focus (a rebuild sent it to <body>).
+      this.syncSms();
     });
     const sms = el(d, 'div', { className: 'compose-sms' },
       // The checkbox stays the label's direct child: the whole row is the target.
       el(d, 'label', { className: 'sms-toggle' },
         smsBox, el(d, 'span', { text: 'মোবাইলে এসএমএসও পাঠান' })),
       el(d, 'p', { className: 'ui-field-help', text: 'অ্যাপের নোটিফিকেশনে সবসময় যাবে।' }));
-    if (this.sendSms) {
-      // SMS is an alert, not the notice. Saying so here is what stops someone
-      // pasting four paragraphs in and wondering why the bill grew.
-      sms.append(el(d, 'p', {
-        className: 'ui-field-help',
-        text: 'এসএমএসে সংক্ষিপ্ত বার্তা যাবে; পুরো নোটিশ অ্যাপে থাকবে।',
-      }));
-    }
+    if (this.sendSms) sms.append(this.smsNote(d));
     options.append(sms);
     return options;
+  }
+
+  /**
+   * SMS is an alert, not the notice. Saying so beside the toggle is what stops
+   * someone pasting four paragraphs in and wondering why the bill grew.
+   */
+  private smsNote(d: Document): HTMLElement {
+    return el(d, 'p', {
+      className: 'ui-field-help',
+      attrs: { 'data-sms-note': '' },
+      text: 'এসএমএসে সংক্ষিপ্ত বার্তা যাবে; পুরো নোটিশ অ্যাপে থাকবে।',
+    });
+  }
+
+  /**
+   * The counter row under the body: characters, and with SMS on the segment
+   * cost and the Bangla 70-character rule.
+   */
+  private countRow(d: Document): HTMLElement {
+    const live = this.liveText();
+    const count = el(d, 'p', { className: 'compose-count' },
+      el(d, 'span', { attrs: { 'data-char-count': '' } }, ...numText(d, live.chars)));
+    if (this.sendSms) {
+      count.append(
+        el(d, 'span', { attrs: { 'data-sms-cost': '', role: 'status' } },
+          ...(live.cost ? numText(d, live.cost) : [])),
+        el(d, 'span', {
+          className: 'compose-count-warn',
+          attrs: { 'data-sms-warn': '', hidden: !live.warn },
+        }, ...numText(d, 'বাংলায় ৭০ অক্ষরে ১টি এসএমএস')));
+    }
+    return count;
+  }
+
+  /**
+   * Everything the SMS toggle decides, in place: the box (a category can set
+   * it), the note beside it, the counter row, the figures. Never the fields.
+   */
+  private syncSms(): void {
+    const d = this.o.doc;
+    const root = this.o.root;
+    const box = root.querySelector<HTMLInputElement>('[data-sms-toggle]');
+    if (box && box.checked !== this.sendSms) box.checked = this.sendSms;
+    const sms = root.querySelector<HTMLElement>('.compose-sms');
+    const note = sms?.querySelector('[data-sms-note]');
+    if (this.sendSms && sms && !note) sms.append(this.smsNote(d));
+    if (!this.sendSms) note?.remove();
+    // The row holds no control, so replacing it cannot move focus.
+    root.querySelector('.compose-count')?.replaceWith(this.countRow(d));
+    this.syncLive();
   }
 
   private render(): void {
@@ -635,7 +830,10 @@ export class NoticeComposeView {
     if (!AUTHOR_ROLES.includes(this.o.auth.role)) {
       root.append(pageHeader(d, { title: 'নোটিশ পাঠান' }));
       root.append(permissionState(d, {
-        message: permissionMessage('নোটিশ পাঠানো'),
+        // No subject: permissionMessage(subject) says "… দেখার অনুমতি", and
+        // "নোটিশ পাঠানো দেখার অনুমতি" (permission to SEE sending) is not the
+        // refusal. The page header already names the task.
+        message: permissionMessage(),
         contact: 'প্রধান শিক্ষক, প্রতিষ্ঠান মালিক, একাডেমিক সমন্বয়ক ও শ্রেণি শিক্ষক',
       }));
       return;
@@ -666,34 +864,28 @@ export class NoticeComposeView {
       }
     }
 
-    const live = this.liveText();
-    const est = this.estimate;
-
     // ── The white body ──────────────────────────────────────────────
     const body = el(d, 'div', { className: 'compose-body' });
     body.append(this.audienceField(d));
     this.field(body, 'শিরোনাম', 'title', { max: NOTICE_LIMITS.title });
     const bf = this.field(body, 'বার্তা', 'body', { multiline: true, max: NOTICE_LIMITS.body });
-
-    const count = el(d, 'p', { className: 'compose-count' },
-      el(d, 'span', { attrs: { 'data-char-count': '' } }, ...numText(d, live.chars)));
-    if (this.sendSms) {
-      count.append(
-        el(d, 'span', { attrs: { 'data-sms-cost': '', role: 'status' } },
-          ...(live.cost ? numText(d, live.cost) : [])),
-        el(d, 'span', {
-          className: 'compose-count-warn',
-          attrs: { 'data-sms-warn': '', hidden: !live.warn },
-        }, ...numText(d, 'বাংলায় ৭০ অক্ষরে ১টি এসএমএস')));
-    }
-    bf.root.append(count);
+    bf.root.append(this.countRow(d));
     body.append(this.optionsBlock(d));
 
-    // ── The panel: what is about to happen, and the one button ─────
-    const gated = est?.needsConfirmation === true;
+    root.append(el(d, 'div', { className: 'compose' }, body, this.buildPanel(d)));
+  }
+
+  /**
+   * The panel: what is about to happen, and the one button. One builder for
+   * render() and swapPanel(), so the first paint and a gate that appears
+   * mid-typing are the same panel.
+   */
+  private buildPanel(d: Document): HTMLElement {
+    const live = this.liveText();
+    const gate = this.gate;
     const panel = el(d, 'div', {
       className: 'compose-panel',
-      attrs: { 'data-gated': gated ? 'true' : null },
+      attrs: { 'data-gated': gate ? 'true' : null },
     });
 
     // Two numbers, and the second is almost always the surprise: everyone
@@ -727,18 +919,20 @@ export class NoticeComposeView {
         : this.publishAt ? 'নির্ধারিত সময়ে পাঠান' : 'পাঠান',
       variant: 'primary',
       busy: this.busy,
-      attrs: { 'data-send': '' },
+      // The label changes (পাঠান / নির্ধারিত সময়ে পাঠান / পাঠানো হচ্ছে…); the
+      // key does not, so the shell's focus keeper finds it across a rebuild.
+      attrs: { 'data-send': '', 'data-focus-key': 'compose-send' },
       onClick: () => { void this.send(); },
     });
 
-    if (gated && est) {
+    if (gate) {
       // Above the threshold the send button is not enough. A notice to a whole
       // school cannot be recalled from nine hundred phones, and the moment to
       // notice that is before the click, not in the invoice.
-      const gate = irreversiblePanel(d, {
+      const irrev = irreversiblePanel(d, {
         statement: 'পাঠানো হয়ে গেলে আর ফেরানো যায় না।',
-        detail: `${toBnGrouped(est.confirmThreshold)}টির বেশি এসএমএস — টিক না দিলে পাঠানো যাবে না।`,
-        items: this.ackItems(est),
+        detail: `${toBnGrouped(gate.confirmThreshold)}টির বেশি এসএমএস — টিক না দিলে পাঠানো যাবে না।`,
+        items: this.ackItems(gate),
         confirm: send,
         actions: [send],
         className: 'compose-irrev',
@@ -747,15 +941,16 @@ export class NoticeComposeView {
           this.syncLive();
         },
       });
-      gate.root.setAttribute('data-big-send', '');
-      gate.input.checked = this.bigSendAcknowledged;
-      panel.append(gate.root);
+      irrev.root.setAttribute('data-big-send', '');
+      // Its id is generated per build; the key survives one.
+      irrev.input.setAttribute('data-focus-key', 'compose-big-send-ack');
+      irrev.input.checked = this.bigSendAcknowledged;
+      panel.append(irrev.root);
     } else {
       panel.append(buttonRow(d, send));
     }
     // After the panel has had its say: busy, empty, and the gate together.
     send.disabled = this.sendDisabled();
-
-    root.append(el(d, 'div', { className: 'compose' }, body, panel));
+    return panel;
   }
 }

@@ -40,13 +40,14 @@
  * is its own bold line under শ্রেণি, never beside the late fee's figures.
  */
 import type { Auth } from './auth.ts';
-import { formatBdt, formatAcademicYear } from '../../../packages/ui-core/src/format.ts';
+import { formatBdt, formatAcademicYear, parseUserNumber } from '../../../packages/ui-core/src/format.ts';
 import { skeleton, errorState, emptyState, successNote, bnNum } from './view-states.ts';
 import { pageHeader } from './ui/page-header.ts';
 import {
   el, append, button, buttonRow, field, dataTable, statusBadge, numText,
   permissionState, permissionMessage, openDrawer, confirmOverlay,
-  setBusy, announce, type OverlayHandle, type Column, type Child,
+  setBusy, announce, setFieldError, clearFieldError, focusIsLost,
+  type OverlayHandle, type Column, type Child, type Field,
 } from './ui/index.ts';
 
 interface Structure {
@@ -106,6 +107,13 @@ export class FeeStructuresView {
   private busy = false;
   private yearId = '';
   private search = '';
+  /**
+   * The list's frame, rebuilt on its own while someone types in the search.
+   * Null whenever the last render drew no list.
+   */
+  private frame: HTMLElement | null = null;
+  /** The header's "নতুন ফি", where focus goes when its place is gone. */
+  private newButton: HTMLButtonElement | null = null;
 
   // Declared and assigned rather than a `private readonly o` parameter
   // property: Node's type-stripping test runner rejects those outright, so a
@@ -204,6 +212,7 @@ export class FeeStructuresView {
     const d = this.o.doc;
     const root = this.o.root;
     root.textContent = '';
+    this.frame = null;
 
     // The drawn bar: the title, and — exactly when the old in-page controls
     // appeared (loaded, allowed, a year to work in) — the search, the
@@ -211,15 +220,16 @@ export class FeeStructuresView {
     // or yearless, the title stands alone.
     const ready = !this.loading && !this.planBlocked && !this.denied
       && this.data?.academicYearId ? this.data : null;
+    this.newButton = ready?.canManage
+      ? button(d, {
+        label: 'নতুন ফি', variant: 'primary', size: 'sm', disabled: this.busy,
+        onClick: () => this.openForm(null),
+      })
+      : null;
     root.append(pageHeader(d, {
       title: 'ফি নির্ধারণ',
       actions: ready ? this.controls(ready) : undefined,
-      primary: ready?.canManage
-        ? button(d, {
-          label: 'নতুন ফি', variant: 'primary', size: 'sm', disabled: this.busy,
-          onClick: () => this.openForm(null),
-        })
-        : undefined,
+      primary: this.newButton ?? undefined,
     }));
 
     if (this.planBlocked) {
@@ -258,8 +268,24 @@ export class FeeStructuresView {
 
     // One frame, as drawn: the list (or what stands in for it), and the note
     // joined under it over a 2px rule.
-    const frame = el(d, 'div', { className: 'card fs-frame' });
-    root.append(frame);
+    this.frame = el(d, 'div', { className: 'card fs-frame' });
+    root.append(this.frame);
+    this.renderList(data);
+  }
+
+  /**
+   * The frame's contents — the only part of the screen the search changes.
+   *
+   * Typing rebuilds this and nothing else. It used to rebuild the whole
+   * screen, header included, so the search box was replaced under the first
+   * letter: focus fell to <body>, a phone closed its keyboard, and a Bangla
+   * keyboard's composition was cut off — "নবম" came out as "ন".
+   */
+  private renderList(data: Body): void {
+    const d = this.o.doc;
+    const frame = this.frame;
+    if (!frame) return;
+    frame.textContent = '';
 
     const rows = this.visible();
     if (rows.length === 0) {
@@ -390,7 +416,12 @@ export class FeeStructuresView {
     const search = field(d, {
       label: 'খুঁজুন', name: 'q', kind: 'search', value: this.search,
       placeholder: 'ফি বা শ্রেণির নাম', className: 'fs-search',
-      onInput: (v) => { this.search = v; this.render(); },
+      // The list only, never render(): the box itself must survive the
+      // keystroke (see renderList).
+      onInput: (v) => {
+        this.search = v;
+        if (this.data) this.renderList(this.data);
+      },
     });
     // The drawn chip reads "শিক্ষাবর্ষ ২০২৬", and so does this select's value.
     // It keeps the sheet's input look (R1): a chip there is a static label —
@@ -434,8 +465,29 @@ export class FeeStructuresView {
     return row;
   }
 
+  /**
+   * Focus somewhere sensible once the overlay now closing is gone, if nothing
+   * else could.
+   *
+   * The shell's focus keeper puts focus back on the rebuilt opener — the new
+   * "নতুন ফি", the same row's সম্পাদনা — and that is left alone. What it
+   * cannot do is find a control that no longer exists: the row a delete took
+   * away, or the empty state's "প্রথম ফি নির্ধারণ করুন" once the first fee is
+   * saved. Focus then waits on the page, and the next Tab starts from the
+   * top. This listener is added after the keeper's, so it runs after it, and
+   * only acts when focus is still lost.
+   */
+  private refocusAfterClose(): void {
+    const d = this.o.doc;
+    d.addEventListener('ui:overlay-closed', () => {
+      if (!focusIsLost(d)) return;
+      const target = this.newButton;
+      if (target?.isConnected && !target.disabled) target.focus();
+    }, { once: true });
+  }
+
   private confirmRemove(r: Structure): void {
-    confirmOverlay(this.o.doc, {
+    const handle = confirmOverlay(this.o.doc, {
       title: `${r.headBn} সরাবেন?`,
       // The question an accountant will actually ask, answered before they
       // have to ask it. invoice_lines stores its own amounts and does not
@@ -449,6 +501,9 @@ export class FeeStructuresView {
         // Set after `send` resolves: its own `load()` would have cleared it.
         const msg = await this.send('DELETE', { id: r.id }, 'সরানো হয়েছে।');
         if (msg) { this.error = msg; this.render(); }
+        // The confirm closes as soon as this resolves, and the row's সরান it
+        // would hand focus back to is gone after a delete.
+        if (handle.el.isConnected) this.refocusAfterClose();
       },
     });
   }
@@ -528,13 +583,38 @@ export class FeeStructuresView {
       label: existing ? 'সংরক্ষণ করুন' : 'নির্ধারণ করুন',
       variant: 'primary',
       onClick: async () => {
-        const num = (v: string) => (v.trim() === '' ? null : Number(v));
-        const payload: Record<string, unknown> = {
-          amount: Number(amount.input.value),
-          dueDayOfMonth: num(dueDay.input.value),
-          lateFeePerDay: num(lateFee.input.value) ?? 0,
-          lateFeeCap: num(lateCap.input.value),
+        errLine.setAttribute('hidden', 'hidden');
+        // Every figure is read in either numeral system: the boxes open a
+        // numeric keypad, and Bijoy or Avro in Bangla mode types ০–৯ on it.
+        // Number('১৫০০') is NaN, which JSON sends as null — and the server
+        // reads a null amount as "keep the old price" and a null due day or
+        // cap as "clear it", then answers 200. So nothing is sent while a box
+        // holds something that is not a number: the box says so instead.
+        const invalid: Array<{ f: Field; message: string }> = [];
+        /** A box's figure; null when empty. `empty` set: the box is required. */
+        const read = (f: Field, empty: string | null, unreadable: string): number | null => {
+          clearFieldError(f.root);
+          const raw = f.input.value.trim();
+          const value = raw === '' ? null : parseUserNumber(raw);
+          const message = raw === '' ? empty : value === null ? unreadable : null;
+          if (message !== null) invalid.push({ f, message });
+          return value;
         };
+        const payload: Record<string, unknown> = {
+          // Required: an emptied amount used to go out as Number('') = 0.
+          amount: read(amount, 'টাকার অঙ্ক লিখুন।', 'টাকার অঙ্ক শুধু সংখ্যায় লিখুন।'),
+          // The server's own sentence for a due day it will not take.
+          dueDayOfMonth: read(dueDay, null, 'শেষ তারিখ ১ থেকে ২৮-এর মধ্যে দিন।'),
+          lateFeePerDay: read(lateFee, null, 'দৈনিক বিলম্ব ফি শুধু সংখ্যায় লিখুন।') ?? 0,
+          lateFeeCap: read(lateCap, null, 'বিলম্ব ফির সর্বোচ্চ সীমা শুধু সংখ্যায় লিখুন।'),
+        };
+        if (invalid.length) {
+          for (const x of invalid) setFieldError(x.f.root, x.message);
+          // The first wrong box takes focus, so the drawer keeps it and a
+          // reader hears the box's name with its error.
+          invalid[0].f.input.focus();
+          return;
+        }
         if (existing) {
           payload.id = existing.id;
         } else {
@@ -544,7 +624,6 @@ export class FeeStructuresView {
           payload.classId = cls === '' ? null : cls;
         }
 
-        errLine.setAttribute('hidden', 'hidden');
         setBusy(save, true);
         // The drawer closes only once the server has accepted it. It used to
         // close here, before the request was even sent, so a refusal looked
@@ -553,6 +632,11 @@ export class FeeStructuresView {
           existing ? 'সংরক্ষণ করা হয়েছে।' : 'নির্ধারণ করা হয়েছে।');
         setBusy(save, false);
         if (!msg) { handle.close(); return; }
+        // Disabling the pressed button for the request dropped focus to
+        // <body>, behind the drawer: Tab then walked the hidden page and
+        // Escape left focus nowhere. It goes back to the button just pressed,
+        // inside the drawer, before the refusal is shown.
+        if (handle.el.isConnected) save.focus();
         // The server's sentence can carry a figure ("২৮"): numbers in the
         // numeral face (R6), the text itself unchanged.
         errLine.textContent = '';
@@ -567,6 +651,9 @@ export class FeeStructuresView {
       title: existing ? `${existing.headBn} সম্পাদনা` : 'নতুন ফি নির্ধারণ',
       body: form,
       actions: [cancel, save],
+      // A save re-reads the list, so the button that opened this drawer has
+      // been rebuilt by the time it closes — see refocusAfterClose.
+      onClose: () => this.refocusAfterClose(),
     });
   }
 }

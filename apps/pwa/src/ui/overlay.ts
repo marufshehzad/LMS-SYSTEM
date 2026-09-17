@@ -97,6 +97,28 @@ export interface OverlayOptions {
   className?: string;
   /** Where to mount. Defaults to `document.body`. */
   mount?: HTMLElement;
+  /** Id of the element that describes the dialog (`aria-describedby`). */
+  describedBy?: string;
+}
+
+/**
+ * Every overlay currently open, by its close function.
+ *
+ * An overlay is mounted on `document.body`, outside any route, so a route
+ * change leaves it standing over the next page — Android back would change
+ * the page underneath an invoice sheet and keep the sheet. The shell calls
+ * `closeAllOverlays()` when it navigates.
+ */
+const openCloses = new Set<() => void>();
+
+/**
+ * Close every open overlay, newest first. Each one returns focus and runs its
+ * `onClose` exactly as a × press would. The shell calls this on navigation,
+ * AFTER a route's leave guard has let the navigation through — a guard's own
+ * confirm must survive the hash being written back.
+ */
+export function closeAllOverlays(): void {
+  for (const close of [...openCloses].reverse()) close();
 }
 
 export interface OverlayHandle {
@@ -125,6 +147,7 @@ export function openOverlay(doc: Document, o: OverlayOptions): OverlayHandle {
       role: o.alert ? 'alertdialog' : 'dialog',
       'aria-modal': 'true',
       'aria-labelledby': titleId,
+      'aria-describedby': o.describedBy,
       tabindex: '-1',
     },
   });
@@ -183,6 +206,7 @@ export function openOverlay(doc: Document, o: OverlayOptions): OverlayHandle {
   function close(): void {
     if (closed) return;
     closed = true;
+    openCloses.delete(close);
     doc.removeEventListener('keydown', onKey, true);
     scrim.remove();
     for (const [node, prev] of hidden) {
@@ -193,7 +217,15 @@ export function openOverlay(doc: Document, o: OverlayOptions): OverlayHandle {
     // sheet resumes at the top of the document, having lost their place.
     opener?.focus?.();
     o.onClose?.();
+    // The opener may have been rebuilt while the overlay was open (a list that
+    // re-rendered behind a sheet). `keepFocusWithin` listens for this and puts
+    // focus on the opener's replacement instead of leaving it on <body>.
+    try {
+      const Ev = doc.defaultView?.Event;
+      if (Ev) doc.dispatchEvent(new Ev('ui:overlay-closed'));
+    } catch { /* no event constructor: nothing is listening either */ }
   }
+  openCloses.add(close);
 
   // Focus the first real control, or the dialog itself if it has none.
   const firstControl = dialog.querySelector<HTMLElement>(FOCUSABLE);
@@ -240,12 +272,16 @@ export function confirmOverlay(doc: Document, o: {
       finally { setBusy(confirm, false); }
     },
   });
+  // The consequence sentence is what the dialog is FOR; a screen reader that
+  // announces only the title and "বাতিল, button" has hidden it.
+  const textId = uid('dlg-text');
   handle = openOverlay(doc, {
     title: o.title,
-    body: textEl(doc, 'p', 'ui-dialog-text', o.body),
+    body: textEl(doc, 'p', 'ui-dialog-text', o.body, { id: textId }),
     actions: [cancel, confirm],
     alert: true,
     dismissible: false,
+    describedBy: textId,
     kind: 'auto',
     mount: o.mount,
   });
